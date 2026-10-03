@@ -1,0 +1,235 @@
+"""
+Shared model-calling layer, carried over from project-ultimatum.
+
+Contract (unchanged from the first study):
+  * every call goes through OpenRouter and is logged to logs/raw_calls.jsonl
+    with a session_id, the messages, the raw response and token usage
+  * structured JSON output only — never regex-parse a decision
+  * degenerate payloads (e.g. {"action": -1}) are never coded as decisions:
+    they are re-requested and counted
+  * seeds are stable across processes and models (crc32, never hash())
+
+The API key is read from ../.env (OPENROUTER_API_KEY), shared with the other
+projects in this folder; it is not copied here.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import threading
+import time
+import zlib
+from pathlib import Path
+
+import httpx
+from dotenv import load_dotenv
+from openai import OpenAI
+
+load_dotenv(Path(__file__).parent.parent / ".env")
+
+PROJECT_DIR = Path(__file__).parent
+LOG_PATH = PROJECT_DIR / "logs" / "raw_calls.jsonl"
+
+MODELS = {
+    "haiku":  "anthropic/claude-haiku-4.5",
+    "gemma":  "google/gemma-4-31b-it",
+    "gptoss": "openai/gpt-oss-120b",
+}
+
+DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
+JEV_MODEL = "typesafe/jev-1.13"
+SPAN_MODEL = "respan/span-01"
+
+_client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ["OPENROUTER_API_KEY"],
+    timeout=60.0,
+    max_retries=0,  # we handle retries ourselves
+)
+
+_http = httpx.Client(
+    timeout=60.0,
+    headers={
+        "Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}",
+        "Content-Type": "application/json",
+        "X-Title": "GABM public goods",
+    },
+)
+
+_log_lock = threading.Lock()
+_RETRY_STATUS = {408, 409, 429, 500, 502, 503, 504}
+
+
+def stable_seed(namespace: str, *parts, base: int = 0) -> int:
+    """Seed that is identical across processes, models and conditions."""
+    key = "|".join([namespace, *map(str, parts)])
+    return base + zlib.crc32(key.encode()) % 1_000_000
+
+
+def _append_log(record: dict) -> None:
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with _log_lock:
+        with open(LOG_PATH, "a") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _usage_dict(u) -> dict | None:
+    if u is None:
+        return None
+    try:
+        return u.model_dump()
+    except Exception:
+        return None
+
+
+def _parse_json_strict(raw: str) -> dict:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # Fallback for models that wrap JSON in prose — logged as degraded.
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not m:
+            raise
+        return json.loads(m.group(0))
+
+
+def call_llm(
+    model: str,
+    messages: list[dict],
+    *,
+    schema: dict,
+    session_id: str,
+    temperature: float = 0.4,
+    max_tokens: int = 500,
+    max_retries: int = 4,
+) -> dict:
+    """Call OpenRouter with structured JSON output. Retries on transient errors."""
+    augmented = list(messages)
+    augmented[-1] = {
+        **augmented[-1],
+        "content": (
+            augmented[-1]["content"]
+            + "\n\nRespond with ONLY a JSON object matching this schema:\n"
+            + json.dumps(schema, ensure_ascii=False)
+        ),
+    }
+
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            resp = _client.chat.completions.create(
+                model=model,
+                messages=augmented,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+                extra_headers={"X-Title": "GABM public goods"},
+                extra_body={"session_id": session_id[:256]},
+            )
+            raw = resp.choices[0].message.content
+            parsed = _parse_json_strict(raw)
+            _append_log({
+                "ts": time.time(), "model": model, "session_id": session_id,
+                "temperature": temperature, "messages": messages,
+                "response_raw": raw, "response_parsed": parsed,
+                "usage": _usage_dict(getattr(resp, "usage", None)),
+                "attempt": attempt,
+            })
+            return parsed
+        except Exception as e:
+            last_err = e
+            time.sleep(1.5 * (attempt + 1))
+    _append_log({
+        "ts": time.time(), "model": model, "session_id": session_id,
+        "error": str(last_err), "attempt": max_retries, "messages": messages,
+    })
+    raise RuntimeError(f"LLM call failed after {max_retries} attempts: {last_err}")
+
+
+def call_llm_valid(
+    model: str,
+    messages: list[dict],
+    *,
+    schema: dict,
+    session_id: str,
+    is_valid,
+    temperature: float = 0.4,
+    max_tokens: int = 500,
+    max_invalid: int = 3,
+) -> tuple[dict, int]:
+    """call_llm, re-requesting payloads for which is_valid(parsed) is False.
+
+    Returns (parsed, n_invalid). Invalid payloads are never coded as decisions;
+    store n_invalid with the row and report it.
+    """
+    call: dict = {}
+    for n_invalid in range(max_invalid + 1):
+        call = call_llm(model, messages, schema=schema, session_id=session_id,
+                        temperature=temperature, max_tokens=max_tokens)
+        if is_valid(call):
+            return call, n_invalid
+    raise RuntimeError(f"{max_invalid + 1} invalid payloads in a row: {call!r}")
+
+
+def call_decisions(
+    state: dict | str,
+    questions: dict,
+    *,
+    session_id: str,
+    model: str = JEV_MODEL,
+    max_retries: int = 4,
+) -> dict:
+    """Typed-question call to a decision model (Jev, Span-01) for text coding.
+
+    Span-01 accepts only noul questions and a plain-string (or input/output
+    span) state; Jev accepts any JSON state. Returns the full response dict.
+    """
+    body = {"model": model, "state": state, "questions": questions}
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            resp = _http.post(DECISIONS_URL, json=body)
+            if resp.status_code in _RETRY_STATUS:
+                raise httpx.HTTPStatusError(
+                    f"retryable {resp.status_code}: {resp.text[:300]}",
+                    request=resp.request, response=resp,
+                )
+            if resp.status_code != 200:
+                _append_log({
+                    "ts": time.time(), "model": model, "endpoint": "alpha/decisions",
+                    "session_id": session_id, "state": state, "questions": questions,
+                    "error": f"{resp.status_code}: {resp.text[:1000]}", "attempt": attempt,
+                })
+                raise RuntimeError(f"decision call rejected ({resp.status_code}): {resp.text[:500]}")
+            data = resp.json()
+            _append_log({
+                "ts": time.time(), "model": model, "model_snapshot": data.get("model"),
+                "endpoint": "alpha/decisions", "session_id": session_id,
+                "state": state, "questions": questions, "response_raw": data,
+                "usage": data.get("usage"), "attempt": attempt,
+            })
+            return data
+        except (httpx.TransportError, httpx.HTTPStatusError) as e:
+            last_err = e
+            time.sleep(1.5 * (attempt + 1))
+    _append_log({
+        "ts": time.time(), "model": model, "endpoint": "alpha/decisions",
+        "session_id": session_id, "error": str(last_err), "attempt": max_retries,
+        "state": state, "questions": questions,
+    })
+    raise RuntimeError(f"decision call failed after {max_retries} attempts: {last_err}")
+
+
+if __name__ == "__main__":
+    # Plumbing check: one tiny call per generating model.
+    schema = {"type": "object", "required": ["answer"],
+              "properties": {"answer": {"type": "string", "enum": ["ok"]}}}
+    for key, slug in MODELS.items():
+        out, n_bad = call_llm_valid(
+            slug, [{"role": "user", "content": "Reply with the word ok."}],
+            schema=schema, session_id=f"pgg-plumbing-{key}",
+            is_valid=lambda c: isinstance(c.get("answer"), str), max_tokens=50)
+        print(key, out, "invalid payloads:", n_bad)
+    print("seed check:", stable_seed("demo", "weird", 10, 0))

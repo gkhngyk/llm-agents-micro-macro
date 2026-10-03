@@ -1,0 +1,13 @@
+# environments and secrets
+.venv/
+.env
+__pycache__/
+*.pyc
+.DS_Store
+.claude/
+
+# full raw API log (contains an account id); publish a redacted copy instead
+logs/raw_calls.jsonl
+
+# unpacked human data; re-create with: unzip data/herrmann2008/HerrmannThoeniGaechter.zip -d data/herrmann2008/raw
+data/herrmann2008/raw/
