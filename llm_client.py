@@ -68,6 +68,12 @@ _http = httpx.Client(
     },
 )
 
+# Reasoning models: reasoning tokens count against max_tokens on most providers
+# (OpenRouter docs: reasoning-tokens, parameters). A low limit returns empty or
+# half-finished content with finish_reason "length", billed anyway. The first
+# study's 500 is far too low for the reasoning models used here.
+DEFAULT_MAX_TOKENS = 16000
+
 _log_lock = threading.Lock()
 _RETRY_STATUS = {408, 409, 429, 500, 502, 503, 504}
 
@@ -83,6 +89,25 @@ def _append_log(record: dict) -> None:
     with _log_lock:
         with open(LOG_PATH, "a") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def temperature_label(temperature: float | None) -> float | str:
+    """What the logs record: the number sent, or "default" when none was sent."""
+    return "default" if temperature is None else temperature
+
+
+def augment_with_schema(messages: list[dict], schema: dict) -> list[dict]:
+    """Copy of messages whose last one also asks for ONLY a JSON object of schema."""
+    augmented = list(messages)
+    augmented[-1] = {
+        **augmented[-1],
+        "content": (
+            augmented[-1]["content"]
+            + "\n\nRespond with ONLY a JSON object matching this schema:\n"
+            + json.dumps(schema, ensure_ascii=False)
+        ),
+    }
+    return augmented
 
 
 def _usage_dict(u) -> dict | None:
@@ -131,8 +156,8 @@ def _call_llm_counted(
     *,
     schema: dict,
     session_id: str,
-    temperature: float = 0.4,
-    max_tokens: int = 500,
+    temperature: float | None = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
     max_retries: int = 4,
 ) -> tuple[dict, int]:
     """call_llm that also returns the number of parse failures it retried.
@@ -140,15 +165,9 @@ def _call_llm_counted(
     Returns (parsed, n_parse_fail). If every attempt fails, the RuntimeError
     carries the count in its n_parse_fail attribute.
     """
-    augmented = list(messages)
-    augmented[-1] = {
-        **augmented[-1],
-        "content": (
-            augmented[-1]["content"]
-            + "\n\nRespond with ONLY a JSON object matching this schema:\n"
-            + json.dumps(schema, ensure_ascii=False)
-        ),
-    }
+    augmented = augment_with_schema(messages, schema)
+    # temperature=None: not sent, the provider's own default applies.
+    extra = {} if temperature is None else {"temperature": temperature}
 
     last_err = None
     n_parse_fail = 0
@@ -159,8 +178,8 @@ def _call_llm_counted(
             resp = _client.chat.completions.create(
                 model=model,
                 messages=augmented,
-                temperature=temperature,
                 max_tokens=max_tokens,
+                **extra,
                 response_format={"type": "json_object"},
                 extra_headers={"X-Title": "GABM public goods"},
                 extra_body={"session_id": session_id[:256]},
@@ -176,7 +195,7 @@ def _call_llm_counted(
                 n_parse_fail += 1
             record = {
                 "ts": time.time(), "model": model, "session_id": session_id,
-                "temperature": temperature, "messages": messages,
+                "temperature": temperature_label(temperature), "messages": messages,
                 "error_type": type(e).__name__, "error_kind": kind,
                 "error": str(e), "attempt": attempt, "retrying": True,
             }
@@ -187,7 +206,7 @@ def _call_llm_counted(
             continue
         _append_log({
             "ts": time.time(), "model": model, "session_id": session_id,
-            "temperature": temperature, "messages": messages,
+            "temperature": temperature_label(temperature), "messages": messages,
             "response_raw": raw, "response_parsed": parsed,
             "usage": _usage_dict(getattr(resp, "usage", None)),
             "model_snapshot": getattr(resp, "model", None),
@@ -213,11 +232,14 @@ def call_llm(
     *,
     schema: dict,
     session_id: str,
-    temperature: float = 0.4,
-    max_tokens: int = 500,
+    temperature: float | None = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
     max_retries: int = 4,
 ) -> dict:
     """Call OpenRouter with structured JSON output. Retries on transient errors.
+
+    temperature=None (default) is not sent, so the provider's own default
+    applies and the log says "default"; an explicit number is sent and logged.
 
     Every failed attempt is logged with error_type (exception class name) and
     error_kind (transport / http / parse / other; status_code for http). Parse
@@ -237,8 +259,8 @@ def call_llm_valid(
     schema: dict,
     session_id: str,
     is_valid,
-    temperature: float = 0.4,
-    max_tokens: int = 500,
+    temperature: float | None = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
     max_invalid: int = 3,
     return_parse_fail: bool = False,
 ) -> tuple[dict, int] | tuple[dict, int, int]:
@@ -326,7 +348,7 @@ if __name__ == "__main__":
         out, n_bad, n_pf = call_llm_valid(
             slug, [{"role": "user", "content": "Reply with the word ok."}],
             schema=schema, session_id=f"pgg-plumbing-{key}",
-            is_valid=lambda c: isinstance(c.get("answer"), str), max_tokens=50,
+            is_valid=lambda c: isinstance(c.get("answer"), str),
             return_parse_fail=True)
         print(key, out, "invalid payloads:", n_bad, "parse failures:", n_pf)
     print("seed check:", stable_seed("demo", "weird", 10, 0))

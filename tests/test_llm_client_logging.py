@@ -216,6 +216,34 @@ class ParseFailCount(LoggingTestBase):
         self.assertEqual(cm.exception.n_parse_fail, 2)
 
 
+class TemperatureDefault(LoggingTestBase):
+    def test_default_sends_no_temperature_and_logs_default(self):
+        self.create.side_effect = [ValueError("boom"), _resp('{"action": 1}')]
+        self.call()
+        for kwargs in (c.kwargs for c in self.create.call_args_list):
+            self.assertNotIn("temperature", kwargs)
+        self.assertEqual([r["temperature"] for r in self.records()], ["default", "default"])
+
+    def test_explicit_temperature_keeps_old_behaviour(self):
+        self.create.side_effect = [_resp('{"action": 1}')]
+        self.call(temperature=0.7)
+        self.assertEqual(self.create.call_args.kwargs["temperature"], 0.7)
+        self.assertEqual(self.records()[-1]["temperature"], 0.7)
+
+    def test_call_llm_valid_default_also_sends_none(self):
+        self.create.side_effect = [_resp('{"action": 1}')]
+        llm_client.call_llm_valid(
+            "m", MESSAGES, schema=SCHEMA, session_id="s", is_valid=lambda c: True)
+        self.assertNotIn("temperature", self.create.call_args.kwargs)
+        self.assertEqual(self.records()[-1]["temperature"], "default")
+
+    def test_default_max_tokens_is_raised(self):
+        self.create.side_effect = [_resp('{"action": 1}')]
+        self.call()
+        self.assertEqual(self.create.call_args.kwargs["max_tokens"], llm_client.DEFAULT_MAX_TOKENS)
+        self.assertGreater(llm_client.DEFAULT_MAX_TOKENS, 500)
+
+
 class ModelsDict(unittest.TestCase):
     def test_models_are_this_studys_and_old_ones_kept_apart(self):
         self.assertEqual(set(llm_client.MODELS), {"deepseek", "gpt", "gemini"})

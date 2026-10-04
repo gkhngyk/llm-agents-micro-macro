@@ -11,3 +11,6 @@ logs/raw_calls.jsonl
 
 # unpacked human data; re-create with: unzip data/herrmann2008/HerrmannThoeniGaechter.zip -d data/herrmann2008/raw
 data/herrmann2008/raw/
+
+# batch path: batch ids, raw batch downloads (logs/batches.jsonl, logs/batch_raw/)
+logs/
