@@ -84,15 +84,20 @@ def _usage_dict(u) -> dict | None:
         return None
 
 
-def _parse_json_strict(raw: str) -> dict:
+def _parse_json_strict(raw: str) -> tuple[dict, bool]:
+    """Parse a JSON payload; returns (parsed, degraded).
+
+    degraded is True when the prose-wrapping fallback was needed. The fallback
+    behaves as before; it is only labelled so the log shows it.
+    """
     try:
-        return json.loads(raw)
+        return json.loads(raw), False
     except json.JSONDecodeError:
         # Fallback for models that wrap JSON in prose — logged as degraded.
         m = re.search(r"\{.*\}", raw, re.DOTALL)
         if not m:
             raise
-        return json.loads(m.group(0))
+        return json.loads(m.group(0)), True
 
 
 def call_llm(
@@ -118,6 +123,8 @@ def call_llm(
 
     last_err = None
     for attempt in range(max_retries):
+        # Only the API call and the parsing are inside the try: a failing log
+        # write must not trigger a retry (it would bill the same call again).
         try:
             resp = _client.chat.completions.create(
                 model=model,
@@ -129,20 +136,28 @@ def call_llm(
                 extra_body={"session_id": session_id[:256]},
             )
             raw = resp.choices[0].message.content
-            parsed = _parse_json_strict(raw)
+            parsed, degraded = _parse_json_strict(raw)
+        except Exception as e:
+            last_err = e
             _append_log({
                 "ts": time.time(), "model": model, "session_id": session_id,
                 "temperature": temperature, "messages": messages,
-                "response_raw": raw, "response_parsed": parsed,
-                "usage": _usage_dict(getattr(resp, "usage", None)),
-                "attempt": attempt,
+                "error_type": type(e).__name__, "error": str(e),
+                "attempt": attempt, "retrying": True,
             })
-            return parsed
-        except Exception as e:
-            last_err = e
             time.sleep(1.5 * (attempt + 1))
+            continue
+        _append_log({
+            "ts": time.time(), "model": model, "session_id": session_id,
+            "temperature": temperature, "messages": messages,
+            "response_raw": raw, "response_parsed": parsed,
+            "usage": _usage_dict(getattr(resp, "usage", None)),
+            "attempt": attempt, "degraded": degraded,
+        })
+        return parsed
     _append_log({
         "ts": time.time(), "model": model, "session_id": session_id,
+        "error_type": type(last_err).__name__,
         "error": str(last_err), "attempt": max_retries, "messages": messages,
     })
     raise RuntimeError(f"LLM call failed after {max_retries} attempts: {last_err}")
@@ -170,6 +185,11 @@ def call_llm_valid(
                         temperature=temperature, max_tokens=max_tokens)
         if is_valid(call):
             return call, n_invalid
+        _append_log({
+            "ts": time.time(), "model": model, "session_id": session_id,
+            "event": "invalid_payload", "invalid": True,
+            "n_invalid": n_invalid, "response_parsed": call,
+        })
     raise RuntimeError(f"{max_invalid + 1} invalid payloads in a row: {call!r}")
 
 
