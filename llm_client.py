@@ -35,9 +35,9 @@ LOG_PATH = PROJECT_DIR / "logs" / "raw_calls.jsonl"
 
 # Generating models of this study (the `__main__` loop runs over this dict).
 MODELS = {
-    "deepseek": "deepseek/deepseek-v4.1-flash:batch",
-    "gpt":      "openai/gpt-6-luna:batch",
-    "gemini":   "google/gemini-3.8-flash:batch",
+    "deepseek": "deepseek/deepseek-v4.1-flash",
+    "gpt":      "openai/gpt-6-luna",
+    "gemini":   "google/gemini-3.8-flash",
 }
 
 # Record of the first (ultimatum) study. Kept apart from MODELS on purpose, so

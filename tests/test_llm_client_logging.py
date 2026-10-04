@@ -247,7 +247,12 @@ class TemperatureDefault(LoggingTestBase):
 class ModelsDict(unittest.TestCase):
     def test_models_are_this_studys_and_old_ones_kept_apart(self):
         self.assertEqual(set(llm_client.MODELS), {"deepseek", "gpt", "gemini"})
-        self.assertTrue(all(v.endswith(":batch") for v in llm_client.MODELS.values()))
+        self.assertEqual(llm_client.MODELS, {
+            "deepseek": "deepseek/deepseek-v4.1-flash",
+            "gpt": "openai/gpt-6-luna",
+            "gemini": "google/gemini-3.8-flash",
+        })
+        self.assertFalse(any(":" in v for v in llm_client.MODELS.values()))
         self.assertEqual(set(llm_client.MODELS_ULTIMATUM), {"haiku", "gemma", "gptoss"})
         self.assertFalse(set(llm_client.MODELS.values()) & set(llm_client.MODELS_ULTIMATUM.values()))
 
