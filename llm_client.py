@@ -25,6 +25,7 @@ from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
+import openai
 from openai import OpenAI
 
 load_dotenv(Path(__file__).parent.parent / ".env")
@@ -100,7 +101,22 @@ def _parse_json_strict(raw: str) -> tuple[dict, bool]:
         return json.loads(m.group(0)), True
 
 
-def call_llm(
+class _EmptyResponseError(ValueError):
+    """The response content was None or empty, so there was nothing to parse."""
+
+
+def _error_kind(e: Exception) -> str:
+    """Class of a failed attempt: transport, http, parse or other."""
+    if isinstance(e, (openai.APIConnectionError, httpx.TransportError)):
+        return "transport"  # APITimeoutError is a subclass of APIConnectionError
+    if isinstance(e, openai.APIStatusError):
+        return "http"
+    if isinstance(e, (json.JSONDecodeError, _EmptyResponseError)):
+        return "parse"
+    return "other"
+
+
+def _call_llm_counted(
     model: str,
     messages: list[dict],
     *,
@@ -109,8 +125,12 @@ def call_llm(
     temperature: float = 0.4,
     max_tokens: int = 500,
     max_retries: int = 4,
-) -> dict:
-    """Call OpenRouter with structured JSON output. Retries on transient errors."""
+) -> tuple[dict, int]:
+    """call_llm that also returns the number of parse failures it retried.
+
+    Returns (parsed, n_parse_fail). If every attempt fails, the RuntimeError
+    carries the count in its n_parse_fail attribute.
+    """
     augmented = list(messages)
     augmented[-1] = {
         **augmented[-1],
@@ -122,6 +142,7 @@ def call_llm(
     }
 
     last_err = None
+    n_parse_fail = 0
     for attempt in range(max_retries):
         # Only the API call and the parsing are inside the try: a failing log
         # write must not trigger a retry (it would bill the same call again).
@@ -136,15 +157,23 @@ def call_llm(
                 extra_body={"session_id": session_id[:256]},
             )
             raw = resp.choices[0].message.content
+            if raw is None or not raw.strip():
+                raise _EmptyResponseError("empty response content")
             parsed, degraded = _parse_json_strict(raw)
         except Exception as e:
             last_err = e
-            _append_log({
+            kind = _error_kind(e)
+            if kind == "parse":
+                n_parse_fail += 1
+            record = {
                 "ts": time.time(), "model": model, "session_id": session_id,
                 "temperature": temperature, "messages": messages,
-                "error_type": type(e).__name__, "error": str(e),
-                "attempt": attempt, "retrying": True,
-            })
+                "error_type": type(e).__name__, "error_kind": kind,
+                "error": str(e), "attempt": attempt, "retrying": True,
+            }
+            if isinstance(e, openai.APIStatusError):
+                record["status_code"] = e.status_code
+            _append_log(record)
             time.sleep(1.5 * (attempt + 1))
             continue
         _append_log({
@@ -154,13 +183,41 @@ def call_llm(
             "usage": _usage_dict(getattr(resp, "usage", None)),
             "attempt": attempt, "degraded": degraded,
         })
-        return parsed
-    _append_log({
+        return parsed, n_parse_fail
+    final = {
         "ts": time.time(), "model": model, "session_id": session_id,
-        "error_type": type(last_err).__name__,
+        "error_type": type(last_err).__name__, "error_kind": _error_kind(last_err),
         "error": str(last_err), "attempt": max_retries, "messages": messages,
-    })
-    raise RuntimeError(f"LLM call failed after {max_retries} attempts: {last_err}")
+    }
+    if isinstance(last_err, openai.APIStatusError):
+        final["status_code"] = last_err.status_code
+    _append_log(final)
+    err = RuntimeError(f"LLM call failed after {max_retries} attempts: {last_err}")
+    err.n_parse_fail = n_parse_fail
+    raise err
+
+
+def call_llm(
+    model: str,
+    messages: list[dict],
+    *,
+    schema: dict,
+    session_id: str,
+    temperature: float = 0.4,
+    max_tokens: int = 500,
+    max_retries: int = 4,
+) -> dict:
+    """Call OpenRouter with structured JSON output. Retries on transient errors.
+
+    Every failed attempt is logged with error_type (exception class name) and
+    error_kind (transport / http / parse / other; status_code for http). Parse
+    failures are retried; use call_llm_valid(..., return_parse_fail=True) to
+    get their count.
+    """
+    parsed, _ = _call_llm_counted(
+        model, messages, schema=schema, session_id=session_id,
+        temperature=temperature, max_tokens=max_tokens, max_retries=max_retries)
+    return parsed
 
 
 def call_llm_valid(
@@ -173,17 +230,26 @@ def call_llm_valid(
     temperature: float = 0.4,
     max_tokens: int = 500,
     max_invalid: int = 3,
-) -> tuple[dict, int]:
+    return_parse_fail: bool = False,
+) -> tuple[dict, int] | tuple[dict, int, int]:
     """call_llm, re-requesting payloads for which is_valid(parsed) is False.
 
     Returns (parsed, n_invalid). Invalid payloads are never coded as decisions;
-    store n_invalid with the row and report it.
+    store n_invalid with the row and report it. With return_parse_fail=True it
+    returns (parsed, n_invalid, n_parse_fail), where n_parse_fail counts the
+    unparseable responses retried across all calls. It is a separate count: it
+    is not added to n_invalid.
     """
     call: dict = {}
+    n_parse_fail = 0
     for n_invalid in range(max_invalid + 1):
-        call = call_llm(model, messages, schema=schema, session_id=session_id,
-                        temperature=temperature, max_tokens=max_tokens)
+        call, n_pf = _call_llm_counted(
+            model, messages, schema=schema, session_id=session_id,
+            temperature=temperature, max_tokens=max_tokens)
+        n_parse_fail += n_pf
         if is_valid(call):
+            if return_parse_fail:
+                return call, n_invalid, n_parse_fail
             return call, n_invalid
         _append_log({
             "ts": time.time(), "model": model, "session_id": session_id,
@@ -247,9 +313,10 @@ if __name__ == "__main__":
     schema = {"type": "object", "required": ["answer"],
               "properties": {"answer": {"type": "string", "enum": ["ok"]}}}
     for key, slug in MODELS.items():
-        out, n_bad = call_llm_valid(
+        out, n_bad, n_pf = call_llm_valid(
             slug, [{"role": "user", "content": "Reply with the word ok."}],
             schema=schema, session_id=f"pgg-plumbing-{key}",
-            is_valid=lambda c: isinstance(c.get("answer"), str), max_tokens=50)
-        print(key, out, "invalid payloads:", n_bad)
+            is_valid=lambda c: isinstance(c.get("answer"), str), max_tokens=50,
+            return_parse_fail=True)
+        print(key, out, "invalid payloads:", n_bad, "parse failures:", n_pf)
     print("seed check:", stable_seed("demo", "weird", 10, 0))

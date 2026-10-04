@@ -8,6 +8,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import httpx
+import openai
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Dummy key and a no-op load_dotenv, so importing never reads ../.env.
@@ -104,6 +107,104 @@ class CallLlmLogging(LoggingTestBase):
             with self.assertRaises(OSError):
                 self.call()
         self.assertEqual(self.create.call_count, 1)
+
+
+def _status_error(code):
+    req = httpx.Request("POST", "https://example.invalid/v1/chat/completions")
+    return openai.APIStatusError(
+        f"status {code}", response=httpx.Response(code, request=req), body=None)
+
+
+class ErrorKindLogging(LoggingTestBase):
+    def test_connection_error_is_transport(self):
+        req = httpx.Request("POST", "https://example.invalid")
+        self.create.side_effect = [openai.APIConnectionError(request=req), _resp('{"action": 1}')]
+        self.assertEqual(self.call(), {"action": 1})
+        retry = self.records()[0]
+        self.assertEqual(retry["error_kind"], "transport")
+        self.assertEqual(retry["error_type"], "APIConnectionError")
+        self.assertNotIn("status_code", retry)
+
+    def test_timeout_and_httpx_transport_are_transport(self):
+        req = httpx.Request("POST", "https://example.invalid")
+        self.create.side_effect = [
+            openai.APITimeoutError(request=req), httpx.ReadError("reset"), _resp('{"action": 1}')]
+        self.call()
+        self.assertEqual([r["error_kind"] for r in self.records()[:2]], ["transport"] * 2)
+
+    def test_status_error_is_http_with_status_code(self):
+        self.create.side_effect = [_status_error(503), _resp('{"action": 1}')]
+        self.assertEqual(self.call(), {"action": 1})
+        retry = self.records()[0]
+        self.assertEqual(retry["error_kind"], "http")
+        self.assertEqual(retry["status_code"], 503)
+        self.assertEqual(retry["error_type"], "APIStatusError")
+
+    def test_other_error_kind(self):
+        self.create.side_effect = [ValueError("boom"), _resp('{"action": 1}')]
+        self.call()
+        self.assertEqual(self.records()[0]["error_kind"], "other")
+
+    def test_empty_or_none_content_is_parse(self):
+        self.create.side_effect = [_resp(None), _resp(""), _resp('{"action": 1}')]
+        self.assertEqual(self.call(), {"action": 1})
+        retries = self.records()[:2]
+        self.assertEqual([r["error_kind"] for r in retries], ["parse", "parse"])
+
+    def test_final_failure_record_has_last_error_kind(self):
+        self.create.side_effect = [_status_error(503), _status_error(502)]
+        with self.assertRaises(RuntimeError):
+            self.call(max_retries=2)
+        final = self.records()[-1]
+        self.assertNotIn("retrying", final)
+        self.assertEqual(final["error_kind"], "http")
+        self.assertEqual(final["status_code"], 502)
+
+        self.create.side_effect = [ValueError("x"), _resp("not json at all")]
+        with self.assertRaises(RuntimeError):
+            self.call(max_retries=2)
+        self.assertEqual(self.records()[-1]["error_kind"], "parse")
+
+
+class ParseFailCount(LoggingTestBase):
+    def valid(self, **kw):
+        return llm_client.call_llm_valid(
+            "m", MESSAGES, schema=SCHEMA, session_id="s", is_valid=lambda c: c["action"] >= 0, **kw)
+
+    def test_two_parse_failures_then_valid(self):
+        self.create.side_effect = [_resp("nope"), _resp("{broken"), _resp('{"action": 4}')]
+        out = self.valid(return_parse_fail=True)
+        self.assertEqual(out, ({"action": 4}, 0, 2))
+        recs = self.records()
+        parse_recs = [r for r in recs if r.get("error_kind") == "parse"]
+        self.assertEqual(len(parse_recs), 2)
+        self.assertTrue(all(r["error_type"] == "JSONDecodeError" for r in parse_recs))
+        self.assertFalse(any(r.get("invalid") for r in recs))
+
+    def test_default_return_is_two_tuple(self):
+        self.create.side_effect = [_resp("nope"), _resp('{"action": 4}')]
+        out = self.valid()
+        self.assertEqual(out, ({"action": 4}, 0))
+        self.assertEqual(len(out), 2)
+
+    def test_call_llm_still_returns_dict(self):
+        self.create.side_effect = [_resp("nope"), _resp('{"action": 4}')]
+        self.assertEqual(self.call(), {"action": 4})
+
+    def test_invalid_payload_counts_n_invalid_not_n_parse_fail(self):
+        self.create.side_effect = [_resp('{"action": -1}'), _resp('{"action": 5}')]
+        self.assertEqual(self.valid(return_parse_fail=True), ({"action": 5}, 1, 0))
+
+    def test_parse_fail_accumulates_across_invalid_retries(self):
+        self.create.side_effect = [
+            _resp("nope"), _resp('{"action": -1}'), _resp("nope"), _resp("nope"), _resp('{"action": 2}')]
+        self.assertEqual(self.valid(return_parse_fail=True), ({"action": 2}, 1, 3))
+
+    def test_exhausted_call_carries_parse_fail_count(self):
+        self.create.side_effect = [_resp("nope")] * 2
+        with self.assertRaises(RuntimeError) as cm:
+            self.call(max_retries=2)
+        self.assertEqual(cm.exception.n_parse_fail, 2)
 
 
 class CallLlmValidLogging(LoggingTestBase):
