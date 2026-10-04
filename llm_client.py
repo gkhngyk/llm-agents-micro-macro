@@ -37,7 +37,7 @@ LOG_PATH = PROJECT_DIR / "logs" / "raw_calls.jsonl"
 MODELS = {
     "deepseek": "deepseek/deepseek-v4.1-flash",
     "gpt":      "openai/gpt-6-luna",
-    "gemini":   "google/gemini-3.8-flash",
+    "gemini":   "google/gemini-2.5-flash-lite",
 }
 
 # Record of the first (ultimatum) study. Kept apart from MODELS on purpose, so
@@ -135,6 +135,15 @@ def _parse_json_strict(raw: str) -> tuple[dict, bool]:
         return json.loads(m.group(0)), True
 
 
+def _finish_reason(resp) -> str | None:
+    """choices[0].finish_reason of a response; None when absent or no response."""
+    try:
+        value = resp.choices[0].finish_reason
+    except (AttributeError, IndexError, TypeError):
+        return None
+    return value if isinstance(value, str) else None
+
+
 class _EmptyResponseError(ValueError):
     """The response content was None or empty, so there was nothing to parse."""
 
@@ -170,8 +179,10 @@ def _call_llm_counted(
     extra = {} if temperature is None else {"temperature": temperature}
 
     last_err = None
+    last_finish_reason = None
     n_parse_fail = 0
     for attempt in range(max_retries):
+        resp = None
         # Only the API call and the parsing are inside the try: a failing log
         # write must not trigger a retry (it would bill the same call again).
         try:
@@ -190,6 +201,7 @@ def _call_llm_counted(
             parsed, degraded = _parse_json_strict(raw)
         except Exception as e:
             last_err = e
+            last_finish_reason = _finish_reason(resp)
             kind = _error_kind(e)
             if kind == "parse":
                 n_parse_fail += 1
@@ -198,6 +210,7 @@ def _call_llm_counted(
                 "temperature": temperature_label(temperature), "messages": messages,
                 "error_type": type(e).__name__, "error_kind": kind,
                 "error": str(e), "attempt": attempt, "retrying": True,
+                "finish_reason": _finish_reason(resp),
             }
             if isinstance(e, openai.APIStatusError):
                 record["status_code"] = e.status_code
@@ -211,12 +224,14 @@ def _call_llm_counted(
             "usage": _usage_dict(getattr(resp, "usage", None)),
             "model_snapshot": getattr(resp, "model", None),
             "attempt": attempt, "degraded": degraded,
+            "finish_reason": _finish_reason(resp),
         })
         return parsed, n_parse_fail
     final = {
         "ts": time.time(), "model": model, "session_id": session_id,
         "error_type": type(last_err).__name__, "error_kind": _error_kind(last_err),
         "error": str(last_err), "attempt": max_retries, "messages": messages,
+        "finish_reason": last_finish_reason,
     }
     if isinstance(last_err, openai.APIStatusError):
         final["status_code"] = last_err.status_code
@@ -240,6 +255,9 @@ def call_llm(
 
     temperature=None (default) is not sent, so the provider's own default
     applies and the log says "default"; an explicit number is sent and logged.
+
+    Every record (success and failed attempt) carries finish_reason from
+    choices[0].finish_reason, null when the response lacks it or never came.
 
     Every failed attempt is logged with error_type (exception class name) and
     error_kind (transport / http / parse / other; status_code for http). Parse

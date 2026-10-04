@@ -250,11 +250,86 @@ class ModelsDict(unittest.TestCase):
         self.assertEqual(llm_client.MODELS, {
             "deepseek": "deepseek/deepseek-v4.1-flash",
             "gpt": "openai/gpt-6-luna",
-            "gemini": "google/gemini-3.8-flash",
+            "gemini": "google/gemini-2.5-flash-lite",
         })
         self.assertFalse(any(":" in v for v in llm_client.MODELS.values()))
         self.assertEqual(set(llm_client.MODELS_ULTIMATUM), {"haiku", "gemma", "gptoss"})
         self.assertFalse(set(llm_client.MODELS.values()) & set(llm_client.MODELS_ULTIMATUM.values()))
+
+
+class FinishReasonLogging(LoggingTestBase):
+    def resp(self, content, finish_reason):
+        r = _resp(content)
+        r.choices[0].finish_reason = finish_reason
+        return r
+
+    def test_stop_is_logged(self):
+        self.create.side_effect = [self.resp('{"action": 1}', "stop")]
+        self.assertEqual(self.call(), {"action": 1})
+        self.assertEqual(self.records()[-1]["finish_reason"], "stop")
+
+    def test_length_is_logged_on_success_and_on_failed_attempt(self):
+        # Truncated half-JSON: parse failure, retried; the retry is also cut off, then succeeds.
+        self.create.side_effect = [
+            self.resp('{"action": ', "length"),
+            self.resp('{"action": 1}', "length"),
+        ]
+        self.assertEqual(self.call(), {"action": 1})
+        retry, ok = self.records()
+        self.assertEqual(retry["error_kind"], "parse")
+        self.assertEqual(retry["finish_reason"], "length")
+        self.assertEqual(ok["finish_reason"], "length")
+
+    def test_none_or_missing_is_null(self):
+        none_resp = self.resp('{"action": 1}', None)
+        missing = self.resp('{"action": 2}', None)
+        del missing.choices[0].finish_reason  # attribute absent altogether
+        no_choice_attr = mock.Mock(spec=["model", "usage", "choices"])
+        no_choice_attr.model, no_choice_attr.usage = "m", None
+        no_choice_attr.choices = [mock.Mock(spec=["message"])]
+        no_choice_attr.choices[0].message.content = '{"action": 3}'
+        for resp, expected in ((none_resp, {"action": 1}), (missing, {"action": 2}),
+                               (no_choice_attr, {"action": 3})):
+            self.create.side_effect = [resp]
+            self.assertEqual(self.call(), expected)
+            rec = self.records()[-1]
+            self.assertIn("finish_reason", rec)
+            self.assertIsNone(rec["finish_reason"])
+
+    def test_non_string_value_is_null(self):
+        # A bare Mock attribute (as in the other tests' _resp) must not leak into the log.
+        self.create.side_effect = [_resp('{"action": 1}')]
+        self.call()
+        self.assertIsNone(self.records()[-1]["finish_reason"])
+
+    def test_failed_attempt_without_response_is_null(self):
+        self.create.side_effect = [ConnectionError("down"), self.resp('{"action": 1}', "stop")]
+        self.call()
+        retry, ok = self.records()
+        self.assertIn("finish_reason", retry)
+        self.assertIsNone(retry["finish_reason"])
+        self.assertEqual(ok["finish_reason"], "stop")
+
+    def test_final_failure_record_has_finish_reason(self):
+        self.create.side_effect = [self.resp('{"action": ', "length")] * 2
+        with self.assertRaises(RuntimeError):
+            self.call(max_retries=2)
+        recs = self.records()
+        self.assertEqual([r["finish_reason"] for r in recs], ["length"] * 3)
+        self.assertNotIn("retrying", recs[-1])
+
+        self.create.side_effect = [ConnectionError("down")] * 2
+        with self.assertRaises(RuntimeError):
+            self.call(max_retries=2)
+        self.assertIsNone(self.records()[-1]["finish_reason"])
+
+    def test_existing_fields_unchanged(self):
+        self.create.side_effect = [self.resp('{"action": 1}', "stop")]
+        self.call()
+        ok = self.records()[-1]
+        for key in ("ts", "model", "session_id", "temperature", "messages", "response_raw",
+                    "response_parsed", "usage", "model_snapshot", "attempt", "degraded"):
+            self.assertIn(key, ok)
 
 
 class CallLlmValidLogging(LoggingTestBase):
