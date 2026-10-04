@@ -22,8 +22,9 @@ SCHEMA = {"type": "object", "properties": {"action": {"type": "integer"}}}
 MESSAGES = [{"role": "user", "content": "hi"}]
 
 
-def _resp(content):
+def _resp(content, model="m-snapshot-1"):
     r = mock.Mock()
+    r.model = model
     r.choices = [mock.Mock()]
     r.choices[0].message.content = content
     r.usage = None
@@ -69,6 +70,14 @@ class CallLlmLogging(LoggingTestBase):
         self.assertEqual(ok["attempt"], 1)
         self.assertNotIn("error", ok)
         self.assertEqual(ok["response_parsed"], {"action": 1})
+
+    def test_success_record_has_model_snapshot(self):
+        self.create.side_effect = [_resp('{"action": 1}', model="vendor/m-2026-10-01")]
+        self.call()
+        ok = self.records()[-1]
+        self.assertEqual(ok["model_snapshot"], "vendor/m-2026-10-01")
+        for key in ("response_raw", "response_parsed", "usage", "attempt", "degraded"):
+            self.assertIn(key, ok)
 
     def test_degraded_flag(self):
         self.create.side_effect = [_resp('Sure! Here it is: {"action": 2} Hope it helps.')]
@@ -205,6 +214,14 @@ class ParseFailCount(LoggingTestBase):
         with self.assertRaises(RuntimeError) as cm:
             self.call(max_retries=2)
         self.assertEqual(cm.exception.n_parse_fail, 2)
+
+
+class ModelsDict(unittest.TestCase):
+    def test_models_are_this_studys_and_old_ones_kept_apart(self):
+        self.assertEqual(set(llm_client.MODELS), {"deepseek", "gpt", "gemini"})
+        self.assertTrue(all(v.endswith(":batch") for v in llm_client.MODELS.values()))
+        self.assertEqual(set(llm_client.MODELS_ULTIMATUM), {"haiku", "gemma", "gptoss"})
+        self.assertFalse(set(llm_client.MODELS.values()) & set(llm_client.MODELS_ULTIMATUM.values()))
 
 
 class CallLlmValidLogging(LoggingTestBase):

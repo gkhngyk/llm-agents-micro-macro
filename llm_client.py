@@ -33,7 +33,16 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 PROJECT_DIR = Path(__file__).parent
 LOG_PATH = PROJECT_DIR / "logs" / "raw_calls.jsonl"
 
+# Generating models of this study (the `__main__` loop runs over this dict).
 MODELS = {
+    "deepseek": "deepseek/deepseek-v4.1-flash:batch",
+    "gpt":      "openai/gpt-6-luna:batch",
+    "gemini":   "google/gemini-3.8-flash:batch",
+}
+
+# Record of the first (ultimatum) study. Kept apart from MODELS on purpose, so
+# that nothing iterating over MODELS calls the old models.
+MODELS_ULTIMATUM = {
     "haiku":  "anthropic/claude-haiku-4.5",
     "gemma":  "google/gemma-4-31b-it",
     "gptoss": "openai/gpt-oss-120b",
@@ -181,6 +190,7 @@ def _call_llm_counted(
             "temperature": temperature, "messages": messages,
             "response_raw": raw, "response_parsed": parsed,
             "usage": _usage_dict(getattr(resp, "usage", None)),
+            "model_snapshot": getattr(resp, "model", None),
             "attempt": attempt, "degraded": degraded,
         })
         return parsed, n_parse_fail
