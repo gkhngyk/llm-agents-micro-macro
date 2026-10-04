@@ -14,3 +14,6 @@ data/herrmann2008/raw/
 
 # every log stays out of git
 logs/
+
+# run outputs (one .jsonl per run, analyses); regenerate, do not commit
+results/

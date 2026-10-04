@@ -144,6 +144,20 @@ def _finish_reason(resp) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _reasoning_text(resp) -> str | None:
+    """Reasoning text of choices[0].message (OpenRouter's `reasoning` field), if any."""
+    try:
+        value = resp.choices[0].message.reasoning
+    except (AttributeError, IndexError, TypeError):
+        return None
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def reasoning_effort_label(reasoning_effort: str | None) -> str:
+    """What the logs record: the effort sent, or "default" when none was sent."""
+    return "default" if reasoning_effort is None else reasoning_effort
+
+
 class _EmptyResponseError(ValueError):
     """The response content was None or empty, so there was nothing to parse."""
 
@@ -168,15 +182,26 @@ def _call_llm_counted(
     temperature: float | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     max_retries: int = 4,
+    reasoning_effort: str | None = None,
+    meta: dict | None = None,
 ) -> tuple[dict, int]:
     """call_llm that also returns the number of parse failures it retried.
 
     Returns (parsed, n_parse_fail). If every attempt fails, the RuntimeError
     carries the count in its n_parse_fail attribute.
+
+    reasoning_effort=None is not sent (provider default, logged "default");
+    otherwise it goes out as OpenRouter's reasoning.effort. When meta is a
+    dict, the successful response's model_snapshot, finish_reason, usage and
+    reasoning text are written into it.
     """
     augmented = augment_with_schema(messages, schema)
     # temperature=None: not sent, the provider's own default applies.
     extra = {} if temperature is None else {"temperature": temperature}
+    body = {"session_id": session_id[:256]}
+    if reasoning_effort is not None:
+        body["reasoning"] = {"effort": reasoning_effort}
+    effort_label = reasoning_effort_label(reasoning_effort)
 
     last_err = None
     last_finish_reason = None
@@ -193,7 +218,7 @@ def _call_llm_counted(
                 **extra,
                 response_format={"type": "json_object"},
                 extra_headers={"X-Title": "GABM public goods"},
-                extra_body={"session_id": session_id[:256]},
+                extra_body=body,
             )
             raw = resp.choices[0].message.content
             if raw is None or not raw.strip():
@@ -211,6 +236,7 @@ def _call_llm_counted(
                 "error_type": type(e).__name__, "error_kind": kind,
                 "error": str(e), "attempt": attempt, "retrying": True,
                 "finish_reason": _finish_reason(resp),
+                "reasoning_effort": effort_label,
             }
             if isinstance(e, openai.APIStatusError):
                 record["status_code"] = e.status_code
@@ -225,13 +251,22 @@ def _call_llm_counted(
             "model_snapshot": getattr(resp, "model", None),
             "attempt": attempt, "degraded": degraded,
             "finish_reason": _finish_reason(resp),
+            "reasoning_effort": effort_label,
         })
+        if meta is not None:
+            meta.update({
+                "model_snapshot": getattr(resp, "model", None),
+                "finish_reason": _finish_reason(resp),
+                "usage": _usage_dict(getattr(resp, "usage", None)),
+                "reasoning": _reasoning_text(resp),
+            })
         return parsed, n_parse_fail
     final = {
         "ts": time.time(), "model": model, "session_id": session_id,
         "error_type": type(last_err).__name__, "error_kind": _error_kind(last_err),
         "error": str(last_err), "attempt": max_retries, "messages": messages,
         "finish_reason": last_finish_reason,
+        "reasoning_effort": effort_label,
     }
     if isinstance(last_err, openai.APIStatusError):
         final["status_code"] = last_err.status_code
@@ -250,6 +285,8 @@ def call_llm(
     temperature: float | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     max_retries: int = 4,
+    reasoning_effort: str | None = None,
+    meta: dict | None = None,
 ) -> dict:
     """Call OpenRouter with structured JSON output. Retries on transient errors.
 
@@ -266,7 +303,8 @@ def call_llm(
     """
     parsed, _ = _call_llm_counted(
         model, messages, schema=schema, session_id=session_id,
-        temperature=temperature, max_tokens=max_tokens, max_retries=max_retries)
+        temperature=temperature, max_tokens=max_tokens, max_retries=max_retries,
+        reasoning_effort=reasoning_effort, meta=meta)
     return parsed
 
 
@@ -281,6 +319,8 @@ def call_llm_valid(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     max_invalid: int = 3,
     return_parse_fail: bool = False,
+    reasoning_effort: str | None = None,
+    meta: dict | None = None,
 ) -> tuple[dict, int] | tuple[dict, int, int]:
     """call_llm, re-requesting payloads for which is_valid(parsed) is False.
 
@@ -289,13 +329,17 @@ def call_llm_valid(
     returns (parsed, n_invalid, n_parse_fail), where n_parse_fail counts the
     unparseable responses retried across all calls. It is a separate count: it
     is not added to n_invalid.
+
+    reasoning_effort and meta are passed through to the underlying call; meta
+    ends up holding the metadata of the accepted (last) response.
     """
     call: dict = {}
     n_parse_fail = 0
     for n_invalid in range(max_invalid + 1):
         call, n_pf = _call_llm_counted(
             model, messages, schema=schema, session_id=session_id,
-            temperature=temperature, max_tokens=max_tokens)
+            temperature=temperature, max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort, meta=meta)
         n_parse_fail += n_pf
         if is_valid(call):
             if return_parse_fail:
