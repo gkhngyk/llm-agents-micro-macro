@@ -60,10 +60,18 @@ tested. Design choices are in the module docstring; the main ones:
   retried and counted as `n_provider_error`, not as parse failures and not in
   the invalid cap. Units run in a shuffled round-robin over card x model
   (stable_seed), so a stopped run has data from every card.
+- `--resume` goes on with an interrupted run in its directory as a new
+  segment: complete units are skipped, partial ones run again with the same
+  seeds, earlier rows stay untouched (listed in `superseded_units`), budget
+  and invalid cap count the earlier segments, and a config difference stops
+  before any call. SIGINT / SIGTERM write the summary with stop_reason
+  "interrupted". Details in the `pgg_game.py` docstring.
 
 ```bash
 .venv/bin/python pgg_game.py --dry-run --config configs/pilot.json   # no API, no key
 .venv/bin/python pgg_game.py --config configs/pilot.json --run pilot_<date> --runs-dir /abs/path/runs
+.venv/bin/python pgg_game.py --config configs/pilot.json --run pilot_<date> --resume --dry-run  # plan only
+.venv/bin/python pgg_game.py --config configs/pilot.json --run pilot_<date> --resume
 .venv/bin/python -m unittest discover -s tests -v
 ```
 

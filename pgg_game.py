@@ -131,18 +131,58 @@ outputs); CLI: --runs-dir, else config "runs_dir", else $PGG_RUNS_DIR, else
 run does not start. Config values starting with "<" are placeholders: a real
 run does not start while one is left. --dry-run prints call counts and an
 estimated cost without importing llm_client (no key, no ../.env, no API).
+
+Resume (--resume; Engine.run(resume=True)). A run that was cut off goes on in
+the same directory as a new segment (0 = the first run, then 1, 2, ...). The
+results file is opened for appending only; no earlier byte is changed.
+  * Unit = one group game or one isolated schedule, labelled as in unit_order
+    ("gpt|boston_value|value|N|group|0"). Rows are matched to units by their
+    session_id (deterministic). A unit is COMPLETE when one segment holds all
+    its rows: every (step, round, agent) of the group game (rounds x agents,
+    contribute, plus punish under P) or every conditioning value of the
+    schedule. Rows are written only for whole rounds / schedules, so this
+    rule needs no extra record; rows of the first run, which have no
+    "segment" field, are segment 0.
+  * Complete units are skipped. Every other unit is run again from its start
+    with the same seeds and session ids. Its earlier rows stay in the file;
+    they are listed as {"unit", "segment", "n_rows"} in "superseded_units"
+    (summary and the "pgg_run_resume" raw-log event). Analysis rule: a row
+    counts only if its (unit, segment) is complete; every new row carries
+    "unit" and "segment".
+  * Budget and invalid-rate cap go on from the earlier segments: their cost
+    and counts are rebuilt from the run's raw log (every billed response is
+    logged there, also when no summary was written), else taken from the
+    previous summary; if the summary shows more cost, the difference is added.
+    A model already over the invalid-rate cap stays stopped.
+  * Before any call or write, the run's config (models, providers,
+    seed_namespace, max_tokens, isolated_frame, reasoning_effort, guards,
+    design and card texts) is compared with the previous summary's "config"
+    (older summaries: their top-level fields, the unit order, the card
+    lengths of the rows and the card texts in the raw log). Any difference,
+    or a row that does not fit the design, stops with ValueError.
+  * The previous summary is kept as <run>_summary.seg<k>.json (k = the last
+    segment it describes) before the new one replaces it; the new summary has
+    the totals, a "segments" list and the complete / remaining unit counts.
+  * --resume --dry-run prints the plan (units complete / partial / left,
+    calls left, cost so far) without writing anything and without llm_client.
+SIGINT and SIGTERM stop the run with stop_reason "interrupted": the summary is
+written at once, then once more after the calls in flight have ended.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import hashlib
 import json
 import math
 import os
 import re
+import signal
 import sys
 import threading
 import time
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -189,6 +229,33 @@ def _llm():
     return llm_client
 
 
+def _offline_stable_seed(namespace: str, *parts, base: int = 0) -> int:
+    """Copy of llm_client.stable_seed (crc32) for dry runs, which must not import
+    llm_client; a test checks that both agree."""
+    key = "|".join([namespace, *map(str, parts)])
+    return base + zlib.crc32(key.encode()) % 1_000_000
+
+
+class OfflineLLM:
+    """What a read-only resume plan (--resume --dry-run) needs of llm_client.
+
+    No key, no ../.env, no API; the constants equal llm_client's (a test
+    checks it). Writing a log is an error.
+    """
+    DEFAULT_MAX_TOKENS = 16000
+    DEFAULT_TIMEOUT_S = 300.0
+    LOG_PATH = None
+    stable_seed = staticmethod(_offline_stable_seed)
+
+    @staticmethod
+    def reasoning_effort_label(reasoning_effort):
+        return "default" if reasoning_effort is None else reasoning_effort
+
+    @staticmethod
+    def _append_log(record):
+        raise RuntimeError("offline: a dry run writes no log")
+
+
 class RunAborted(RuntimeError):
     """A decision could not be obtained validly; the run was stopped."""
 
@@ -200,6 +267,12 @@ class RunStopped(Exception):
 
 class ModelStopped(Exception):
     """The invalid-rate cap stopped this model; other models go on."""
+
+
+# A BaseException, like KeyboardInterrupt: llm_client's `except Exception`
+# must not retry it as a failed attempt.
+class RunInterrupted(BaseException):
+    """SIGINT or SIGTERM arrived (raised in the main thread)."""
 
 
 # --------------------------------------------------------------------------
@@ -796,6 +869,107 @@ def session_id_for(run, model_key, card_id, style, condition, arm, idx: int) -> 
     return f"pgg-{run}-{model_key}-{card_id}-{style}-{condition}-{arm}-{idx:03d}"
 
 
+def unit_label(model_key, card: Card, condition, arm, idx: int) -> str:
+    """Label of a unit in unit_order, e.g. "gpt|boston_value|value|N|group|0"."""
+    return f"{model_key}|{card.card_id}|{card.style}|{condition}|{arm}|{idx}"
+
+
+@dataclass(frozen=True)
+class UnitSpec:
+    """One group game or one isolated schedule of the design."""
+    label: str
+    model_key: str
+    card: Card                  # the card of every agent (homogeneous group)
+    condition: str
+    arm: str
+    idx: int                    # group number / schedule repetition
+    session_id: str
+    expected: frozenset         # row keys (_row_key) of the complete unit
+    calls_by_kind: tuple        # ((pgg_cost call kind, accepted decisions), ...)
+
+
+def _row_key(row: dict) -> tuple:
+    """(step, round, agent_id, others_mean) of a result row."""
+    return (row.get("step"), row.get("round"), row.get("agent_id"), row.get("others_mean"))
+
+
+def _new_stats() -> dict:
+    """Per-model counters of a run or segment."""
+    # n_provider_error: provider-error responses (llm_client error_kind
+    # "provider"); not in n_parse_fail and not in the invalid-rate cap.
+    # providers: provider name of every response -> count ("null" = none).
+    return {"cost_usd": 0.0, "n_responses": 0, "n_accepted": 0,
+            "n_invalid": 0, "n_parse_fail": 0, "n_provider_error": 0,
+            "n_cost_estimated": 0, "n_length": 0, "finish_reasons": {},
+            "providers": {}, "n_provider_unknown": 0}
+
+
+def _merge_stats(*parts: dict) -> dict:
+    """Sum of per-model counters (keys missing from _new_stats are ignored)."""
+    out = _new_stats()
+    for part in parts:
+        for k, v in (part or {}).items():
+            if k not in out:
+                continue
+            if isinstance(out[k], dict):
+                for kk, vv in v.items():
+                    out[k][kk] = out[k].get(kk, 0) + vv
+            else:
+                out[k] += v
+    return out
+
+
+def _read_jsonl(path: Path) -> tuple[list, bool]:
+    """(parsed lines, None for a line that is not JSON; file ends with a newline?)."""
+    data = Path(path).read_bytes()
+    out = []
+    for line in data.splitlines():
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            out.append(None)
+    return out, data.endswith(b"\n") or not data
+
+
+def _short(value, limit: int = 300) -> str:
+    """A config value for an error message."""
+    text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
+def _json_round(value):
+    """value as it reads back from JSON (tuples -> lists, int keys -> str)."""
+    return json.loads(json.dumps(value, ensure_ascii=False))
+
+
+@dataclass
+class ResumePlan:
+    """What --resume found in a run directory; built without writing anything."""
+    segment: int                       # number of the new segment
+    prior_segments: list[int]
+    n_units: int
+    complete: dict                     # unit label -> segment that completed it
+    partial: list[dict]                # superseded: {"unit", "segment", "n_rows"}
+    started_without_rows: list[str]    # units with logged calls but no row
+    remaining: list[str]               # labels still to run, in run order
+    prior_stats: dict                  # model key -> counters of all earlier segments
+    prior_source: str                  # "raw_log" or "summary"
+    prior_extra_cost: float            # summary cost not found in the raw log
+    cost_check: dict
+    segments: list[dict]               # summary entries of the earlier segments
+    n_rows: int
+    rows_per_segment: dict
+    results_ends_with_newline: bool
+    truncated_last_line: bool
+    previous_summary: dict | None
+    config_checked: list[str]          # what the config was compared on
+    problems: list[str]                # config differences and anomalies
+
+    @property
+    def prior_cost_usd(self) -> float:
+        return sum(s["cost_usd"] for s in self.prior_stats.values()) + self.prior_extra_cost
+
+
 # --------------------------------------------------------------------------
 # Engine
 # --------------------------------------------------------------------------
@@ -824,14 +998,19 @@ class Engine:
         self.stopped_models: dict[str, str] = {}   # model key -> reason
         self.unit_order: list[str] = []
         self.files: dict | None = None             # output files and line counts (run)
-        # n_provider_error: provider-error responses (llm_client error_kind
-        # "provider"); not in n_parse_fail and not in the invalid-rate cap.
-        # providers: provider name of every response -> count ("null" = none).
-        self.stats = {key: {"cost_usd": 0.0, "n_responses": 0, "n_accepted": 0,
-                            "n_invalid": 0, "n_parse_fail": 0, "n_provider_error": 0,
-                            "n_cost_estimated": 0, "n_length": 0, "finish_reasons": {},
-                            "providers": {}, "n_provider_unknown": 0}
-                      for key in cfg.models}
+        self.stats = {key: _new_stats() for key in cfg.models}    # this segment
+        # Resume: the segment number and what the earlier segments used.
+        self.segment = 0
+        self.prior_stats = {key: _new_stats() for key in cfg.models}
+        self.prior_extra_cost = 0.0
+        self.plan: ResumePlan | None = None
+        self._specs: list[UnitSpec] = []
+        # Signals: name of the signal that interrupted the run; thread pools to
+        # wait for after the summary; True once the summary is being written.
+        self._interrupted: str | None = None
+        self._raise_on_signal = False
+        self._pools: list[ThreadPoolExecutor] = []
+        self._finalizing = False
 
     # -- seeds / output ----------------------------------------------------
 
@@ -840,14 +1019,22 @@ class Engine:
 
     def _write(self, row: dict) -> None:
         with self._lock:
+            if self._out is None:          # file closed: an interrupted run has ended
+                return
             self._out.write(json.dumps(row, ensure_ascii=False) + "\n")
             self._out.flush()
 
     # -- run guards --------------------------------------------------------
 
     @property
-    def total_cost(self) -> float:
+    def segment_cost(self) -> float:
         return sum(s["cost_usd"] for s in self.stats.values())
+
+    @property
+    def total_cost(self) -> float:
+        """Cost of this segment and of all earlier ones (resume)."""
+        return (self.segment_cost + sum(s["cost_usd"] for s in self.prior_stats.values())
+                + self.prior_extra_cost)
 
     def _stop(self, reason: str, **detail) -> None:
         """Stop the whole run (first reason wins); logged once."""
@@ -863,8 +1050,8 @@ class Engine:
         budget = self.cfg.budget_usd
         if budget is not None and self.stop_reason is None and self.total_cost >= budget:
             self._stop("budget", budget_usd=budget)
-        if self.stop_reason is not None:
-            raise RunStopped(self.stop_reason)
+        if self.stop_reason is not None or self._interrupted is not None:
+            raise RunStopped(self.stop_reason or "interrupted")
         if model_key in self.stopped_models:
             raise ModelStopped(self.stopped_models[model_key])
 
@@ -883,25 +1070,30 @@ class Engine:
             tokens_out = self.max_tokens
         return (tokens_in * price_in + tokens_out * price_out) / 1e6, True
 
+    def _count_response(self, s: dict, model_key: str, info: dict) -> None:
+        """Add one response (info as in llm_client._response_info) to counters s."""
+        cost, estimated = self._response_cost(model_key, info.get("usage"))
+        finish = info.get("finish_reason")
+        provider = info.get("provider")
+        s["cost_usd"] += cost
+        s["n_responses"] += 1
+        s["n_cost_estimated"] += estimated
+        s["finish_reasons"][str(finish)] = s["finish_reasons"].get(str(finish), 0) + 1
+        s["providers"][str(provider)] = s["providers"].get(str(provider), 0) + 1
+        if finish == "length":
+            s["n_length"] += 1
+        if info.get("provider_error"):
+            s["n_provider_error"] += 1
+        if self.cfg.provider_for(model_key) and provider is None:
+            s["n_provider_unknown"] += 1
+
     def _on_response(self, model_key: str, info: dict) -> None:
         """Runs for every response that arrived (billed): cost, finish_reason, model, provider."""
-        cost, estimated = self._response_cost(model_key, info.get("usage"))
         finish = info.get("finish_reason")
         provider = info.get("provider")
         pinned = self.cfg.provider_for(model_key)
         with self._lock:
-            s = self.stats[model_key]
-            s["cost_usd"] += cost
-            s["n_responses"] += 1
-            s["n_cost_estimated"] += estimated
-            s["finish_reasons"][str(finish)] = s["finish_reasons"].get(str(finish), 0) + 1
-            s["providers"][str(provider)] = s["providers"].get(str(provider), 0) + 1
-            if finish == "length":
-                s["n_length"] += 1
-            if info.get("provider_error"):
-                s["n_provider_error"] += 1
-            if pinned and provider is None:
-                s["n_provider_unknown"] += 1
+            self._count_response(self.stats[model_key], model_key, info)
         slug = self.cfg.models[model_key]
         snapshot = info.get("model_snapshot")
         if self.cfg.stop_on_length and finish == "length":
@@ -922,8 +1114,10 @@ class Engine:
             s["n_accepted"] += 1
             s["n_invalid"] += ans.n_invalid
             s["n_parse_fail"] += ans.n_parse_fail
-            n_bad = s["n_invalid"] + s["n_parse_fail"]
-            hit = (self.invalid_limit is not None and n_bad > self.invalid_limit
+            prior = self.prior_stats[model_key]          # earlier segments (resume)
+            n_invalid = s["n_invalid"] + prior["n_invalid"]
+            n_parse_fail = s["n_parse_fail"] + prior["n_parse_fail"]
+            hit = (self.invalid_limit is not None and n_invalid + n_parse_fail > self.invalid_limit
                    and model_key not in self.stopped_models)
             if hit:
                 self.stopped_models[model_key] = "invalid_rate_cap"
@@ -931,15 +1125,32 @@ class Engine:
             self.llm._append_log({
                 "ts": time.time(), "event": "pgg_model_stopped", "run": self.cfg.run,
                 "model": self.cfg.models[model_key], "reason": "invalid_rate_cap",
-                "n_invalid": s["n_invalid"], "n_parse_fail": s["n_parse_fail"],
+                "n_invalid": n_invalid, "n_parse_fail": n_parse_fail,
                 "limit": self.invalid_limit})
+
+    def _pool(self, max_workers: int) -> ThreadPoolExecutor:
+        pool = ThreadPoolExecutor(max_workers=max_workers)
+        with self._lock:
+            self._pools.append(pool)
+        return pool
+
+    def _release(self, pool: ThreadPoolExecutor) -> None:
+        """Wait for the pool, except after a signal: then the summary comes first."""
+        interrupted = self._interrupted is not None
+        pool.shutdown(wait=not interrupted, cancel_futures=interrupted)
+        if not interrupted:
+            with self._lock:
+                self._pools.remove(pool)
 
     def _map(self, fn, items):
         items = list(items)
         if self.cfg.workers <= 1 or len(items) <= 1:
             return [fn(x) for x in items]
-        with ThreadPoolExecutor(max_workers=self.cfg.workers) as pool:
+        pool = self._pool(self.cfg.workers)
+        try:
             return list(pool.map(fn, items))
+        finally:
+            self._release(pool)
 
     # -- one validated call ------------------------------------------------
 
@@ -979,10 +1190,10 @@ class Engine:
         return ans
 
     def _row(self, *, condition, arm, model_key, card, session_id, group_id, agent_id,
-             round_no, step, ans: Answer, seed: int, **fields) -> dict:
+             round_no, step, ans: Answer, seed: int, unit: str, **fields) -> dict:
         rationale = ans.parsed.get("rationale")
         return {
-            "run": self.cfg.run, "condition": condition, "arm": arm, "step": step,
+            "run": self.cfg.run, "segment": self.segment, "unit": unit, "condition": condition, "arm": arm, "step": step,
             "model": self.cfg.models[model_key], "model_key": model_key,
             "model_snapshot": ans.meta.get("model_snapshot"),
             "session_id": session_id, "group_id": group_id, "agent_id": agent_id,
@@ -1012,6 +1223,7 @@ class Engine:
         session_id = session_id_for(self.cfg.run, model_key, lead.card_id, lead.style,
                                     condition, "group", idx)
         group_id = f"{lead.card_id}-{lead.style}-{condition}-g{idx:02d}"
+        unit = unit_label(model_key, lead, condition, "group", idx)
         history: list[RoundRecord] = []
         for r in range(1, p.rounds + 1):
             ctx = {"round": r, "group_id": group_id, "condition": condition}
@@ -1051,7 +1263,7 @@ class Engine:
                 self._write(self._row(
                     condition=condition, arm="group", model_key=model_key, card=cards[i],
                     session_id=session_id, group_id=group_id, agent_id=i + 1, round_no=r,
-                    step="contribute", ans=answers[i],
+                    step="contribute", ans=answers[i], unit=unit,
                     seed=self.seed_for(model_key, cards[i].card_id, cards[i].style, condition,
                                        "group", idx, i + 1, r, "contribute"),
                     contribution=answers[i].parsed["contribution"], group_total=sum(contributions),
@@ -1061,7 +1273,7 @@ class Engine:
                     self._write(self._row(
                         condition=condition, arm="group", model_key=model_key, card=cards[i],
                         session_id=session_id, group_id=group_id, agent_id=i + 1, round_no=r,
-                        step="punish", ans=punish_answers[i],
+                        step="punish", ans=punish_answers[i], unit=unit,
                         seed=self.seed_for(model_key, cards[i].card_id, cards[i].style, condition,
                                            "group", idx, i + 1, r, "punish"),
                         punishments={str(j + 1): rec.punishment[i][j]
@@ -1080,6 +1292,7 @@ class Engine:
         session_id = session_id_for(self.cfg.run, model_key, card.card_id, card.style,
                                     condition, "isolated", rep)
         group_id = f"{card.card_id}-{card.style}-{condition}-iso{rep:02d}"
+        unit = unit_label(model_key, card, condition, "isolated", rep)
 
         def ask_point(x):
             ctx = {"round": None, "group_id": group_id, "condition": condition,
@@ -1094,7 +1307,7 @@ class Engine:
             self._write(self._row(
                 condition=condition, arm="isolated", model_key=model_key, card=card,
                 session_id=session_id, group_id=group_id, agent_id=1, round_no=None,
-                step="isolated", ans=ans,
+                step="isolated", ans=ans, unit=unit,
                 seed=self.seed_for(model_key, card.card_id, card.style, condition,
                                    "isolated", rep, 1, "isolated", x),
                 contribution=ans.parsed["contribution"], others_mean=x,
@@ -1107,32 +1320,44 @@ class Engine:
         return (self.llm.stable_seed(self.cfg.seed_namespace, self.cfg.run, "order", *parts),
                 tuple(map(str, parts)))
 
-    def _cell_units(self, model_key: str, card: Card) -> list[tuple[str, str, object]]:
-        """(model key, label, callable) of one cell (card x model).
+    def _spec(self, model_key: str, card: Card, condition: str, arm: str, idx: int) -> UnitSpec:
+        cfg, p = self.cfg, self.cfg.params
+        if arm == "group":
+            steps = ("contribute", "punish") if condition == "P" else ("contribute",)
+            expected = frozenset((step, r, a, None) for step in steps
+                                 for r in range(1, p.rounds + 1)
+                                 for a in range(1, p.group_size + 1))
+            n = p.rounds * p.group_size
+            kinds = ((f"contribute_{condition}", n),) + ((("punish_P", n),) if condition == "P" else ())
+        else:
+            expected = frozenset(("isolated", None, 1, x) for x in cfg.isolated_points)
+            kinds = (("isolated", len(cfg.isolated_points)),)
+        return UnitSpec(
+            unit_label(model_key, card, condition, arm, idx), model_key, card, condition, arm, idx,
+            session_id_for(cfg.run, model_key, card.card_id, card.style, condition, arm, idx),
+            expected, kinds)
+
+    def _cell_specs(self, model_key: str, card: Card) -> list[UnitSpec]:
+        """Units of one cell (card x model).
 
         Group games and isolated schedules alternate, so that a run stopped
         early has both arms.
         """
         cfg = self.cfg
         groups, schedules = [], []
-        tag = f"{model_key}|{card.card_id}|{card.style}"
         if "group" in cfg.arms:
-            for condition in cfg.conditions:
-                for idx in range(cfg.groups_per_cell):
-                    groups.append((model_key, f"{tag}|{condition}|group|{idx}",
-                                   lambda m=model_key, c=card, k=condition, i=idx:
-                                   self.play_group(m, [c] * cfg.params.group_size, k, i)))
+            groups = [self._spec(model_key, card, condition, "group", idx)
+                      for condition in cfg.conditions for idx in range(cfg.groups_per_cell)]
         if "isolated" in cfg.arms:
-            for rep in range(cfg.isolated_reps):
-                schedules.append((model_key, f"{tag}|N|isolated|{rep}",
-                                  lambda m=model_key, c=card, r=rep: self.play_isolated(m, c, r)))
+            schedules = [self._spec(model_key, card, "N", "isolated", rep)
+                         for rep in range(cfg.isolated_reps)]
         out = []
         for k in range(max(len(groups), len(schedules))):
             out += groups[k:k + 1] + schedules[k:k + 1]
         return out
 
-    def units(self) -> list[tuple[str, str, object]]:
-        """(model key, label, callable) per group game / schedule, in run order.
+    def unit_specs(self) -> list[UnitSpec]:
+        """Every group game / schedule of the design, in run order.
 
         Shuffled round-robin over the cells (card x model), so that a run
         stopped early still has data from every card: pass k runs the k-th
@@ -1143,7 +1368,7 @@ class Engine:
         """
         cfg = self.cfg
         models = sorted(cfg.models, key=lambda m: self._order_key("model", m))
-        cells = {(m, c.card_id, c.style): self._cell_units(m, c)
+        cells = {(m, c.card_id, c.style): self._cell_specs(m, c)
                  for m in cfg.models for c in cfg.cards}
         out = []
         for k in range(max(len(u) for u in cells.values())):
@@ -1154,6 +1379,17 @@ class Engine:
                     if k < len(cell):
                         out.append(cell[k])
         return out
+
+    def _unit_fn(self, spec: UnitSpec):
+        if spec.arm == "group":
+            return lambda: self.play_group(spec.model_key, [spec.card] * self.cfg.params.group_size,
+                                           spec.condition, spec.idx)
+        return lambda: self.play_isolated(spec.model_key, spec.card, spec.idx)
+
+    def units(self, specs: list[UnitSpec] | None = None) -> list[tuple[str, str, object]]:
+        """(model key, label, callable) per group game / schedule, in run order (unit_specs)."""
+        specs = self.unit_specs() if specs is None else specs
+        return [(s.model_key, s.label, self._unit_fn(s)) for s in specs]
 
     def _run_unit(self, unit) -> None:
         model_key, _label, fn = unit
@@ -1169,71 +1405,548 @@ class Engine:
                     self.aborted = e
             self._stop("run_aborted", error=str(e))
 
-    def summary(self, started: float) -> dict:
-        return {
+    # -- resume ------------------------------------------------------------
+
+    def _providers_summary(self) -> dict:
+        return {k: (provider_routing(p) | {"name": p["name"]} if (p := self.cfg.provider_for(k))
+                    else None)
+                for k in self.cfg.models}
+
+    def _effort_summary(self) -> dict:
+        return {k: self.llm.reasoning_effort_label(self.cfg.effort_for(k)) for k in self.cfg.models}
+
+    def config_record(self) -> dict:
+        """What every segment of a run must share (summary "config").
+
+        workers, parallel_units and request_timeout_s may differ between
+        segments: they change neither the prompts nor the guards.
+        """
+        cfg = self.cfg
+        return _json_round({
+            "models": dict(cfg.models), "providers": self._providers_summary(),
+            "seed_namespace": cfg.seed_namespace, "max_tokens": self.max_tokens,
+            "isolated_frame": cfg.isolated_frame, "reasoning_effort": self._effort_summary(),
+            "params": dataclasses.asdict(cfg.params), "conditions": list(cfg.conditions),
+            "arms": list(cfg.arms), "groups_per_cell": cfg.groups_per_cell,
+            "isolated_reps": cfg.isolated_reps, "isolated_points": list(cfg.isolated_points),
+            "max_invalid": cfg.max_invalid, "rationale": cfg.rationale,
+            "budget_usd": cfg.budget_usd, "invalid_rate_cap": cfg.invalid_rate_cap,
+            "stop_on_length": cfg.stop_on_length, "check_snapshot": cfg.check_snapshot,
+            "cards": [{"card_id": c.card_id, "style": c.style,
+                       "text_sha256": hashlib.sha256(c.text.encode("utf-8")).hexdigest(),
+                       **card_length(c)} for c in cfg.cards],
+        })
+
+    def _legacy_config(self) -> dict:
+        """Top-level fields of a summary written before "config" existed."""
+        return _json_round({
+            "seed_namespace": self.cfg.seed_namespace, "max_tokens": self.max_tokens,
+            "isolated_frame": self.cfg.isolated_frame, "providers": self._providers_summary(),
+            "reasoning_effort": self._effort_summary(), "budget_usd": self.cfg.budget_usd,
+            "invalid_rate_cap": self.cfg.invalid_rate_cap,
+            "planned_calls_per_model": self.cfg.planned_calls_per_model()})
+
+    def _raw_log_path(self) -> Path | None:
+        path = self.cfg.raw_log_path() or self.llm.LOG_PATH
+        return Path(path) if path is not None else None
+
+    def _scan_rows(self, path: Path, specs: list[UnitSpec]) -> dict:
+        """Rows of the results file by (unit, segment): complete and partial units."""
+        by_session = {s.session_id: s for s in specs}
+        by_label = {s.label: s for s in specs}
+        order = {s.label: i for i, s in enumerate(specs)}
+        lengths = {(c.card_id, c.style): card_length(c) for c in self.cfg.cards}
+        lines, ends_with_newline = _read_jsonl(path)
+        keys: dict[tuple, list] = {}
+        per_segment: dict[int, int] = {}
+        problems: list[str] = []
+        truncated = False
+        n_length_checked = 0
+        for i, row in enumerate(lines, 1):
+            if not isinstance(row, dict):
+                if i == len(lines) and not ends_with_newline:
+                    truncated = True               # cut off while being written
+                else:
+                    problems.append(f"{path.name} line {i}: not a JSON object")
+                continue
+            spec = by_session.get(row.get("session_id"))
+            if spec is None or row.get("run") != self.cfg.run:
+                problems.append(f"{path.name} line {i}: session {row.get('session_id')!r} "
+                                "is not a unit of this run's design")
+                continue
+            if row.get("unit", spec.label) != spec.label:
+                problems.append(f"{path.name} line {i}: unit {row.get('unit')!r} does not match "
+                                f"its session ({spec.label})")
+            if "card_n_chars" in row:
+                n_length_checked += 1
+                got = {k: row.get(k) for k in ("card_n_words", "card_n_chars")}
+                want = lengths[(spec.card.card_id, spec.card.style)]
+                if got != want:
+                    problems.append(f"card {spec.card.card_id}/{spec.card.style}: rows have length "
+                                    f"{got}, the cards now {want}")
+            seg = row.get("segment", 0)                # rows of the first run have no segment
+            per_segment[seg] = per_segment.get(seg, 0) + 1
+            keys.setdefault((spec.label, seg), []).append(_row_key(row))
+        complete: dict[str, int] = {}
+        partial: list[dict] = []
+        for label, seg in sorted(keys, key=lambda k: (order[k[0]], k[1])):
+            got = keys[(label, seg)]
+            expected = by_label[label].expected
+            if len(set(got)) != len(got) or not set(got) <= expected:
+                problems.append(f"unit {label} segment {seg}: rows do not fit the design "
+                                "(duplicate or unexpected step / round / agent / value)")
+            elif set(got) == expected:
+                if label in complete:
+                    problems.append(f"unit {label} is complete in segments {complete[label]} "
+                                    f"and {seg}")
+                else:
+                    complete[label] = seg
+            else:
+                partial.append({"unit": label, "segment": seg, "n_rows": len(got)})
+        return {"n_rows": sum(per_segment.values()), "rows_per_segment": per_segment,
+                "complete": complete, "partial": partial,
+                "units_with_rows": {label for label, _ in keys}, "n_length_checked": n_length_checked,
+                "ends_with_newline": ends_with_newline, "truncated_last_line": truncated,
+                "problems": list(dict.fromkeys(problems))}
+
+    def _scan_raw_log(self, path: Path, specs: list[UnitSpec]) -> dict:
+        """Counters per segment and model, rebuilt from the run's raw-log records.
+
+        The same counting as _on_response / _count_invalid: a record with
+        "usage" is a billed response; an accepted payload is a success record
+        not followed by an "invalid_payload" event; parse failures are the
+        retried records with error_kind "parse". Segments are delimited by
+        the run's pgg_run_start (0) and pgg_run_resume events. The system
+        message of each session is compared with the card.
+        """
+        sessions = {s.session_id: s for s in specs}
+        per_segment: dict[int, dict] = {}
+        events, problems, started = [], [], set()
+        system_text: dict[str, str] = {}
+        seg = 0
+        lines, _ = _read_jsonl(path)
+        for rec in lines:
+            if not isinstance(rec, dict):
+                continue
+            event = rec.get("event")
+            if event in ("pgg_run_start", "pgg_run_resume") and rec.get("run") == self.cfg.run:
+                seg = rec.get("segment", 0)
+                events.append(rec)
+                per_segment.setdefault(seg, {k: _new_stats() for k in self.cfg.models})
+                continue
+            spec = sessions.get(rec.get("session_id"))
+            if spec is None:
+                continue
+            key = spec.model_key
+            if rec.get("model") != self.cfg.models[key]:
+                problems.append(f"raw log: session {spec.session_id} was called with model "
+                                f"{rec.get('model')!r}, the config has {self.cfg.models[key]!r}")
+                continue
+            s = per_segment.setdefault(seg, {k: _new_stats() for k in self.cfg.models})[key]
+            started.add(spec.label)
+            if event == "invalid_payload":
+                s["n_invalid"] += 1
+                s["n_accepted"] -= 1            # its success record was counted below
+                continue
+            if event is not None:
+                continue
+            messages = rec.get("messages")
+            if spec.session_id not in system_text and isinstance(messages, list) and messages:
+                system_text[spec.session_id] = (messages[0] or {}).get("content")
+            if "usage" in rec:                  # a response arrived: billed
+                self._count_response(s, key, {
+                    "usage": rec.get("usage"), "finish_reason": rec.get("finish_reason"),
+                    "provider": rec.get("provider"),
+                    "provider_error": rec.get("error_kind") == "provider"})
+            if "response_parsed" in rec:
+                s["n_accepted"] += 1
+            elif rec.get("retrying") and rec.get("error_kind") == "parse":
+                s["n_parse_fail"] += 1
+        for session_id, text in system_text.items():
+            card = sessions[session_id].card
+            if text != system_message(card)["content"]:
+                problems.append(f"card {card.card_id}/{card.style}: the text differs from the "
+                                "one in the raw log of the earlier segments")
+        return {"per_segment": per_segment, "events": events, "started": started,
+                "n_sessions_checked": len(system_text), "problems": list(dict.fromkeys(problems))}
+
+    def resume_plan(self) -> ResumePlan:
+        """What a resumed segment of this run has to do. Reads only; writes nothing.
+
+        ValueError when there is nothing to resume; config differences and
+        anomalies are collected in .problems (run(resume=True) refuses them).
+        """
+        cfg = self.cfg
+        out_dir = cfg.output_dir()
+        path = out_dir / f"{cfg.run}.jsonl"
+        if not path.is_file():
+            raise ValueError(f"nothing to resume: {path} does not exist")
+        problems: list[str] = []
+        summary_path = out_dir / f"{cfg.run}_summary.json"
+        previous = None
+        if summary_path.is_file():
+            try:
+                previous = json.loads(summary_path.read_text(encoding="utf-8"))
+            except ValueError:
+                problems.append(f"{summary_path.name} is not valid JSON")
+        specs = self.unit_specs()
+        rows = self._scan_rows(path, specs)
+        problems += rows["problems"]
+        log_path = self._raw_log_path()
+        log = self._scan_raw_log(log_path, specs) if log_path and log_path.is_file() else None
+        if log is not None:
+            problems += log["problems"]
+            if not log["events"]:
+                log = None                     # not this run's log
+
+        # config: the previous summary's "config", else the last start event's;
+        # an older summary is compared on the fields it has
+        checked: list[str] = []
+        current = self.config_record()
+        reference = (previous or {}).get("config")
+        if reference is None and log is not None:
+            reference = next((e["config"] for e in reversed(log["events"]) if "config" in e), None)
+        if reference is not None:
+            checked.append("config")
+            for k in sorted(set(reference) | set(current)):
+                if reference.get(k) != current.get(k):
+                    problems.append(f"config {k}: earlier {_short(reference.get(k))}, "
+                                    f"now {_short(current.get(k))}")
+        elif previous is not None:
+            for k, v in self._legacy_config().items():
+                if k in previous:
+                    checked.append(k)
+                    if previous[k] != v:
+                        problems.append(f"config {k}: earlier {_short(previous[k])}, now {_short(v)}")
+            if "per_model" in previous:
+                checked.append("models")
+                if set(previous["per_model"]) != set(cfg.models.values()):
+                    problems.append(f"config models: earlier {sorted(previous['per_model'])}, "
+                                    f"now {sorted(cfg.models.values())}")
+        else:
+            problems.append("no previous summary and no config in the raw log: "
+                            "the config cannot be checked")
+        unit_order = (previous or {}).get("unit_order")
+        if unit_order is None and log is not None:
+            unit_order = log["events"][-1].get("unit_order")
+        if unit_order is None:
+            problems.append("no earlier unit_order to compare")
+        else:
+            checked.append("unit_order")
+            if unit_order != [s.label for s in specs]:
+                problems.append("unit_order differs from the earlier one (models, cards, design, "
+                                "run name or seed_namespace changed)")
+        if log is not None:
+            checked.append(f"card texts in the raw log ({log['n_sessions_checked']} sessions)")
+        if rows["n_length_checked"]:
+            checked.append(f"card lengths of the rows ({rows['n_length_checked']} rows)")
+
+        # segments
+        known = {0} | set(rows["rows_per_segment"])
+        if log is not None:
+            known |= set(log["per_segment"])
+        if previous is not None:
+            known.add(previous.get("segment", 0))
+        segment = max(known) + 1
+
+        # cost and counts of the earlier segments: raw log, else summary
+        by_slug = {slug: k for k, slug in cfg.models.items()}
+        summary_cost = (previous or {}).get("total_cost_usd")
+        extra = 0.0
+        if log is not None:
+            source = "raw_log"
+            prior = {k: _merge_stats(*(st[k] for st in log["per_segment"].values()))
+                     for k in cfg.models}
+            cost_check = {"source": source}
+            if summary_cost is not None:
+                covered = previous.get("segment", 0)
+                raw_covered = sum(st["cost_usd"] for seg, by_model in log["per_segment"].items()
+                                  if seg <= covered for st in by_model.values())
+                diff = summary_cost - raw_covered
+                cost_check.update(summary_segment=covered, summary_total_cost_usd=summary_cost,
+                                  raw_log_cost_usd_same_segments=raw_covered,
+                                  match=abs(diff) < 1e-9)
+                # the summary saw more than the log holds: count the larger
+                extra = diff if diff >= 1e-9 else 0.0
+        elif previous is not None:
+            source = "summary"
+            prior = {k: _new_stats() for k in cfg.models}
+            for slug, st in (previous.get("per_model") or {}).items():
+                if slug in by_slug:
+                    prior[by_slug[slug]] = _merge_stats(st)
+            cost_check = {"source": source, "summary_total_cost_usd": summary_cost}
+            extra = max(0.0, (summary_cost or 0.0) - sum(s["cost_usd"] for s in prior.values()))
+        else:
+            source = "none"
+            prior = {k: _new_stats() for k in cfg.models}
+            cost_check = {"source": source}
+            problems.append("neither the run's raw log nor a previous summary holds the cost so "
+                            "far: the budget cannot go on")
+
+        # summary entries of the earlier segments
+        old = {e.get("segment"): e for e in (previous or {}).get("segments", [])}
+        if previous is not None and "segments" not in previous:      # summary of a first run
+            old[previous.get("segment", 0)] = {
+                "stop_reason": previous.get("stop_reason"), "duration_s": previous.get("duration_s"),
+                "cost_usd": previous.get("total_cost_usd"), "per_model": previous.get("per_model")}
+        segments = []
+        for seg in sorted(known):
+            entry = old.get(seg, {})
+            item = {"segment": seg, "summary_written": seg in old,
+                    "stop_reason": entry.get("stop_reason"), "duration_s": entry.get("duration_s")}
+            if log is not None:
+                by_model = log["per_segment"].get(seg, {})
+                item.update(cost_usd=sum(s["cost_usd"] for s in by_model.values()),
+                            n_responses=sum(s["n_responses"] for s in by_model.values()),
+                            per_model={cfg.models[k]: s for k, s in by_model.items()})
+            else:
+                item.update(cost_usd=entry.get("cost_usd"), per_model=entry.get("per_model"))
+            item["n_rows"] = rows["rows_per_segment"].get(seg, 0)
+            item["n_units_completed"] = sum(1 for s in rows["complete"].values() if s == seg)
+            segments.append(item)
+
+        if previous is not None:
+            backup = self._backup_path(previous)
+            if backup.exists() and backup.read_bytes() != summary_path.read_bytes():
+                problems.append(f"{backup.name} exists with other content than {summary_path.name}")
+
+        started = log["started"] if log is not None else set()
+        return ResumePlan(
+            segment=segment, prior_segments=sorted(known), n_units=len(specs),
+            complete=rows["complete"], partial=rows["partial"],
+            started_without_rows=[s.label for s in specs
+                                  if s.label in started and s.label not in rows["units_with_rows"]],
+            remaining=[s.label for s in specs if s.label not in rows["complete"]],
+            prior_stats=prior, prior_source=source, prior_extra_cost=extra,
+            cost_check=cost_check, segments=segments, n_rows=rows["n_rows"],
+            rows_per_segment=rows["rows_per_segment"],
+            results_ends_with_newline=rows["ends_with_newline"],
+            truncated_last_line=rows["truncated_last_line"], previous_summary=previous,
+            config_checked=checked, problems=list(dict.fromkeys(problems)))
+
+    def _backup_path(self, previous: dict) -> Path:
+        """<run>_summary.seg<k>.json, k = the last segment the summary describes."""
+        return self.cfg.output_dir() / f"{self.cfg.run}_summary.seg{previous.get('segment', 0)}.json"
+
+    def _apply_plan(self, plan: ResumePlan) -> None:
+        self.plan = plan
+        self.segment = plan.segment
+        self.prior_stats = {k: _merge_stats(s) for k, s in plan.prior_stats.items()}
+        self.prior_extra_cost = plan.prior_extra_cost
+        for key, s in self.prior_stats.items():
+            if (self.invalid_limit is not None
+                    and s["n_invalid"] + s["n_parse_fail"] > self.invalid_limit):
+                self.stopped_models[key] = "invalid_rate_cap"
+
+    def _backup_summary(self, summary_path: Path) -> Path | None:
+        """Copy the previous summary before it is replaced (never overwrites a copy)."""
+        if self.plan.previous_summary is None or not summary_path.is_file():
+            return None
+        data = summary_path.read_bytes()
+        backup = self._backup_path(self.plan.previous_summary)
+        if backup.exists():
+            if backup.read_bytes() != data:
+                raise ValueError(f"{backup} exists with other content; not overwritten")
+            return backup
+        with open(backup, "xb") as f:
+            f.write(data)
+        return backup
+
+    # -- signals -----------------------------------------------------------
+
+    def _on_signal(self, signum, frame) -> None:
+        """SIGINT / SIGTERM: no new call; inside the unit loop, leave it at once."""
+        if self._interrupted is not None:
+            return
+        self._interrupted = signal.Signals(signum).name
+        if self._raise_on_signal:
+            raise RunInterrupted(self._interrupted)
+
+    def _catch_signals(self, saved: dict) -> None:
+        """Install _on_signal for SIGINT and SIGTERM (main thread only)."""
+        if threading.current_thread() is not threading.main_thread():
+            return
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            previous = signal.getsignal(sig)
+            saved[sig] = previous if previous is not None else signal.SIG_DFL
+            signal.signal(sig, self._on_signal)
+
+    @staticmethod
+    def _restore_signals(saved: dict) -> None:
+        for sig, handler in saved.items():
+            signal.signal(sig, handler)
+        saved.clear()
+
+    def _wait_pools(self) -> None:
+        """After a signal: let the calls in flight end (they are billed and logged)."""
+        while True:
+            with self._lock:
+                if not self._pools:
+                    return
+                pool = self._pools.pop(0)
+            pool.shutdown(wait=True)
+
+    # -- summary -----------------------------------------------------------
+
+    def summary(self, started: float, results_path: Path | None = None) -> dict:
+        """Totals over all segments, this segment, the earlier ones and the units."""
+        per_model = {self.cfg.models[k]: _merge_stats(self.prior_stats[k], s)
+                     for k, s in self.stats.items()}
+        duration = time.time() - started
+        units, superseded, rows = None, [], None
+        if results_path is not None and self._specs and Path(results_path).is_file():
+            rows = self._scan_rows(Path(results_path), self._specs)
+            done = rows["complete"]
+            superseded = [p for p in rows["partial"] if p["segment"] < self.segment]
+            units = {"n_units": len(self._specs), "n_complete": len(done),
+                     "n_complete_this_segment": sum(1 for s in done.values() if s == self.segment),
+                     "n_partial_this_segment": sum(1 for p in rows["partial"]
+                                                   if p["segment"] == self.segment),
+                     "n_remaining": len(self._specs) - len(done)}
+        current = {
+            "segment": self.segment, "summary_written": True, "stop_reason": self.stop_reason,
+            "duration_s": duration, "cost_usd": self.segment_cost,
+            "n_responses": sum(s["n_responses"] for s in self.stats.values()),
+            "per_model": {self.cfg.models[k]: dict(s) for k, s in self.stats.items()},
+            "n_rows": rows["rows_per_segment"].get(self.segment, 0) if rows else None,
+            "n_units_completed": units["n_complete_this_segment"] if units else None,
+        }
+        out = {
             "run": self.cfg.run, "seed_namespace": self.cfg.seed_namespace,
+            "segment": self.segment, "resumed": self.segment > 0,
             "stop_reason": self.stop_reason, "stopped_models": dict(self.stopped_models),
             "budget_usd": self.cfg.budget_usd, "invalid_rate_cap": self.cfg.invalid_rate_cap,
             "invalid_limit_per_model": self.invalid_limit,
             "planned_calls_per_model": self.cfg.planned_calls_per_model(),
             "max_tokens": self.max_tokens, "request_timeout_s": self.timeout,
-            "reasoning_effort": {k: self.llm.reasoning_effort_label(self.cfg.effort_for(k))
-                                 for k in self.cfg.models},
-            "providers": {k: (provider_routing(p) | {"name": p["name"]}
-                              if (p := self.cfg.provider_for(k)) else None)
-                          for k in self.cfg.models},
+            "reasoning_effort": self._effort_summary(),
+            "providers": self._providers_summary(),
             "isolated_frame": self.cfg.isolated_frame,
             "parallel_units": self.cfg.parallel_units, "workers": self.cfg.workers,
-            "total_cost_usd": self.total_cost, "duration_s": time.time() - started,
-            "n_provider_error": sum(s["n_provider_error"] for s in self.stats.values()),
-            "n_provider_unknown": sum(s["n_provider_unknown"] for s in self.stats.values()),
-            "per_model": {self.cfg.models[k]: dict(s) for k, s in self.stats.items()},
+            "total_cost_usd": self.total_cost, "segment_cost_usd": self.segment_cost,
+            "duration_s": duration,
+            "n_provider_error": sum(s["n_provider_error"] for s in per_model.values()),
+            "n_provider_unknown": sum(s["n_provider_unknown"] for s in per_model.values()),
+            "per_model": per_model,
+            "units": units,
+            "superseded_units": superseded,
+            "row_validity_rule": ("a row counts only if its (unit, segment) holds the complete "
+                                  "unit; rows without a segment are segment 0"),
+            "segments": [*(self.plan.segments if self.plan else []), current],
             "unit_order": list(self.unit_order),
+            "config": self.config_record(),
         }
+        if self.prior_extra_cost:
+            out["prior_cost_not_in_raw_log_usd"] = self.prior_extra_cost
+        if rows and rows["problems"]:
+            out["row_problems"] = rows["problems"]
+        return out
 
-    def run(self) -> Path:
+    def _write_summary(self, started, path, summary_path, log_path, event: str) -> dict:
+        summary = self.summary(started, path)
+        self.llm._append_log({"ts": time.time(), "event": event, **summary})
+        raw_log = Path(self.llm.LOG_PATH)
+        # line counts after the event; the summary is one JSON document
+        summary["files"] = {
+            "results": {"path": str(path), "lines": _count_lines(path)},
+            "raw_log": {"path": str(raw_log), "lines": _count_lines(raw_log),
+                        "redirected_for_run": log_path is not None},
+            "summary": {"path": str(summary_path)},
+            "summary_backups": [str(p) for p in sorted(
+                summary_path.parent.glob(f"{self.cfg.run}_summary.seg*.json"))],
+        }
+        summary_path.write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        self.files = summary["files"]
+        return summary
+
+    # -- whole run ---------------------------------------------------------
+
+    def _start_event(self, out_dir: Path, todo: list[UnitSpec], backup: Path | None) -> dict:
+        event = {"ts": time.time(), "event": "pgg_run_resume" if self.plan else "pgg_run_start",
+                 "run": self.cfg.run, "segment": self.segment,
+                 "seed_namespace": self.cfg.seed_namespace, "output_dir": str(out_dir),
+                 "unit_order": self.unit_order, "config": self.config_record()}
+        if self.plan:
+            p = self.plan
+            event.update(
+                prior_segments=p.prior_segments, prior_cost_usd=p.prior_cost_usd,
+                prior_cost_source=p.prior_source, cost_check=p.cost_check,
+                n_units=p.n_units, n_complete=len(p.complete), superseded_units=p.partial,
+                started_without_rows=p.started_without_rows,
+                remaining_units=[s.label for s in todo], stopped_models=dict(self.stopped_models),
+                config_checked=p.config_checked,
+                summary_backup=str(backup) if backup else None)
+        return event
+
+    def run(self, *, resume: bool = False) -> Path:
+        """Run the design, or with resume=True the units an earlier run left (module docstring)."""
         cfg = self.cfg
         cfg.validate()                     # again: the output directory may be gone by now
         out_dir = cfg.output_dir()
-        out_dir.mkdir(exist_ok=True)       # the parent exists (validate)
         path = out_dir / f"{cfg.run}.jsonl"
         summary_path = out_dir / f"{cfg.run}_summary.json"
+        self._specs = self.unit_specs()
+        self.unit_order = [s.label for s in self._specs]
+        backup = None
+        if resume:
+            # everything is checked before the first call and the first write
+            plan = self.resume_plan()
+            if plan.problems:
+                raise ValueError(f"run {cfg.run!r} not resumed, no call made: "
+                                 + "; ".join(plan.problems))
+            self._apply_plan(plan)
+            backup = self._backup_summary(summary_path)
+            todo = [s for s in self._specs if s.label not in plan.complete]
+        else:
+            out_dir.mkdir(exist_ok=True)   # the parent exists (validate)
+            todo = self._specs
         started = time.time()
-        with open(path, "x", encoding="utf-8") as out:   # "x": never overwrite a run
+        # "x": never overwrite a run; "a": a resumed run only appends
+        with open(path, "a" if resume else "x", encoding="utf-8") as out:
+            if resume and not self.plan.results_ends_with_newline:
+                out.write("\n")            # a cut-off last line stays as it is, on its own
             log_path = cfg.raw_log_path()
             previous_log = self.llm.set_log_path(log_path) if log_path else None
             self._out = out
+            handlers: dict = {}
             try:
-                units = self.units()
-                self.unit_order = [label for _, label, _ in units]
-                self.llm._append_log({
-                    "ts": time.time(), "event": "pgg_run_start", "run": cfg.run,
-                    "seed_namespace": cfg.seed_namespace, "output_dir": str(out_dir),
-                    "unit_order": self.unit_order})
-                if cfg.parallel_units <= 1:
-                    for unit in units:
-                        self._run_unit(unit)
-                else:
-                    with ThreadPoolExecutor(max_workers=cfg.parallel_units) as pool:
-                        list(pool.map(self._run_unit, units))
+                try:
+                    self._catch_signals(handlers)
+                    self.llm._append_log(self._start_event(out_dir, todo, backup))
+                    units = self.units(todo)
+                    self._raise_on_signal = True
+                    if cfg.parallel_units <= 1:
+                        for unit in units:
+                            self._run_unit(unit)
+                    else:
+                        pool = self._pool(cfg.parallel_units)
+                        try:
+                            list(pool.map(self._run_unit, units))
+                        finally:
+                            self._release(pool)
+                    self._raise_on_signal = False
+                except RunInterrupted:
+                    self._raise_on_signal = False
             finally:
-                self._out = None
+                self._raise_on_signal = False
+                interrupted = self._interrupted
+                if interrupted is not None:
+                    self._stop("interrupted", signal=interrupted)
                 out.flush()
-                summary = self.summary(started)
-                self.llm._append_log({"ts": time.time(), "event": "pgg_run_end", **summary})
-                raw_log = Path(self.llm.LOG_PATH)
-                # line counts after the pgg_run_end event; the summary is one JSON document
-                summary["files"] = {
-                    "results": {"path": str(path), "lines": _count_lines(path)},
-                    "raw_log": {"path": str(raw_log), "lines": _count_lines(raw_log),
-                                "redirected_for_run": log_path is not None},
-                    "summary": {"path": str(summary_path)},
-                }
-                summary_path.write_text(
-                    json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                summary = self._write_summary(started, path, summary_path, log_path, "pgg_run_end")
+                if interrupted is not None:
+                    # the summary is on disk; a second signal now acts as usual
+                    self._restore_signals(handlers)
+                    self._wait_pools()
+                    out.flush()
+                    summary = self._write_summary(started, path, summary_path, log_path,
+                                                  "pgg_run_summary_updated")
+                self._restore_signals(handlers)
+                with self._lock:
+                    self._out = None
                 if previous_log is not None:
                     self.llm.set_log_path(previous_log)
-        self.files = summary["files"]
         if self.aborted is not None:
             raise self.aborted
         if self.stop_reason is not None:
@@ -1313,6 +2026,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="Public goods game engine. --dry-run prints call counts and an "
                     "estimated cost without any API call.")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--resume", action="store_true",
+                    help="go on with an interrupted run in the same directory (new segment); "
+                         "with --dry-run only print what is complete and what is left")
     ap.add_argument("--run", help="run name; output goes to <runs-dir>/<run>/")
     ap.add_argument("--config", help="JSON file with the options below (CLI wins)")
     ap.add_argument("--cards", help="JSON list of {card_id, style, text}")
@@ -1386,6 +2102,94 @@ def settings_from_args(args) -> dict:
     return s
 
 
+def run_config(run: str, s: dict, models: dict[str, str], output: dict) -> RunConfig:
+    """RunConfig of a real (or resumed) run from settings_from_args."""
+    return RunConfig(
+        run=run, cards=load_cards(s["cards"], s.get("cities")),
+        models=models, params=s["params"], conditions=tuple(s.get("conditions", ("N",))),
+        arms=tuple(s.get("arms", ARMS)), groups_per_cell=s.get("groups_per_cell", 2),
+        isolated_reps=s.get("isolated_reps", 2),
+        isolated_points=tuple(s.get("isolated_points", ISOLATED_POINTS)),
+        reasoning_effort=s.get("reasoning_effort"),
+        max_tokens=s.get("max_tokens"), max_invalid=s.get("max_invalid", 3),
+        rationale=s.get("rationale", True), workers=s.get("workers", 1),
+        parallel_units=s.get("parallel_units", 1),
+        seed_namespace=s.get("seed_namespace", "pgg"),
+        budget_usd=s.get("budget_usd"), invalid_rate_cap=s.get("invalid_rate_cap"),
+        stop_on_length=bool(s.get("stop_on_length", False)),
+        check_snapshot=bool(s.get("check_snapshot", False)),
+        request_timeout_s=s.get("request_timeout_s"),
+        providers=resolve_providers(s.get("providers"), models),
+        isolated_frame=s.get("isolated_frame", "one_shot"),
+        **output)
+
+
+def resume_report(engine: Engine, plan: ResumePlan) -> str:
+    """--resume --dry-run: what a resumed segment would do (nothing is written)."""
+    cfg = engine.cfg
+    specs = {s.label: s for s in engine.unit_specs()}
+    remaining = [specs[label] for label in plan.remaining]
+    never = [s for s in remaining if s.label not in plan.started_without_rows
+             and s.label not in {p["unit"] for p in plan.partial}]
+    lines = [
+        f"SÜRDÜRME PLANI (salt okunur: API çağrısı yok, hiçbir dosya yazılmadı): {cfg.output_dir()}",
+        f"Önceki segmentler: {plan.prior_segments}; sürdürülürse yeni segment: {plan.segment}",
+        f"Sonuç dosyası: {plan.n_rows} satır (segment başına {plan.rows_per_segment}); "
+        f"son satır {'yarım kesilmiş' if plan.truncated_last_line else 'tam'}",
+        f"Birimler: toplam {plan.n_units}; tamam {len(plan.complete)}; "
+        f"yarım (satırı var, baştan koşulacak) {len(plan.partial)}; "
+        f"satırsız başlamış (çağrı var, satır yok) {len(plan.started_without_rows)}; "
+        f"hiç başlanmamış {len(never)}; kalan (koşulacak) {len(remaining)}",
+        "Tamamlanma kuralı: bir birim, tek bir segmentte beklenen satırların hepsi varsa tamamdır "
+        "(grup: tur x ajan katkı satırı, P'de ceza satırı da; izole: her koşul değeri bir satır).",
+    ]
+    for label, seg in plan.complete.items():
+        lines.append(f"  tamam: {label} (segment {seg})")
+    for p in plan.partial:
+        lines.append(f"  yarım -> superseded: {p['unit']} (segment {p['segment']}, {p['n_rows']} satır)")
+    for label in plan.started_without_rows:
+        lines.append(f"  satırsız başlamış: {label}")
+    budget = cfg.budget_usd
+    lines.append(f"Önceki maliyet: {plan.prior_cost_usd:.6f} USD (kaynak: {plan.prior_source}; "
+                 f"kontrol: {plan.cost_check})"
+                 + (f"; bütçe {budget} USD, kalan {budget - plan.prior_cost_usd:.6f} USD"
+                    if budget is not None else ""))
+    limit = cfg.invalid_limit()
+    lines.append("Önceki sayımlar (model başına): " + "; ".join(
+        f"{k}: yanıt {s['n_responses']}, kabul {s['n_accepted']}, geçersiz {s['n_invalid']}, "
+        f"parse {s['n_parse_fail']}, sağlayıcı hatası {s['n_provider_error']}"
+        + (" — geçersiz tavanı aşılmış, koşulmaz"
+           if limit is not None and s["n_invalid"] + s["n_parse_fail"] > limit else "")
+        for k, s in plan.prior_stats.items()) + (f" (geçersiz sınırı {limit})" if limit else ""))
+    calls: dict[str, dict[str, int]] = {k: {} for k in cfg.models}
+    for spec in remaining:
+        for kind, n in spec.calls_by_kind:
+            calls[spec.model_key][kind] = calls[spec.model_key].get(kind, 0) + n
+    total_calls, total_cost, priced = 0, 0.0, True
+    parts = []
+    for key, by_kind in calls.items():
+        n = sum(by_kind.values())
+        total_calls += n
+        try:
+            total_cost += sum(n_k * pgg_cost.cost_per_call(cfg.models[key], kind)
+                              for kind, n_k in by_kind.items())
+        except KeyError:
+            priced = False
+        parts.append(f"{key} {n}")
+    lines.append(f"Kalan tahmini çağrı (kabul edilen karar; yeniden istekler hariç): "
+                 f"{', '.join(parts)}; toplam {total_calls}")
+    if priced:
+        lines.append(f"Kalan tahmini maliyet (tahmin, pgg_cost): {total_cost:.4f} USD; "
+                     f"önceki ile toplam {plan.prior_cost_usd + total_cost:.4f} USD")
+    lines.append("Config karşılaştırması: " + ", ".join(plan.config_checked))
+    if plan.problems:
+        lines.append("SORUN (sürdürme başlamaz):")
+        lines += [f"  - {p}" for p in plan.problems]
+    else:
+        lines.append("Config tutarlı; sorun yok.")
+    return "\n".join(lines)
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     s = settings_from_args(args)
@@ -1398,6 +2202,23 @@ def main(argv=None) -> int:
     names = s.get("models") or list(pgg_cost.PILOT_MODELS)
 
     cities = s.get("cities")
+    if args.dry_run and args.resume:
+        # read-only plan of a resumed run: no llm_client, no key, no write
+        if not args.run or not s.get("cards"):
+            build_parser().error("--resume needs --run and --cards")
+        open_ = open_choices(s)
+        if open_:
+            print("SEÇİLMEMİŞ: " + ", ".join(open_), file=sys.stderr)
+            return 1
+        try:
+            models = resolve_models(names, pgg_cost.PILOT_MODELS)
+            engine = Engine(run_config(args.run, s, models, resolve_output(s)), llm=OfflineLLM())
+            plan = engine.resume_plan()
+        except ValueError as e:
+            print(f"HATA: {e}", file=sys.stderr)
+            return 1
+        print(resume_report(engine, plan))
+        return 1 if plan.problems else 0
     if args.dry_run:
         models = resolve_models(names, pgg_cost.PILOT_MODELS)
         if s.get("cards"):
@@ -1442,28 +2263,16 @@ def main(argv=None) -> int:
     llm = _llm()
     try:
         models = resolve_models(names, llm.MODELS)
-        cfg = RunConfig(
-            run=args.run, cards=load_cards(s["cards"], cities),
-            models=models, params=params, conditions=conditions,
-            arms=arms, groups_per_cell=groups_per_cell, isolated_reps=isolated_reps,
-            isolated_points=points, reasoning_effort=s.get("reasoning_effort"),
-            max_tokens=s.get("max_tokens"), max_invalid=s.get("max_invalid", 3),
-            rationale=s.get("rationale", True), workers=s.get("workers", 1),
-            parallel_units=s.get("parallel_units", 1),
-            seed_namespace=s.get("seed_namespace", "pgg"),
-            budget_usd=s.get("budget_usd"), invalid_rate_cap=s.get("invalid_rate_cap"),
-            stop_on_length=bool(s.get("stop_on_length", False)),
-            check_snapshot=bool(s.get("check_snapshot", False)),
-            request_timeout_s=s.get("request_timeout_s"),
-            providers=resolve_providers(s.get("providers"), models),
-            isolated_frame=s.get("isolated_frame", "one_shot"),
-            **output)
+        cfg = run_config(args.run, s, models, output)
         engine = Engine(cfg, llm=llm)
     except ValueError as e:
         print(f"HATA: {e}", file=sys.stderr)
         return 1
     try:
-        path = engine.run()
+        path = engine.run(resume=args.resume)
+    except ValueError as e:                  # resume refused before any call
+        print(f"HATA: {e}", file=sys.stderr)
+        return 1
     except (RunAborted, RunStopped) as e:
         print(f"HATA: {e}", file=sys.stderr)
         _print_files(engine.files, file=sys.stderr)
@@ -1481,6 +2290,10 @@ def main(argv=None) -> int:
 def _print_files(files: dict | None, file=None) -> None:
     """Output files of the run and their line counts (summary["files"])."""
     for name, f in (files or {}).items():
+        if isinstance(f, list):                     # summary_backups: paths
+            for p in f:
+                print(f"dosya ({name}): {p}", file=file)
+            continue
         lines = f.get("lines")
         print(f"dosya ({name}): {f['path']}" + (f" — {lines} satır" if lines is not None else ""),
               file=file)
