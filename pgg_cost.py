@@ -131,6 +131,31 @@ def estimate(models: dict[str, str], counts: dict[str, int]) -> dict:
     }
 
 
+def ceiling(models: dict[str, str], counts: dict[str, int], max_tokens: int) -> dict:
+    """Upper bound per model if every call used all max_tokens (no re-requests).
+
+    Same input-token estimates as estimate(); only the output side changes.
+    Returns {key: cost_usd} plus "total".
+    """
+    out = {}
+    for key, slug in models.items():
+        if slug not in PRICES_USD_PER_M:
+            raise KeyError(f"no price for model {slug!r}; add it to PRICES_USD_PER_M")
+        price_in, price_out = PRICES_USD_PER_M[slug]
+        out[key] = sum(counts[kind] * (INPUT_TOKENS[kind] * price_in + max_tokens * price_out)
+                       for kind in CALL_KINDS) / 1e6
+    out["total"] = sum(out.values())
+    return out
+
+
+def format_ceiling(models: dict[str, str], counts: dict[str, int], max_tokens: int) -> str:
+    """One report line: the max_tokens ceiling (not an expected cost)."""
+    c = ceiling(models, counts, max_tokens)
+    per = ", ".join(f"{k} ~{v:.2f}" for k, v in c.items() if k != "total")
+    return (f"Tavan (her çağrı max_tokens={max_tokens} çıktıyı doldurursa; beklenen değil): "
+            f"{per}; toplam ~{c['total']:.2f} USD (tahmin)")
+
+
 def format_report(est: dict, *, description: str = "") -> str:
     """Human-readable (Turkish) dry-run report; every cost is labelled (tahmin)."""
     lines = ["KURU ÇALIŞTIRMA — API çağrısı yapılmadı."]

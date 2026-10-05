@@ -1,4 +1,5 @@
 {
+  "_notes": "Values starting with '<' are placeholders the user chooses; a real run does not start while one is left (dry runs only list them). providers: slug/name from GET /api/v1/models/{id}/endpoints (tag / provider_name); quantizations is optional (remove the key if not wanted). runs_dir: if absent, --runs-dir, PGG_RUNS_DIR or the orc workspace/runs is used.",
   "cards": "cards/pilot_cards.json",
   "cities": ["Boston", "Riyadh"],
   "models": ["deepseek/deepseek-v4.1-flash", "openai/gpt-6-luna", "google/gemini-2.5-flash-lite"],
@@ -7,7 +8,24 @@
   "groups_per_cell": 2,
   "isolated_reps": 2,
   "isolated_points": [0, 5, 10, 15, 20],
-  "max_tokens": 4000,
+  "isolated_frame": "<SEÇİLECEK: one_shot | repeated>",
+  "max_tokens": 16000,
+  "request_timeout_s": 300,
+  "providers": {
+    "deepseek": {
+      "slug": "<SEÇİLECEK: uç noktanın tag değeri>",
+      "name": "<SEÇİLECEK: uç noktanın provider_name değeri>",
+      "quantizations": ["<SEÇİLECEK: fp8 | fp4; istenmezse anahtarı sil>"]
+    },
+    "gpt": {
+      "slug": "<SEÇİLECEK: uç noktanın tag değeri>",
+      "name": "<SEÇİLECEK: uç noktanın provider_name değeri>"
+    },
+    "gemini": {
+      "slug": "<SEÇİLECEK: uç noktanın tag değeri>",
+      "name": "<SEÇİLECEK: uç noktanın provider_name değeri>"
+    }
+  },
   "max_invalid": 3,
   "rationale": true,
   "workers": 4,

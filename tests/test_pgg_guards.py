@@ -3,7 +3,6 @@
 import contextlib
 import io
 import json
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -23,30 +22,39 @@ PILOT_CONFIG = ROOT / "configs" / "pilot.json"
 PILOT_CARDS = ROOT / "cards" / "pilot_cards.json"
 
 
-def _response(content, *, model, cost=None, finish_reason="stop", reasoning_tokens=5):
-    usage = {"prompt_tokens": 100, "completion_tokens": 20,
-             "completion_tokens_details": {"reasoning_tokens": reasoning_tokens}}
-    if cost is not None:
-        usage["cost"] = cost
+def _response(content, *, model, cost=None, finish_reason="stop", reasoning_tokens=5,
+              provider=None, usage=None):
+    if usage is None:
+        usage = {"prompt_tokens": 100, "completion_tokens": 20,
+                 "completion_tokens_details": {"reasoning_tokens": reasoning_tokens}}
+        if cost is not None:
+            usage["cost"] = cost
     message = SimpleNamespace(content=content, reasoning=None)
     choice = SimpleNamespace(message=message, finish_reason=finish_reason)
-    return SimpleNamespace(model=model, choices=[choice],
+    resp = SimpleNamespace(model=model, choices=[choice],
                            usage=SimpleNamespace(model_dump=lambda: dict(usage)))
+    if provider is not None:
+        resp.provider = provider           # top-level provider name, as OpenRouter returns it
+    return resp
 
 
 class CostAPI(FakeAPI):
     """FakeAPI whose responses carry usage.cost, the requested model and a finish_reason.
 
-    content_fn(kwargs, default) may replace the content; finish_fn / model_fn
-    may replace finish_reason / the returned model.
+    content_fn(kwargs, default) may replace the content; finish_fn / model_fn /
+    provider_fn / usage_fn may replace finish_reason / the returned model /
+    the provider name / the whole usage dict.
     """
 
-    def __init__(self, cost=0.0001, content_fn=None, finish_fn=None, model_fn=None):
+    def __init__(self, cost=0.0001, content_fn=None, finish_fn=None, model_fn=None,
+                 provider_fn=None, usage_fn=None):
         super().__init__()
         self.cost = cost
         self.content_fn = content_fn
         self.finish_fn = finish_fn
         self.model_fn = model_fn
+        self.provider_fn = provider_fn
+        self.usage_fn = usage_fn
 
     def __call__(self, **kwargs):
         self.calls.append(kwargs)
@@ -55,7 +63,10 @@ class CostAPI(FakeAPI):
             content = self.content_fn(kwargs, content)
         finish = self.finish_fn(kwargs) if self.finish_fn else "stop"
         model = self.model_fn(kwargs) if self.model_fn else kwargs["model"]
-        return _response(content, model=model, cost=self.cost, finish_reason=finish)
+        provider = self.provider_fn(kwargs) if self.provider_fn else None
+        usage = self.usage_fn(kwargs) if self.usage_fn else None
+        return _response(content, model=model, cost=self.cost, finish_reason=finish,
+                         provider=provider, usage=usage)
 
 
 class GuardTestBase(EngineTestBase):
@@ -103,20 +114,38 @@ class PilotConfig(GuardTestBase):
         self.assertIn("1620 çağrı", text)
         self.assertIn("~0.38 USD", text)
         self.assertIn("reasoning_effort=gönderilmez", text)
-        self.assertIn("max_tokens=4000", text)
+        self.assertIn("max_tokens=16000", text)
+        self.assertIn("request_timeout_s=300", text)
         self.assertIn("budget_usd=1.0", text)
+        self.assertIn("SEÇİLMEMİŞ (gerçek koşu başlamaz)", text)   # providers, isolated_frame
 
     def test_pilot_config_end_to_end_with_mock_client(self):
-        self.use(CostAPI(cost=0.0001))
-        cwd = os.getcwd()
-        os.chdir(ROOT)                      # the config's card path is relative
-        self.addCleanup(os.chdir, cwd)
-        with contextlib.redirect_stdout(io.StringIO()):
+        # The committed config has placeholders (providers, isolated_frame): a
+        # real run must refuse without a call. A filled copy then runs.
+        self.use(CostAPI(cost=0.0001, provider_fn=lambda k: "Prov " + k["model"].split("/")[0]))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
             code = pgg_game.main(["--config", str(PILOT_CONFIG), "--run", "pilot_mock",
-                                  "--results-dir", str(self.tmp / "results")])
+                                  "--runs-dir", str(self.tmp)])
+        self.assertEqual(code, 1)
+        self.assertIn("yer tutucu", err.getvalue())
+        self.create.assert_not_called()
+        self.assertFalse((self.tmp / "pilot_mock").exists())
+
+        filled = json.loads(PILOT_CONFIG.read_text(encoding="utf-8"))
+        filled["cards"] = str(PILOT_CARDS)
+        filled["isolated_frame"] = "one_shot"
+        filled["providers"] = {key: {"slug": f"{key}-slug", "name": f"Prov {slug.split('/')[0]}"}
+                               for key, slug in llm_client.MODELS.items()}
+        config = self.tmp / "pilot_filled.json"
+        config.write_text(json.dumps(filled), encoding="utf-8")
+        (self.tmp / "runs").mkdir()
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = pgg_game.main(["--config", str(config), "--run", "pilot_mock",
+                                  "--runs-dir", str(self.tmp / "runs")])
         self.assertEqual(code, 0)
-        rows = [json.loads(x) for x in
-                (self.tmp / "results" / "pilot_mock.jsonl").read_text().splitlines()]
+        run_dir = self.tmp / "runs" / "pilot_mock"
+        rows = [json.loads(x) for x in (run_dir / "pilot_mock.jsonl").read_text().splitlines()]
         self.assertEqual(len(rows), 1620)
         self.assertEqual(len(self.api.calls), 1620)
         for slug in llm_client.MODELS.values():
@@ -128,18 +157,22 @@ class PilotConfig(GuardTestBase):
         self.assertEqual({r["card_id"].split("_")[0] for r in rows}, {"boston", "riyadh"})
         self.assertEqual({r["condition"] for r in rows}, {"N"})
         for kwargs in self.api.calls:     # reasoning_effort not sent, no temperature
-            self.assertEqual(kwargs["max_tokens"], 4000)
+            self.assertEqual(kwargs["max_tokens"], 16000)
+            self.assertEqual(kwargs["timeout"], 300)
             self.assertNotIn("reasoning", kwargs["extra_body"])
+            self.assertFalse(kwargs["extra_body"]["provider"]["allow_fallbacks"])
             self.assertNotIn("temperature", kwargs)
         self.assertEqual({r["reasoning_effort"] for r in rows}, {"default"})
-        self.assertEqual({r["max_tokens"] for r in rows}, {4000})
-        first = rows[0]
+        self.assertEqual({r["max_tokens"] for r in rows}, {16000})
+        first = [r for r in rows if r["arm"] == "group" and r["group_id"].endswith("-g00")][0]
         self.assertTrue(first["session_id"].startswith("pgg-pilot_mock-"))
         args = (first["model_key"], first["card_id"], first["style"], "N", "group", 0,
                 first["agent_id"], first["round"], "contribute")
         self.assertEqual(first["seed"], llm_client.stable_seed("pgg-pilot", "pilot_mock", *args))
         self.assertNotEqual(first["seed"], llm_client.stable_seed("pgg", "pilot_mock", *args))
-        summary = self.summary("pilot_mock")
+        summary = json.loads((run_dir / "pilot_mock_summary.json").read_text())
+        self.assertEqual(summary["files"]["results"]["lines"], 1620)
+        self.assertTrue((run_dir / "raw_calls.jsonl").exists())
         self.assertIsNone(summary["stop_reason"])
         self.assertEqual(summary["invalid_limit_per_model"], 27)   # 5 % of 540
         self.assertAlmostEqual(summary["total_cost_usd"], 1620 * 0.0001, places=9)

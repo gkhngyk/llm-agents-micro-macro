@@ -17,3 +17,5 @@ logs/
 
 # run outputs (one .jsonl per run, analyses); regenerate, do not commit
 results/
+# run directories (results, summary, raw log); real runs write them OUTSIDE the repo
+runs/

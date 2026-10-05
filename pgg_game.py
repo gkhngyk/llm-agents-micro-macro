@@ -22,7 +22,10 @@ Arms
             cannot leak a decision.
   isolated  conditional contribution schedule without any group interaction:
             "if the others contributed on average 0 / 5 / 10 / 15 / 20, how
-            much would you contribute?". Condition N only.
+            much would you contribute?". Condition N only. isolated_frame
+            "one_shot": one round, "There is no history and no other round";
+            "repeated": a round (neither first nor last) of the 10-round game,
+            given the others' mean of the previous round.
 
 Design choices
   * Isolated schedule = ONE CALL PER VALUE (5 calls per cell and
@@ -47,8 +50,12 @@ Design choices
   * Players are referred to by a fixed number within a game. With punishment
     a player is told only the TOTAL number of points received, not who
     assigned them (assumption, to be confirmed against the Herrmann
-    instructions); punishment spending is capped by the round's earnings from
-    the project; final earnings are not clamped at zero.
+    instructions); punishment spending is capped by the player's total
+    earnings of the round (before punishment); final earnings are not
+    clamped at zero.
+  * Labels in the prompts: "earnings from the project" is only
+    0.4 x (sum of contributions); "total earnings" of a round is
+    20 - c + 0.4 x (sum of contributions). Rules and history use both.
   * Every answer carries a short `rationale` string (written after the
     decision; --no-rationale removes it) so that models without native
     reasoning text (e.g. gemini-2.5-flash-lite) can still be read after the
@@ -89,16 +96,35 @@ llm_client's before_call / on_response hooks:
   stop_on_length    the first finish_reason "length" stops the run.
   check_snapshot    a response whose model differs from the requested slug
                     (other than a "-<suffix>") stops the run.
-A RunAborted (no valid decision for one call) also stops the other units.
-Units = one group game or one isolated schedule; parallel_units of them run
-at the same time (round-robin over the models), each with its own `workers`.
-Rows of a stopped (incomplete) round are not written. At the end
-results/<run>_summary.json holds per-model cost, response counts, invalid
-counts and the stop reason ("pgg_run_end" event in the raw log).
+  providers         per model {"slug", "name"[, "quantizations"]}: sent as
+                    OpenRouter provider routing (order + only = [slug],
+                    allow_fallbacks false). Every response's provider name
+                    (and quantization, if the response has one) goes to the
+                    raw log and the row; a provider name other than "name"
+                    stops the run (prereg §8.2 item 5, "provider_mismatch").
+Provider errors (finish_reason "error", or 0 tokens at 0 cost) are retried and
+counted as n_provider_error, apart from n_parse_fail and outside the
+invalid-rate cap. A RunAborted (no valid decision for one call) also stops
+the other units. Units = one group game or one isolated schedule;
+parallel_units of them run at the same time, each with its own `workers`.
+Run order: shuffled round-robin over the cells (card x model), keyed by
+stable_seed(seed_namespace, run, "order", ...): every block of len(cards)
+units has every card, so a run stopped early still has data from every card.
+The order is in the "pgg_run_start" raw-log event and the summary. Rows of a
+stopped (incomplete) round are not written. At the end <run>_summary.json
+holds per-model cost, response counts, invalid / parse / provider-error
+counts, the stop reason and the output files with their line counts
+("pgg_run_end" event in the raw log).
 
-Output: results/<run>.jsonl, one row per decision (never overwritten: an
-existing file is an error). --dry-run prints call counts and an estimated
-cost without importing llm_client (no key, no ../.env, no API).
+Output: <runs_dir>/<run>/ with <run>.jsonl (one row per decision, never
+overwritten: an existing file is an error), <run>_summary.json and
+raw_calls.jsonl. runs_dir must be an absolute, existing directory outside the
+git worktree (worktrees are deleted after merging, with their git-ignored
+outputs); CLI: --runs-dir, else config "runs_dir", else $PGG_RUNS_DIR, else
+<orc project>/workspace/runs when run from an orc worktree; otherwise the
+run does not start. Config values starting with "<" are placeholders: a real
+run does not start while one is left. --dry-run prints call counts and an
+estimated cost without importing llm_client (no key, no ../.env, no API).
 """
 
 from __future__ import annotations
@@ -106,6 +132,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import sys
 import threading
@@ -117,7 +144,7 @@ from pathlib import Path
 import pgg_cost
 
 PROJECT_DIR = Path(__file__).parent
-RESULTS_DIR = PROJECT_DIR / "results"
+RUNS_DIR_ENV = "PGG_RUNS_DIR"
 
 CONDITIONS = ("N", "P")
 ARMS = ("group", "isolated")
@@ -125,6 +152,29 @@ ARMS = ("group", "isolated")
 # not verified (maliyet_analizi.md §7 question 2).
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
 ISOLATED_POINTS = (0, 5, 10, 15, 20)
+ISOLATED_FRAMES = ("one_shot", "repeated")
+# provider.quantizations values of OpenRouter's provider routing (OpenAPI
+# schema "Quantization", https://openrouter.ai/openapi.json).
+QUANTIZATIONS = ("int4", "int8", "fp4", "mxfp4", "nvfp4", "fp6", "fp8", "mxfp8",
+                 "fp16", "bf16", "fp32", "unknown")
+# A config value the user still has to choose, e.g. "<SEÇİLECEK: ...>". A
+# real run does not start while one is left (dry runs only warn).
+PLACEHOLDER_PREFIX = "<"
+
+
+def is_placeholder(value) -> bool:
+    return isinstance(value, str) and value.strip().startswith(PLACEHOLDER_PREFIX)
+
+
+def placeholders_in(value, path: str) -> list[str]:
+    """Paths of every placeholder string inside a (nested) config value."""
+    if is_placeholder(value):
+        return [path]
+    if isinstance(value, dict):
+        return [p for k, v in value.items() for p in placeholders_in(v, f"{path}.{k}")]
+    if isinstance(value, (list, tuple)):
+        return [p for i, v in enumerate(value) for p in placeholders_in(v, f"{path}[{i}]")]
+    return []
 
 
 def _llm():
@@ -162,9 +212,18 @@ class GameParams:
 
 
 def project_payoffs(params: GameParams, contributions: list[int]) -> list[float]:
-    """earnings_i = endowment - c_i + mpcr * sum(c)   (before punishment)."""
+    """Total round earnings, before punishment: endowment - c_i + mpcr * sum(c).
+
+    (The name is kept for compatibility; the earnings from the project alone
+    are project_share.)
+    """
     total = sum(contributions)
     return [round(params.endowment - c + params.mpcr * total, 9) for c in contributions]
+
+
+def project_share(params: GameParams, contributions: list[int]) -> float:
+    """Earnings from the project, the same for every player: mpcr * sum(c)."""
+    return round(params.mpcr * sum(contributions), 9)
 
 
 def apply_punishment(params: GameParams, earnings: list[float], points: list[list[int]]):
@@ -313,6 +372,9 @@ def rules_text(params: GameParams, condition: str, *, single_round: bool = False
         "to contribute to a group project. Points that are not contributed stay with the player.",
         f"- Every point contributed to the project yields {_num(params.mpcr)} points "
         f"for each of the {n} players. Your earnings from the project in a round are therefore:",
+        f"  {_num(params.mpcr)} x (sum of all {n} players' contributions)",
+        "- Your total earnings in a round are the points you kept plus your earnings "
+        "from the project:",
         f"  {e} - (your contribution) + {_num(params.mpcr)} x (sum of all {n} players' contributions)",
     ]
     if condition == "P":
@@ -333,7 +395,7 @@ def rules_text(params: GameParams, condition: str, *, single_round: bool = False
 class RoundRecord:
     round: int
     contributions: list[int]
-    project_earnings: list[float]
+    round_earnings: list[float]                 # total, before punishment (project_payoffs)
     punishment: list[list[int]] | None = None   # punishment[i][j]: i -> j
     cost_paid: list[float] | None = None
     received: list[int] | None = None
@@ -352,7 +414,9 @@ def history_text(params: GameParams, condition: str, history: list[RoundRecord],
     for rec in history:
         lines.append(f"Round {rec.round}")
         lines.append("  " + _contributions_line(rec.contributions, me))
-        lines.append(f"  Your earnings from the project: {_num(rec.project_earnings[me])}.")
+        lines.append(f"  Your earnings from the project: "
+                     f"{_num(project_share(params, rec.contributions))}. "
+                     f"Your total earnings this round: {_num(rec.round_earnings[me])}.")
         if condition == "P":
             given = ", ".join(f"{_label(j, me)}: {p}" for j, p in enumerate(rec.punishment[me]) if p)
             lines.append(f"  Punishment points you assigned: {given or 'none'} "
@@ -382,31 +446,48 @@ def punishment_messages(params, card, history, me, round_no, contributions, earn
         history_text(params, "P", history, me),
         f"ROUND {round_no} of {params.rounds}, punishment step. You are {_player(me)}.\n"
         f"This round: {_contributions_line(contributions, me)} "
-        f"Your earnings from the project this round: {_num(earnings)}.\n"
+        f"Your earnings from the project this round: {_num(project_share(params, contributions))}. "
+        f"Your total earnings this round (before punishment): {_num(earnings)}.\n"
         f"You may now assign punishment points (0 to {params.max_punish}) to each other player. "
         f"A point costs you {_num(params.punish_cost)} and reduces the receiving player's earnings "
-        f"by {_num(params.punish_impact)}. Your total cost may not exceed your earnings from the "
-        f"project this round, so you can assign at most {budget // params.punish_cost} points in total. "
+        f"by {_num(params.punish_impact)}. Your total cost may not exceed your total earnings "
+        f"this round, so you can assign at most {budget // params.punish_cost} points in total. "
         "All players decide at the same time.",
     ])
     return [system_message(card), {"role": "user", "content": user}]
 
 
-def isolated_messages(params, card, others_mean: int) -> list[dict]:
-    n = params.group_size
-    user = "\n\n".join([
-        rules_text(params, "N", single_round=True),
-        "QUESTION\n"
-        f"Consider one round. Suppose the other {n - 1} players of your group each contribute, "
-        f"on average, {others_mean} points. There is no history and no other round.\n"
-        f"How many of your {params.endowment} points do you contribute to the group project? "
-        f"(a whole number from 0 to {params.endowment})",
-    ])
+def isolated_messages(params, card, others_mean: int, frame: str = "one_shot") -> list[dict]:
+    """One value of the conditional schedule.
+
+    frame "one_shot": a single round with no history and no other round (the
+    wording of the first engine). frame "repeated": a round of the
+    params.rounds-round game, given the others' mean of the previous round.
+    """
+    n, e = params.group_size, params.endowment
+    if frame == "one_shot":
+        rules = rules_text(params, "N", single_round=True)
+        question = (
+            f"Consider one round. Suppose the other {n - 1} players of your group each contribute, "
+            f"on average, {others_mean} points. There is no history and no other round.\n"
+            f"How many of your {e} points do you contribute to the group project? "
+            f"(a whole number from 0 to {e})")
+    elif frame == "repeated":
+        rules = rules_text(params, "N")
+        question = (
+            f"Consider a round of this {params.rounds}-round game that is neither the first nor "
+            f"the last round. In the previous round the other {n - 1} players of your group "
+            f"contributed, on average, {others_mean} points each.\n"
+            f"How many of your {e} points do you contribute to the group project in this round? "
+            f"(a whole number from 0 to {e})")
+    else:
+        raise ValueError(f"isolated_frame must be one of {ISOLATED_FRAMES}, got {frame!r}")
+    user = "\n\n".join([rules, "QUESTION\n" + question])
     return [system_message(card), {"role": "user", "content": user}]
 
 
 def punishment_budget(earnings: float) -> int:
-    """Whole points a player can pay for: the round's earnings from the project."""
+    """Whole points a player can pay for: the round's total earnings before punishment."""
     return int(earnings // 1)
 
 
@@ -450,6 +531,106 @@ def resolve_models(names, available: dict[str, str]) -> dict[str, str]:
     return out
 
 
+def resolve_providers(providers, models: dict[str, str]) -> dict | None:
+    """Config "providers" keyed by model key or slug -> keyed by model key."""
+    if providers is None:
+        return None
+    if not isinstance(providers, dict):
+        raise ValueError("providers must be a {model: {slug, name[, quantizations]}} object")
+    by_slug = {slug: key for key, slug in models.items()}
+    out = {}
+    for name, spec in providers.items():
+        key = name if name in models else by_slug.get(name)
+        if key is None:
+            raise ValueError(f"providers: {name!r} is not one of the run's models {sorted(models)}")
+        out[key] = spec
+    return out
+
+
+_PROVIDER_KEYS = {"slug", "name", "quantizations"}
+
+
+def check_provider_spec(model_key: str, spec) -> None:
+    """A pinned provider: {"slug", "name"[, "quantizations"]}, no placeholder."""
+    where = f"providers[{model_key}]"
+    if not isinstance(spec, dict):
+        raise ValueError(f"{where} must be an object with slug and name")
+    unknown = set(spec) - _PROVIDER_KEYS
+    if unknown:
+        raise ValueError(f"{where}: unknown keys {sorted(unknown)}; allowed {sorted(_PROVIDER_KEYS)}")
+    open_ = placeholders_in(spec, where)
+    if open_:
+        raise ValueError(f"not chosen yet (placeholder): {', '.join(open_)}")
+    for k in ("slug", "name"):
+        if not isinstance(spec.get(k), str) or not spec[k].strip():
+            raise ValueError(f"{where}.{k} must be a non-empty string")
+    quants = spec.get("quantizations")
+    if quants is not None and (not isinstance(quants, list) or not quants
+                               or any(q not in QUANTIZATIONS for q in quants)):
+        raise ValueError(f"{where}.quantizations must be a non-empty list from {QUANTIZATIONS}")
+
+
+def provider_routing(spec: dict) -> dict:
+    """OpenRouter provider-routing object that pins one provider, no fallback.
+
+    https://openrouter.ai/docs/guides/routing/provider-selection
+    """
+    routing = {"order": [spec["slug"]], "only": [spec["slug"]], "allow_fallbacks": False}
+    if spec.get("quantizations"):
+        routing["quantizations"] = list(spec["quantizations"])
+    return routing
+
+
+def same_provider(got: str, expected: str) -> bool:
+    """Provider names compared case- and punctuation-insensitively."""
+    def norm(s):
+        return re.sub(r"[^a-z0-9]", "", s.casefold())
+    return norm(got) == norm(expected)
+
+
+def default_runs_dir() -> Path | None:
+    """<orc project>/workspace/runs when this code runs in an orc worktree.
+
+    The layout <project>/worktrees/<task>/ next to <project>/workspace/ is
+    the only case where the workspace is known; elsewhere None, and a real
+    run needs the directory given explicitly.
+    """
+    if PROJECT_DIR.resolve().parent.name == "worktrees":
+        workspace = PROJECT_DIR.resolve().parent.parent / "workspace"
+        if workspace.is_dir():
+            return workspace / "runs"
+    return None
+
+
+def _inside_worktree(path: Path) -> bool:
+    """True if path lies in this code's directory and that is a git worktree.
+
+    A linked worktree has a .git FILE; worktrees are deleted after merging,
+    and git-ignored outputs inside them are lost with them (pilot_20261005).
+    """
+    if not (PROJECT_DIR / ".git").is_file():
+        return False
+    root, p = PROJECT_DIR.resolve(), path.resolve()
+    return p == root or root in p.parents
+
+
+def check_output_dir(path, *, must_exist: bool, what: str) -> Path:
+    """An absolute directory outside the worktree; ValueError otherwise."""
+    if is_placeholder(path):
+        raise ValueError(f"{what} not chosen yet (placeholder): {path!r}")
+    path = Path(path)
+    if not path.is_absolute():
+        raise ValueError(f"{what} must be an absolute path, got {str(path)!r}")
+    if must_exist and not path.is_dir():
+        raise ValueError(f"{what} {str(path)!r} does not exist (create it first)")
+    if not must_exist and not path.parent.is_dir():
+        raise ValueError(f"{what}: parent directory of {str(path)!r} does not exist")
+    if _inside_worktree(path):
+        raise ValueError(f"{what} {str(path)!r} is inside the git worktree {str(PROJECT_DIR)!r}; "
+                         "outputs must go to a persistent directory outside it")
+    return path
+
+
 @dataclass
 class RunConfig:
     run: str
@@ -475,14 +656,72 @@ class RunConfig:
     invalid_rate_cap: float | None = None
     stop_on_length: bool = False
     check_snapshot: bool = False
-    results_dir: Path = RESULTS_DIR
+    # Output location: exactly one of the two, both absolute and outside the
+    # git worktree. runs_dir (must exist) -> runs_dir/<run>/ holds the results,
+    # the summary and the raw log. results_dir (created; its parent must
+    # exist) holds the results and the summary; the raw log goes to log_path
+    # if given, else stays at llm_client.LOG_PATH.
+    runs_dir: Path | None = None
+    results_dir: Path | None = None
+    log_path: Path | None = None
+    request_timeout_s: float | None = None     # None = llm_client.DEFAULT_TIMEOUT_S
+    # {model key: {"slug", "name"[, "quantizations"]}}: pins one provider per
+    # model (order + only, allow_fallbacks false); a response from another
+    # provider stops the run (prereg §8.2 item 5). None = not pinned.
+    providers: dict | None = None
+    isolated_frame: str = "one_shot"           # ISOLATED_FRAMES
 
     def effort_for(self, model_key: str) -> str | None:
         if isinstance(self.reasoning_effort, dict):
             return self.reasoning_effort.get(model_key)
         return self.reasoning_effort
 
+    def provider_for(self, model_key: str) -> dict | None:
+        return (self.providers or {}).get(model_key)
+
+    def output_dir(self) -> Path:
+        """Directory of this run's results and summary."""
+        if self.runs_dir is not None:
+            return Path(self.runs_dir) / self.run
+        return Path(self.results_dir)
+
+    def raw_log_path(self) -> Path | None:
+        """Where the raw log is redirected for the run (None = not redirected)."""
+        if self.log_path is not None:
+            return Path(self.log_path)
+        if self.runs_dir is not None:
+            return self.output_dir() / "raw_calls.jsonl"
+        return None
+
     def validate(self) -> None:
+        if (self.runs_dir is None) == (self.results_dir is None):
+            raise ValueError("give exactly one of runs_dir and results_dir")
+        if self.runs_dir is not None:
+            check_output_dir(self.runs_dir, must_exist=True, what="runs_dir")
+        else:
+            check_output_dir(self.results_dir, must_exist=False, what="results_dir")
+        if self.log_path is not None:
+            check_output_dir(Path(self.log_path).parent, must_exist=False,
+                             what="log_path directory")
+        if is_placeholder(self.isolated_frame):
+            raise ValueError(f"isolated_frame not chosen yet (placeholder): {self.isolated_frame!r}; "
+                             f"choose one of {ISOLATED_FRAMES}")
+        if self.isolated_frame not in ISOLATED_FRAMES:
+            raise ValueError(f"isolated_frame must be one of {ISOLATED_FRAMES}, "
+                             f"got {self.isolated_frame!r}")
+        if self.request_timeout_s is not None and not self.request_timeout_s > 0:
+            raise ValueError("request_timeout_s must be positive")
+        if self.providers is not None:
+            if not isinstance(self.providers, dict):
+                raise ValueError("providers must be a {model key: spec} object")
+            extra = set(self.providers) - set(self.models)
+            if extra:
+                raise ValueError(f"providers for models not in the run: {sorted(extra)}")
+            missing = set(self.models) - set(self.providers)
+            if missing:
+                raise ValueError(f"providers given, but none for {sorted(missing)}")
+            for key in self.models:
+                check_provider_spec(key, self.providers[key])
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", self.run):
             raise ValueError(f"run name must be [A-Za-z0-9_.-]+, got {self.run!r}")
         if not set(self.conditions) <= set(CONDITIONS) or not self.conditions:
@@ -533,6 +772,14 @@ class RunConfig:
         return math.floor(self.invalid_rate_cap * self.planned_calls_per_model() + 1e-9)
 
 
+def _count_lines(path: Path) -> int | None:
+    """Number of lines of a file (None if it does not exist)."""
+    if not Path(path).exists():
+        return None
+    with open(path, "rb") as f:
+        return sum(1 for _ in f)
+
+
 def session_id_for(run, model_key, card_id, style, condition, arm, idx: int) -> str:
     """Deterministic session id: (run, model, card, style, condition, arm, group/repetition)."""
     return f"pgg-{run}-{model_key}-{card_id}-{style}-{condition}-{arm}-{idx:03d}"
@@ -548,6 +795,7 @@ class Answer:
     n_invalid: int
     n_parse_fail: int
     meta: dict
+    n_provider_error: int = 0
 
 
 class Engine:
@@ -556,15 +804,22 @@ class Engine:
         self.cfg = cfg
         self.llm = llm or _llm()
         self.max_tokens = cfg.max_tokens or self.llm.DEFAULT_MAX_TOKENS
+        self.timeout = cfg.request_timeout_s or self.llm.DEFAULT_TIMEOUT_S
         self._out = None
         self._lock = threading.Lock()
         self.invalid_limit = cfg.invalid_limit()
         self.stop_reason: str | None = None        # set once; stops every unit
         self.aborted: RunAborted | None = None
         self.stopped_models: dict[str, str] = {}   # model key -> reason
+        self.unit_order: list[str] = []
+        self.files: dict | None = None             # output files and line counts (run)
+        # n_provider_error: provider-error responses (llm_client error_kind
+        # "provider"); not in n_parse_fail and not in the invalid-rate cap.
+        # providers: provider name of every response -> count ("null" = none).
         self.stats = {key: {"cost_usd": 0.0, "n_responses": 0, "n_accepted": 0,
-                            "n_invalid": 0, "n_parse_fail": 0, "n_cost_estimated": 0,
-                            "n_length": 0, "finish_reasons": {}}
+                            "n_invalid": 0, "n_parse_fail": 0, "n_provider_error": 0,
+                            "n_cost_estimated": 0, "n_length": 0, "finish_reasons": {},
+                            "providers": {}, "n_provider_unknown": 0}
                       for key in cfg.models}
 
     # -- seeds / output ----------------------------------------------------
@@ -612,21 +867,30 @@ class Engine:
             self.cfg.models[model_key], max(pgg_cost.PRICES_USD_PER_M.values()))
         tokens_in = usage.get("prompt_tokens") or 0
         # unknown tokens: price a full max_tokens completion, the worst case
-        tokens_out = usage.get("completion_tokens") or self.max_tokens
+        tokens_out = usage.get("completion_tokens")
+        if tokens_out is None:
+            tokens_out = self.max_tokens
         return (tokens_in * price_in + tokens_out * price_out) / 1e6, True
 
     def _on_response(self, model_key: str, info: dict) -> None:
-        """Runs for every response that arrived (billed): cost, finish_reason, model."""
+        """Runs for every response that arrived (billed): cost, finish_reason, model, provider."""
         cost, estimated = self._response_cost(model_key, info.get("usage"))
         finish = info.get("finish_reason")
+        provider = info.get("provider")
+        pinned = self.cfg.provider_for(model_key)
         with self._lock:
             s = self.stats[model_key]
             s["cost_usd"] += cost
             s["n_responses"] += 1
             s["n_cost_estimated"] += estimated
             s["finish_reasons"][str(finish)] = s["finish_reasons"].get(str(finish), 0) + 1
+            s["providers"][str(provider)] = s["providers"].get(str(provider), 0) + 1
             if finish == "length":
                 s["n_length"] += 1
+            if info.get("provider_error"):
+                s["n_provider_error"] += 1
+            if pinned and provider is None:
+                s["n_provider_unknown"] += 1
         slug = self.cfg.models[model_key]
         snapshot = info.get("model_snapshot")
         if self.cfg.stop_on_length and finish == "length":
@@ -634,6 +898,12 @@ class Engine:
         if (self.cfg.check_snapshot and snapshot is not None and snapshot != slug
                 and not snapshot.startswith(slug + "-")):
             self._stop("model_snapshot_mismatch", model=slug, model_snapshot=snapshot)
+        # prereg §8.2 item 5: the provider changed. A response without a
+        # provider name cannot be checked; it is counted (n_provider_unknown).
+        if pinned and provider is not None and not same_provider(provider, pinned["name"]):
+            self._stop("provider_mismatch", model=slug, provider=provider,
+                       expected_provider=pinned["name"],
+                       provider_quantization=info.get("provider_quantization"))
 
     def _count_invalid(self, model_key: str, ans: "Answer") -> None:
         with self._lock:
@@ -664,13 +934,23 @@ class Engine:
 
     def _ask(self, model_key, messages, schema, is_valid, session_id, ctx: dict) -> Answer:
         meta: dict = {}
+        counts: dict = {}
+        last: dict = {}            # info of the last response = the accepted one
+
+        def on_response(info):
+            last.clear()
+            last.update(info)
+            self._on_response(model_key, info)
+
+        pinned = self.cfg.provider_for(model_key)
         try:
             parsed, n_invalid, n_parse_fail = self.llm.call_llm_valid(
                 self.cfg.models[model_key], messages, schema=schema, session_id=session_id,
                 is_valid=is_valid, max_tokens=self.max_tokens, max_invalid=self.cfg.max_invalid,
                 return_parse_fail=True, reasoning_effort=self.cfg.effort_for(model_key),
                 meta=meta, before_call=lambda: self._before_call(model_key),
-                on_response=lambda info: self._on_response(model_key, info))
+                on_response=on_response, timeout=self.timeout, counts=counts,
+                provider=provider_routing(pinned) if pinned else None)
         except RuntimeError as e:
             self.llm._append_log({
                 "ts": time.time(), "event": "pgg_run_aborted", "run": self.cfg.run,
@@ -680,7 +960,10 @@ class Engine:
             raise RunAborted(
                 f"run {self.cfg.run!r} stopped: no valid decision for {ctx} "
                 f"(model {model_key}): {e}") from e
-        ans = Answer(parsed, n_invalid, n_parse_fail, meta)
+        meta["provider"] = last.get("provider")
+        meta["provider_quantization"] = last.get("provider_quantization")
+        ans = Answer(parsed, n_invalid, n_parse_fail, meta,
+                     n_provider_error=counts.get("n_provider_error", 0))
         self._count_invalid(model_key, ans)
         return ans
 
@@ -695,6 +978,9 @@ class Engine:
             "round": round_no, "card_id": card.card_id, "style": card.style,
             **fields,
             "n_invalid": ans.n_invalid, "n_parse_fail": ans.n_parse_fail,
+            "n_provider_error": ans.n_provider_error,
+            "provider": ans.meta.get("provider"),
+            "provider_quantization": ans.meta.get("provider_quantization"),
             "finish_reason": ans.meta.get("finish_reason"), "usage": ans.meta.get("usage"),
             "reasoning": ans.meta.get("reasoning"),
             "rationale": rationale if isinstance(rationale, str) else None,
@@ -787,7 +1073,7 @@ class Engine:
             ctx = {"round": None, "group_id": group_id, "condition": condition,
                    "agent_id": 1, "step": "isolated", "others_mean": x}
             return self._ask(
-                model_key, isolated_messages(p, card, x),
+                model_key, isolated_messages(p, card, x, self.cfg.isolated_frame),
                 contribution_schema(p, self.cfg.rationale),
                 lambda c: is_valid_contribution(c, p), session_id, ctx)
 
@@ -799,33 +1085,66 @@ class Engine:
                 step="isolated", ans=ans,
                 seed=self.seed_for(model_key, card.card_id, card.style, condition,
                                    "isolated", rep, 1, "isolated", x),
-                contribution=ans.parsed["contribution"], others_mean=x))
+                contribution=ans.parsed["contribution"], others_mean=x,
+                isolated_frame=self.cfg.isolated_frame))
 
     # -- whole run ---------------------------------------------------------
 
-    def units(self) -> list[tuple[str, object]]:
-        """(model key, callable) per group game / schedule, round-robin over models."""
+    def _order_key(self, *parts) -> tuple:
+        """Sort key of the run order: stable_seed (crc32), the parts break ties."""
+        return (self.llm.stable_seed(self.cfg.seed_namespace, self.cfg.run, "order", *parts),
+                tuple(map(str, parts)))
+
+    def _cell_units(self, model_key: str, card: Card) -> list[tuple[str, str, object]]:
+        """(model key, label, callable) of one cell (card x model).
+
+        Group games and isolated schedules alternate, so that a run stopped
+        early has both arms.
+        """
         cfg = self.cfg
-        per_model = {}
-        for model_key in cfg.models:
-            units = []
-            for card in cfg.cards:
-                if "group" in cfg.arms:
-                    for condition in cfg.conditions:
-                        for idx in range(cfg.groups_per_cell):
-                            units.append(lambda m=model_key, c=card, k=condition, i=idx:
-                                         self.play_group(m, [c] * cfg.params.group_size, k, i))
-                if "isolated" in cfg.arms:
-                    for rep in range(cfg.isolated_reps):
-                        units.append(lambda m=model_key, c=card, r=rep: self.play_isolated(m, c, r))
-            per_model[model_key] = units
+        groups, schedules = [], []
+        tag = f"{model_key}|{card.card_id}|{card.style}"
+        if "group" in cfg.arms:
+            for condition in cfg.conditions:
+                for idx in range(cfg.groups_per_cell):
+                    groups.append((model_key, f"{tag}|{condition}|group|{idx}",
+                                   lambda m=model_key, c=card, k=condition, i=idx:
+                                   self.play_group(m, [c] * cfg.params.group_size, k, i)))
+        if "isolated" in cfg.arms:
+            for rep in range(cfg.isolated_reps):
+                schedules.append((model_key, f"{tag}|N|isolated|{rep}",
+                                  lambda m=model_key, c=card, r=rep: self.play_isolated(m, c, r)))
         out = []
-        for k in range(max(len(u) for u in per_model.values())):
-            out += [(m, u[k]) for m, u in per_model.items() if k < len(u)]
+        for k in range(max(len(groups), len(schedules))):
+            out += groups[k:k + 1] + schedules[k:k + 1]
+        return out
+
+    def units(self) -> list[tuple[str, str, object]]:
+        """(model key, label, callable) per group game / schedule, in run order.
+
+        Shuffled round-robin over the cells (card x model), so that a run
+        stopped early still has data from every card: pass k runs the k-th
+        unit of every cell. Within a pass the cards are in a stable_seed
+        order (new per pass) and the models rotate over them (Latin square),
+        so every block of len(cards) consecutive units has every card once
+        and the pass has every cell once. Never hash().
+        """
+        cfg = self.cfg
+        models = sorted(cfg.models, key=lambda m: self._order_key("model", m))
+        cells = {(m, c.card_id, c.style): self._cell_units(m, c)
+                 for m in cfg.models for c in cfg.cards}
+        out = []
+        for k in range(max(len(u) for u in cells.values())):
+            cards = sorted(cfg.cards, key=lambda c: self._order_key("card", k, c.card_id, c.style))
+            for j in range(len(models)):
+                for i, card in enumerate(cards):
+                    cell = cells[(models[(i + j) % len(models)], card.card_id, card.style)]
+                    if k < len(cell):
+                        out.append(cell[k])
         return out
 
     def _run_unit(self, unit) -> None:
-        model_key, fn = unit
+        model_key, _label, fn = unit
         if self.stop_reason is not None or model_key in self.stopped_models:
             return
         try:
@@ -845,23 +1164,39 @@ class Engine:
             "budget_usd": self.cfg.budget_usd, "invalid_rate_cap": self.cfg.invalid_rate_cap,
             "invalid_limit_per_model": self.invalid_limit,
             "planned_calls_per_model": self.cfg.planned_calls_per_model(),
-            "max_tokens": self.max_tokens,
+            "max_tokens": self.max_tokens, "request_timeout_s": self.timeout,
             "reasoning_effort": {k: self.llm.reasoning_effort_label(self.cfg.effort_for(k))
                                  for k in self.cfg.models},
+            "providers": {k: (provider_routing(p) | {"name": p["name"]}
+                              if (p := self.cfg.provider_for(k)) else None)
+                          for k in self.cfg.models},
+            "isolated_frame": self.cfg.isolated_frame,
             "parallel_units": self.cfg.parallel_units, "workers": self.cfg.workers,
             "total_cost_usd": self.total_cost, "duration_s": time.time() - started,
+            "n_provider_error": sum(s["n_provider_error"] for s in self.stats.values()),
             "per_model": {self.cfg.models[k]: dict(s) for k, s in self.stats.items()},
+            "unit_order": list(self.unit_order),
         }
 
     def run(self) -> Path:
         cfg = self.cfg
-        cfg.results_dir.mkdir(parents=True, exist_ok=True)
-        path = cfg.results_dir / f"{cfg.run}.jsonl"
+        cfg.validate()                     # again: the output directory may be gone by now
+        out_dir = cfg.output_dir()
+        out_dir.mkdir(exist_ok=True)       # the parent exists (validate)
+        path = out_dir / f"{cfg.run}.jsonl"
+        summary_path = out_dir / f"{cfg.run}_summary.json"
         started = time.time()
         with open(path, "x", encoding="utf-8") as out:   # "x": never overwrite a run
+            log_path = cfg.raw_log_path()
+            previous_log = self.llm.set_log_path(log_path) if log_path else None
             self._out = out
             try:
                 units = self.units()
+                self.unit_order = [label for _, label, _ in units]
+                self.llm._append_log({
+                    "ts": time.time(), "event": "pgg_run_start", "run": cfg.run,
+                    "seed_namespace": cfg.seed_namespace, "output_dir": str(out_dir),
+                    "unit_order": self.unit_order})
                 if cfg.parallel_units <= 1:
                     for unit in units:
                         self._run_unit(unit)
@@ -870,10 +1205,22 @@ class Engine:
                         list(pool.map(self._run_unit, units))
             finally:
                 self._out = None
+                out.flush()
                 summary = self.summary(started)
-                (cfg.results_dir / f"{cfg.run}_summary.json").write_text(
-                    json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 self.llm._append_log({"ts": time.time(), "event": "pgg_run_end", **summary})
+                raw_log = Path(self.llm.LOG_PATH)
+                # line counts after the pgg_run_end event; the summary is one JSON document
+                summary["files"] = {
+                    "results": {"path": str(path), "lines": _count_lines(path)},
+                    "raw_log": {"path": str(raw_log), "lines": _count_lines(raw_log),
+                                "redirected_for_run": log_path is not None},
+                    "summary": {"path": str(summary_path)},
+                }
+                summary_path.write_text(
+                    json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                if previous_log is not None:
+                    self.llm.set_log_path(previous_log)
+        self.files = summary["files"]
         if self.aborted is not None:
             raise self.aborted
         if self.stop_reason is not None:
@@ -887,7 +1234,8 @@ class Engine:
 # --------------------------------------------------------------------------
 
 def dry_run_report(*, models: dict[str, str], n_cells: int, params: GameParams,
-                   conditions, arms, groups_per_cell, isolated_reps, n_points) -> str:
+                   conditions, arms, groups_per_cell, isolated_reps, n_points,
+                   max_tokens: int | None = None) -> str:
     counts = pgg_cost.call_counts(
         n_cells=n_cells, conditions=conditions, groups_per_cell=groups_per_cell,
         isolated_reps=isolated_reps, n_points=n_points, group_size=params.group_size,
@@ -898,7 +1246,43 @@ def dry_run_report(*, models: dict[str, str], n_cells: int, params: GameParams,
         f"kollar {'+'.join(arms)}, hücre başına {groups_per_cell} homojen grup "
         f"({params.group_size} ajan x {params.rounds} tur), izole çizelge "
         f"{isolated_reps} tekrar x {n_points} değer (değer başına ayrı çağrı).")
-    return pgg_cost.format_report(est, description=description)
+    report = pgg_cost.format_report(est, description=description)
+    if max_tokens:
+        report += "\n" + pgg_cost.format_ceiling(models, counts, max_tokens)
+    return report
+
+
+def resolve_output(s: dict) -> dict:
+    """RunConfig output fields of a real run; ValueError when not known or not usable.
+
+    Order: runs_dir (CLI --runs-dir, else config "runs_dir"), else the
+    PGG_RUNS_DIR environment variable, else default_runs_dir(). The legacy
+    results_dir (CLI --results-dir or config) is an explicit alternative: the
+    raw log then goes to results_dir/raw_calls.jsonl. Either way the path is
+    absolute and outside the git worktree; nothing is created here.
+    """
+    runs_dir, results_dir = s.get("runs_dir"), s.get("results_dir")
+    if runs_dir is not None and results_dir is not None:
+        raise ValueError("give either runs_dir or results_dir, not both")
+    if results_dir is not None:
+        path = check_output_dir(results_dir, must_exist=False, what="results_dir")
+        return {"results_dir": path, "log_path": path / "raw_calls.jsonl"}
+    source = "--runs-dir / config runs_dir"
+    if runs_dir is None and os.environ.get(RUNS_DIR_ENV):
+        runs_dir, source = os.environ[RUNS_DIR_ENV], RUNS_DIR_ENV
+    if runs_dir is None:
+        runs_dir, source = default_runs_dir(), "default (workspace/runs)"
+        if runs_dir is None:
+            raise ValueError(
+                "the runs directory is not known here: give --runs-dir, config \"runs_dir\" "
+                f"or {RUNS_DIR_ENV} (an absolute, existing directory outside the worktree)")
+    return {"runs_dir": check_output_dir(runs_dir, must_exist=True, what=f"runs_dir [{source}]")}
+
+
+def open_choices(s: dict) -> list[str]:
+    """Config values the user still has to choose (placeholders)."""
+    return [p for key in ("providers", "isolated_frame", "runs_dir", "results_dir")
+            for p in placeholders_in(s.get(key), key)]
 
 
 def _csv(value: str) -> list[str]:
@@ -916,7 +1300,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Public goods game engine. --dry-run prints call counts and an "
                     "estimated cost without any API call.")
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--run", help="run name; output goes to results/<run>.jsonl")
+    ap.add_argument("--run", help="run name; output goes to <runs-dir>/<run>/")
     ap.add_argument("--config", help="JSON file with the options below (CLI wins)")
     ap.add_argument("--cards", help="JSON list of {card_id, style, text}")
     ap.add_argument("--cities", help="comma-separated: keep only these cards' \"city\" values")
@@ -928,6 +1312,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--groups-per-cell", type=int)
     ap.add_argument("--isolated-reps", type=int)
     ap.add_argument("--points", help="isolated conditioning values (default 0,5,10,15,20)")
+    ap.add_argument("--isolated-frame", choices=ISOLATED_FRAMES,
+                    help="isolated arm wording: one_shot (default) or repeated")
     ap.add_argument("--group-size", type=int)
     ap.add_argument("--rounds", type=int)
     ap.add_argument("--endowment", type=int)
@@ -935,6 +1321,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--reasoning-effort", help="e.g. low, or deepseek=low,gpt=medium "
                     "(default: not sent, provider default)")
     ap.add_argument("--max-tokens", type=int)
+    ap.add_argument("--request-timeout", type=float, dest="request_timeout_s",
+                    help="client timeout per request, seconds (default 300)")
     ap.add_argument("--max-invalid", type=int)
     ap.add_argument("--no-rationale", action="store_true", default=None)
     ap.add_argument("--workers", type=int)
@@ -945,7 +1333,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="per model, fraction of planned calls (e.g. 0.05)")
     ap.add_argument("--stop-on-length", action="store_true", default=None)
     ap.add_argument("--check-snapshot", action="store_true", default=None)
-    ap.add_argument("--results-dir")
+    ap.add_argument("--runs-dir", help=f"absolute, existing directory outside the worktree; "
+                    f"output goes to <runs-dir>/<run>/ (else config runs_dir, {RUNS_DIR_ENV}, "
+                    "or the orc workspace/runs)")
+    ap.add_argument("--results-dir", help="legacy: absolute directory outside the worktree "
+                    "for <run>.jsonl, the summary and raw_calls.jsonl")
     return ap
 
 
@@ -965,10 +1357,12 @@ def settings_from_args(args) -> dict:
         "arms": _csv(args.arms) if args.arms else None,
         "groups_per_cell": args.groups_per_cell, "isolated_reps": args.isolated_reps,
         "isolated_points": [int(x) for x in _csv(args.points)] if args.points else None,
+        "isolated_frame": args.isolated_frame,
         "reasoning_effort": _parse_effort(args.reasoning_effort) if args.reasoning_effort else None,
         "max_tokens": args.max_tokens, "max_invalid": args.max_invalid,
+        "request_timeout_s": args.request_timeout_s,
         "rationale": False if args.no_rationale else None, "workers": args.workers,
-        "results_dir": args.results_dir,
+        "runs_dir": args.runs_dir, "results_dir": args.results_dir,
     }
     s.update({k: v for k, v in cli.items() if v is not None})
     params = dict(s.get("params", {}))
@@ -999,41 +1393,78 @@ def main(argv=None) -> int:
             n_cells = s.get("cells", 6)
         print(dry_run_report(
             models=models, n_cells=n_cells, params=params, conditions=conditions, arms=arms,
-            groups_per_cell=groups_per_cell, isolated_reps=isolated_reps, n_points=len(points)))
-        guards = {k: s[k] for k in ("max_tokens", "budget_usd", "invalid_rate_cap",
-                                    "stop_on_length", "check_snapshot", "seed_namespace",
-                                    "parallel_units", "workers") if s.get(k) is not None}
+            groups_per_cell=groups_per_cell, isolated_reps=isolated_reps, n_points=len(points),
+            max_tokens=s.get("max_tokens")))
+        guards = {k: s[k] for k in ("max_tokens", "request_timeout_s", "budget_usd",
+                                    "invalid_rate_cap", "stop_on_length", "check_snapshot",
+                                    "seed_namespace", "parallel_units", "workers",
+                                    "isolated_frame") if s.get(k) is not None}
         print(f"Ayarlar: reasoning_effort={s.get('reasoning_effort') or 'gönderilmez'}, "
               + ", ".join(f"{k}={v}" for k, v in guards.items()))
+        open_ = open_choices(s)
+        if open_:
+            print("SEÇİLMEMİŞ (gerçek koşu başlamaz): " + ", ".join(open_))
         return 0
 
     if not args.run or not s.get("cards"):
         build_parser().error("a real run needs --run and --cards (or use --dry-run)")
+    # Everything that can stop a real run is checked here, before llm_client is
+    # imported and before any call.
+    open_ = open_choices(s)
+    if open_:
+        print("HATA: seçilmemiş ayarlar (yer tutucu), gerçek koşu başlamadı: "
+              + ", ".join(open_), file=sys.stderr)
+        return 1
+    try:
+        output = resolve_output(s)
+    except ValueError as e:
+        print(f"HATA: çıktı dizini: {e}", file=sys.stderr)
+        return 1
     llm = _llm()
-    cfg = RunConfig(
-        run=args.run, cards=load_cards(s["cards"], cities),
-        models=resolve_models(names, llm.MODELS), params=params, conditions=conditions,
-        arms=arms, groups_per_cell=groups_per_cell, isolated_reps=isolated_reps,
-        isolated_points=points, reasoning_effort=s.get("reasoning_effort"),
-        max_tokens=s.get("max_tokens"), max_invalid=s.get("max_invalid", 3),
-        rationale=s.get("rationale", True), workers=s.get("workers", 1),
-        parallel_units=s.get("parallel_units", 1), seed_namespace=s.get("seed_namespace", "pgg"),
-        budget_usd=s.get("budget_usd"), invalid_rate_cap=s.get("invalid_rate_cap"),
-        stop_on_length=bool(s.get("stop_on_length", False)),
-        check_snapshot=bool(s.get("check_snapshot", False)),
-        results_dir=Path(s["results_dir"]) if s.get("results_dir") else RESULTS_DIR)
-    engine = Engine(cfg, llm=llm)
+    try:
+        models = resolve_models(names, llm.MODELS)
+        cfg = RunConfig(
+            run=args.run, cards=load_cards(s["cards"], cities),
+            models=models, params=params, conditions=conditions,
+            arms=arms, groups_per_cell=groups_per_cell, isolated_reps=isolated_reps,
+            isolated_points=points, reasoning_effort=s.get("reasoning_effort"),
+            max_tokens=s.get("max_tokens"), max_invalid=s.get("max_invalid", 3),
+            rationale=s.get("rationale", True), workers=s.get("workers", 1),
+            parallel_units=s.get("parallel_units", 1),
+            seed_namespace=s.get("seed_namespace", "pgg"),
+            budget_usd=s.get("budget_usd"), invalid_rate_cap=s.get("invalid_rate_cap"),
+            stop_on_length=bool(s.get("stop_on_length", False)),
+            check_snapshot=bool(s.get("check_snapshot", False)),
+            request_timeout_s=s.get("request_timeout_s"),
+            providers=resolve_providers(s.get("providers"), models),
+            isolated_frame=s.get("isolated_frame", "one_shot"),
+            **output)
+        engine = Engine(cfg, llm=llm)
+    except ValueError as e:
+        print(f"HATA: {e}", file=sys.stderr)
+        return 1
     try:
         path = engine.run()
     except (RunAborted, RunStopped) as e:
         print(f"HATA: {e}", file=sys.stderr)
+        _print_files(engine.files, file=sys.stderr)
         return 1
     if engine.stopped_models:
         print(f"UYARI: durdurulan modeller: {engine.stopped_models}", file=sys.stderr)
         print(f"yazıldı: {path}")
+        _print_files(engine.files)
         return 2
     print(f"yazıldı: {path}")
+    _print_files(engine.files)
     return 0
+
+
+def _print_files(files: dict | None, file=None) -> None:
+    """Output files of the run and their line counts (summary["files"])."""
+    for name, f in (files or {}).items():
+        lines = f.get("lines")
+        print(f"dosya ({name}): {f['path']}" + (f" — {lines} satır" if lines is not None else ""),
+              file=file)
 
 
 if __name__ == "__main__":

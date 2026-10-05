@@ -34,21 +34,36 @@ tested. Design choices are in the module docstring; the main ones:
   never defaulted. Beyond the retry limit the run stops with an error.
 - `reasoning_effort` (`--reasoning-effort low` or `deepseek=low,gpt=medium`) and
   `--max-tokens` are configurable and written to every row; temperature is not
-  sent. Output: `results/<run>.jsonl`, one row per decision (git-ignored).
+  sent. Output: `<runs-dir>/<run>/<run>.jsonl`, one row per decision.
 
 - Run guards (off by default): `--budget-usd` (hard cap on accumulated
   `usage.cost`, no new call once reached), `--invalid-rate-cap` (per model,
   stops that model), `--stop-on-length`, `--check-snapshot`. `--cities` keeps
   only some cards of a file; `--parallel-units` runs several group games at
-  once. Per-model cost and counts go to `results/<run>_summary.json`.
+  once. Per-model cost and counts go to `<runs-dir>/<run>/<run>_summary.json`.
 - The pilot (prereg_pilot.md) is `configs/pilot.json`: cards
   `cards/pilot_cards.json` filtered to Boston + Riyadh, N, 3 models,
-  `max_tokens` 4000, `reasoning_effort` not sent, 1 USD cap, 5 % invalid cap,
-  seed namespace `pgg-pilot`.
+  `max_tokens` 16000, client timeout 300 s, `reasoning_effort` not sent,
+  1 USD cap, 5 % invalid cap, seed namespace `pgg-pilot`.
+- **Outputs go outside the repository.** A real run writes
+  `<runs-dir>/<run>/{<run>.jsonl, <run>_summary.json, raw_calls.jsonl}`;
+  `runs-dir` is `--runs-dir`, else config `runs_dir`, else `$PGG_RUNS_DIR`,
+  else the orc `workspace/runs` (only when run from an orc worktree). It must
+  be absolute, exist and lie outside the git worktree, else the run does not
+  start. The summary lists the files with their line counts.
+- **Choices left to the user** are placeholders (`"<SEÇİLECEK: ...>"`) in the
+  config: one provider per model (`providers`, OpenRouter provider routing,
+  no fallback; a response from another provider stops the run) and the
+  isolated arm's wording (`isolated_frame`: `one_shot` or `repeated`). A real
+  run does not start while one is left; `--dry-run` lists them.
+- Provider errors (`finish_reason` "error", or 0 tokens at 0 cost) are
+  retried and counted as `n_provider_error`, not as parse failures and not in
+  the invalid cap. Units run in a shuffled round-robin over card x model
+  (stable_seed), so a stopped run has data from every card.
 
 ```bash
 .venv/bin/python pgg_game.py --dry-run --config configs/pilot.json   # no API, no key
-.venv/bin/python pgg_game.py --config configs/pilot.json --run pilot_<date>
+.venv/bin/python pgg_game.py --config configs/pilot.json --run pilot_<date> --runs-dir /abs/path/runs
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
