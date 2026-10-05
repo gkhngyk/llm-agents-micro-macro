@@ -167,23 +167,39 @@ results file is opened for appending only; no earlier byte is changed.
     calls left, cost so far) without writing anything and without llm_client.
 SIGINT and SIGTERM stop the run with stop_reason "interrupted": the summary is
 written at once, then once more after the calls in flight have ended.
+
+Hangs. Every HTTP attempt has a wall-clock deadline, request_deadline_s
+(default llm_client.DEFAULT_REQUEST_DEADLINE_S = 300 s; config / CLI
+--request-deadline): past it the attempt is abandoned, logged as a transport
+error with error_subkind "deadline" and retried. Units run in a thread pool
+(parallel_units threads, also when it is 1) while the main thread watches the
+run's raw log: when no record (response, error or event) has been written to
+it for stall_timeout_s (default DEFAULT_STALL_TIMEOUT_S = 900 s; config / CLI
+--stall-timeout), the run stops with stop_reason "stalled" without waiting
+for the calls in flight; the summary is written and the run can go on with
+--resume. Both settings are operational: like workers, parallel_units and
+request_timeout_s they are outside the config compared on --resume, and they
+may differ between segments. Every segment's summary entry records them and
+the code version (git commit and sha256 of the code files).
 """
 
 from __future__ import annotations
 
 import argparse
 import dataclasses
+import functools
 import hashlib
 import json
 import math
 import os
 import re
 import signal
+import subprocess
 import sys
 import threading
 import time
 import zlib
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -203,6 +219,11 @@ ISOLATED_FRAMES = ("one_shot", "repeated")
 # schema "Quantization", https://openrouter.ai/openapi.json).
 QUANTIZATIONS = ("int4", "int8", "fp4", "mxfp4", "nvfp4", "fp6", "fp8", "mxfp8",
                  "fp16", "bf16", "fp32", "unknown")
+# Seconds without any raw-log record after which a run stops as "stalled".
+# Keep it well above request_deadline_s: one attempt may take that long.
+DEFAULT_STALL_TIMEOUT_S = 900.0
+# Files whose sha256 goes into code_version().
+CODE_FILES = ("pgg_game.py", "llm_client.py", "pgg_cost.py")
 # A config value the user still has to choose, e.g. "<SEÇİLECEK: ...>". A
 # real run does not start while one is left (dry runs only warn).
 PLACEHOLDER_PREFIX = "<"
@@ -229,6 +250,43 @@ def _llm():
     return llm_client
 
 
+@functools.lru_cache(maxsize=1)
+def _code_version() -> str:
+    return json.dumps(_read_code_version())
+
+
+def code_version() -> dict:
+    """Git commit (and whether the code files differ from it) and sha256 of CODE_FILES.
+
+    Read once per process (the code that runs is the code imported at the
+    start). git_commit / git_dirty are None when this directory is not the
+    top of a git checkout (e.g. a copied code directory) or git is missing.
+    """
+    return json.loads(_code_version())
+
+
+def _read_code_version() -> dict:
+    out = {"git_commit": None, "git_dirty": None,
+           "files_sha256": {name: hashlib.sha256((PROJECT_DIR / name).read_bytes()).hexdigest()
+                            for name in CODE_FILES if (PROJECT_DIR / name).is_file()}}
+
+    def git(*args):
+        proc = subprocess.run(["git", "-C", str(PROJECT_DIR), *args], capture_output=True,
+                              text=True, timeout=10, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+        return proc.stdout.strip() if proc.returncode == 0 else None
+
+    try:
+        top = git("rev-parse", "--show-toplevel")
+        if top is None or Path(top).resolve() != PROJECT_DIR.resolve():
+            return out
+        out["git_commit"] = git("rev-parse", "HEAD")
+        status = git("status", "--porcelain", "--untracked-files=no", "--", *CODE_FILES)
+        out["git_dirty"] = None if status is None else bool(status)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return out
+
+
 def _offline_stable_seed(namespace: str, *parts, base: int = 0) -> int:
     """Copy of llm_client.stable_seed (crc32) for dry runs, which must not import
     llm_client; a test checks that both agree."""
@@ -244,6 +302,7 @@ class OfflineLLM:
     """
     DEFAULT_MAX_TOKENS = 16000
     DEFAULT_TIMEOUT_S = 300.0
+    DEFAULT_REQUEST_DEADLINE_S = 300.0
     LOG_PATH = None
     stable_seed = staticmethod(_offline_stable_seed)
 
@@ -749,6 +808,10 @@ class RunConfig:
     results_dir: Path | None = None
     log_path: Path | None = None
     request_timeout_s: float | None = None     # None = llm_client.DEFAULT_TIMEOUT_S
+    # wall-clock limit of one HTTP attempt; None = llm_client.DEFAULT_REQUEST_DEADLINE_S
+    request_deadline_s: float | None = None
+    # raw log idle this long -> stop_reason "stalled"; None = DEFAULT_STALL_TIMEOUT_S
+    stall_timeout_s: float | None = None
     # {model key: {"slug", "name"[, "quantizations"]}}: pins one provider per
     # model (order + only, allow_fallbacks false); a response from another
     # provider stops the run (prereg §8.2 item 5). None = not pinned.
@@ -793,8 +856,11 @@ class RunConfig:
         if self.isolated_frame not in ISOLATED_FRAMES:
             raise ValueError(f"isolated_frame must be one of {ISOLATED_FRAMES}, "
                              f"got {self.isolated_frame!r}")
-        if self.request_timeout_s is not None and not self.request_timeout_s > 0:
-            raise ValueError("request_timeout_s must be positive")
+        for name in ("request_timeout_s", "request_deadline_s", "stall_timeout_s"):
+            value = getattr(self, name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
+                                      or not value > 0):
+                raise ValueError(f"{name} must be positive")
         if self.providers is not None:
             if not isinstance(self.providers, dict):
                 raise ValueError("providers must be a {model key: spec} object")
@@ -990,6 +1056,10 @@ class Engine:
         self.llm = llm or _llm()
         self.max_tokens = cfg.max_tokens or self.llm.DEFAULT_MAX_TOKENS
         self.timeout = cfg.request_timeout_s or self.llm.DEFAULT_TIMEOUT_S
+        self.deadline = cfg.request_deadline_s or self.llm.DEFAULT_REQUEST_DEADLINE_S
+        self.stall_timeout = cfg.stall_timeout_s or DEFAULT_STALL_TIMEOUT_S
+        self.code_version: dict | None = None      # set by run()
+        self.stalled = False                       # the stall watchdog stopped the run
         self._out = None
         self._lock = threading.Lock()
         self.invalid_limit = cfg.invalid_limit()
@@ -1050,8 +1120,8 @@ class Engine:
         budget = self.cfg.budget_usd
         if budget is not None and self.stop_reason is None and self.total_cost >= budget:
             self._stop("budget", budget_usd=budget)
-        if self.stop_reason is not None or self._interrupted is not None:
-            raise RunStopped(self.stop_reason or "interrupted")
+        if self.stop_reason is not None or self._interrupted is not None or self.stalled:
+            raise RunStopped(self.stop_reason or ("stalled" if self.stalled else "interrupted"))
         if model_key in self.stopped_models:
             raise ModelStopped(self.stopped_models[model_key])
 
@@ -1108,6 +1178,11 @@ class Engine:
                        expected_provider=pinned["name"],
                        provider_quantization=info.get("provider_quantization"))
 
+    def _on_late_response(self, model_key: str, info: dict) -> None:
+        """A response that came after its attempt was abandoned: billed, counted, not a decision."""
+        with self._lock:
+            self._count_response(self.stats[model_key], model_key, info)
+
     def _count_invalid(self, model_key: str, ans: "Answer") -> None:
         with self._lock:
             s = self.stats[model_key]
@@ -1135,8 +1210,8 @@ class Engine:
         return pool
 
     def _release(self, pool: ThreadPoolExecutor) -> None:
-        """Wait for the pool, except after a signal: then the summary comes first."""
-        interrupted = self._interrupted is not None
+        """Wait for the pool, except after a signal (the summary comes first) or a stall."""
+        interrupted = self._interrupted is not None or self.stalled
         pool.shutdown(wait=not interrupted, cancel_futures=interrupted)
         if not interrupted:
             with self._lock:
@@ -1172,7 +1247,9 @@ class Engine:
                 return_parse_fail=True, reasoning_effort=self.cfg.effort_for(model_key),
                 meta=meta, before_call=lambda: self._before_call(model_key),
                 on_response=on_response, timeout=self.timeout, counts=counts,
-                provider=provider_routing(pinned) if pinned else None)
+                provider=provider_routing(pinned) if pinned else None,
+                request_deadline_s=self.deadline,
+                on_late_response=lambda info: self._on_late_response(model_key, info))
         except RuntimeError as e:
             self.llm._append_log({
                 "ts": time.time(), "event": "pgg_run_aborted", "run": self.cfg.run,
@@ -1418,8 +1495,9 @@ class Engine:
     def config_record(self) -> dict:
         """What every segment of a run must share (summary "config").
 
-        workers, parallel_units and request_timeout_s may differ between
-        segments: they change neither the prompts nor the guards.
+        workers, parallel_units, request_timeout_s, request_deadline_s and
+        stall_timeout_s may differ between segments: they change neither the
+        prompts nor the guards.
         """
         cfg = self.cfg
         return _json_round({
@@ -1544,6 +1622,12 @@ class Engine:
                 continue
             s = per_segment.setdefault(seg, {k: _new_stats() for k in self.cfg.models})[key]
             started.add(spec.label)
+            if event == "late_response":        # billed after its attempt was abandoned
+                if "usage" in rec:
+                    self._count_response(s, key, {
+                        "usage": rec.get("usage"), "finish_reason": rec.get("finish_reason"),
+                        "provider": rec.get("provider"), "provider_error": False})
+                continue
             if event == "invalid_payload":
                 s["n_invalid"] += 1
                 s["n_accepted"] -= 1            # its success record was counted below
@@ -1689,11 +1773,19 @@ class Engine:
             old[previous.get("segment", 0)] = {
                 "stop_reason": previous.get("stop_reason"), "duration_s": previous.get("duration_s"),
                 "cost_usd": previous.get("total_cost_usd"), "per_model": previous.get("per_model")}
+        started_by_seg = {e.get("segment", 0): e for e in (log["events"] if log else [])}
         segments = []
         for seg in sorted(known):
             entry = old.get(seg, {})
             item = {"segment": seg, "summary_written": seg in old,
                     "stop_reason": entry.get("stop_reason"), "duration_s": entry.get("duration_s")}
+            # operational settings and code version, as the segment recorded them
+            # (summary entry, else its start / resume event; absent before #46)
+            for k in ("stalled", "request_deadline_s", "stall_timeout_s", "code_version"):
+                if k in entry:
+                    item[k] = entry[k]
+                elif k in started_by_seg.get(seg, {}):
+                    item[k] = started_by_seg[seg][k]
             if log is not None:
                 by_model = log["per_segment"].get(seg, {})
                 item.update(cost_usd=sum(s["cost_usd"] for s in by_model.values()),
@@ -1810,6 +1902,9 @@ class Engine:
             "per_model": {self.cfg.models[k]: dict(s) for k, s in self.stats.items()},
             "n_rows": rows["rows_per_segment"].get(self.segment, 0) if rows else None,
             "n_units_completed": units["n_complete_this_segment"] if units else None,
+            "stalled": self.stalled,
+            "request_deadline_s": self.deadline, "stall_timeout_s": self.stall_timeout,
+            "code_version": self.code_version,
         }
         out = {
             "run": self.cfg.run, "seed_namespace": self.cfg.seed_namespace,
@@ -1819,6 +1914,8 @@ class Engine:
             "invalid_limit_per_model": self.invalid_limit,
             "planned_calls_per_model": self.cfg.planned_calls_per_model(),
             "max_tokens": self.max_tokens, "request_timeout_s": self.timeout,
+            "request_deadline_s": self.deadline, "stall_timeout_s": self.stall_timeout,
+            "stalled": self.stalled, "code_version": self.code_version,
             "reasoning_effort": self._effort_summary(),
             "providers": self._providers_summary(),
             "isolated_frame": self.cfg.isolated_frame,
@@ -1866,6 +1963,8 @@ class Engine:
         event = {"ts": time.time(), "event": "pgg_run_resume" if self.plan else "pgg_run_start",
                  "run": self.cfg.run, "segment": self.segment,
                  "seed_namespace": self.cfg.seed_namespace, "output_dir": str(out_dir),
+                 "request_deadline_s": self.deadline, "stall_timeout_s": self.stall_timeout,
+                 "code_version": self.code_version,
                  "unit_order": self.unit_order, "config": self.config_record()}
         if self.plan:
             p = self.plan
@@ -1879,10 +1978,54 @@ class Engine:
                 summary_backup=str(backup) if backup else None)
         return event
 
+    def _log_state(self):
+        """(size, mtime) of the raw log the run writes to; None if it does not exist."""
+        try:
+            st = Path(self.llm.LOG_PATH).stat()
+        except (OSError, TypeError):
+            return None
+        return st.st_size, st.st_mtime_ns
+
+    def _watch(self, futures) -> None:
+        """Wait for the units; stop the run as "stalled" when the raw log stays unchanged.
+
+        Returns when every unit has ended, after a signal, or at a stall. An
+        exception of a unit cancels the units not started yet and is raised.
+        """
+        pending = set(futures)
+        poll = min(1.0, self.stall_timeout / 4)
+        last, since = self._log_state(), time.monotonic()
+        while pending and self._interrupted is None:
+            done, pending = wait(pending, timeout=poll, return_when=FIRST_EXCEPTION)
+            for f in done:
+                if f.exception() is not None:
+                    for p in pending:
+                        p.cancel()
+                    raise f.exception()
+            state, now = self._log_state(), time.monotonic()
+            if state != last:
+                last, since = state, now
+            elif pending and now - since >= self.stall_timeout:
+                self._stall(now - since, len(pending))
+                return
+
+    def _stall(self, idle_s: float, n_units_open: int) -> None:
+        """The watchdog fired: no new call; the run ends without waiting for the calls in flight."""
+        with self._lock:
+            self.stalled = True
+        detail = {"stall_timeout_s": self.stall_timeout, "idle_s": round(idle_s, 3),
+                  "n_units_not_ended": n_units_open, "raw_log": str(self.llm.LOG_PATH)}
+        if self.stop_reason is None:
+            self._stop("stalled", **detail)
+        else:                              # another reason came first; still recorded
+            self.llm._append_log({"ts": time.time(), "event": "pgg_run_stalled",
+                                  "run": self.cfg.run, "stop_reason": self.stop_reason, **detail})
+
     def run(self, *, resume: bool = False) -> Path:
         """Run the design, or with resume=True the units an earlier run left (module docstring)."""
         cfg = self.cfg
         cfg.validate()                     # again: the output directory may be gone by now
+        self.code_version = code_version()
         out_dir = cfg.output_dir()
         path = out_dir / f"{cfg.run}.jsonl"
         summary_path = out_dir / f"{cfg.run}_summary.json"
@@ -1915,17 +2058,16 @@ class Engine:
                     self._catch_signals(handlers)
                     self.llm._append_log(self._start_event(out_dir, todo, backup))
                     units = self.units(todo)
-                    self._raise_on_signal = True
-                    if cfg.parallel_units <= 1:
-                        for unit in units:
-                            self._run_unit(unit)
-                    else:
-                        pool = self._pool(cfg.parallel_units)
-                        try:
-                            list(pool.map(self._run_unit, units))
-                        finally:
-                            self._release(pool)
-                    self._raise_on_signal = False
+                    # units in a pool (in order when parallel_units is 1); the
+                    # main thread watches for a stall and receives the signals
+                    pool = self._pool(cfg.parallel_units)
+                    try:
+                        futures = [pool.submit(self._run_unit, unit) for unit in units]
+                        self._raise_on_signal = True
+                        self._watch(futures)
+                    finally:
+                        self._raise_on_signal = False
+                        self._release(pool)
                 except RunInterrupted:
                     self._raise_on_signal = False
             finally:
@@ -1933,9 +2075,12 @@ class Engine:
                 interrupted = self._interrupted
                 if interrupted is not None:
                     self._stop("interrupted", signal=interrupted)
+                if self.stalled:
+                    with self._lock:       # calls still in flight write no row any more
+                        self._out = None
                 out.flush()
                 summary = self._write_summary(started, path, summary_path, log_path, "pgg_run_end")
-                if interrupted is not None:
+                if interrupted is not None and not self.stalled:
                     # the summary is on disk; a second signal now acts as usual
                     self._restore_signals(handlers)
                     self._wait_pools()
@@ -2051,7 +2196,13 @@ def build_parser() -> argparse.ArgumentParser:
                     "(default: not sent, provider default)")
     ap.add_argument("--max-tokens", type=int)
     ap.add_argument("--request-timeout", type=float, dest="request_timeout_s",
-                    help="client timeout per request, seconds (default 300)")
+                    help="client timeout per read / connect operation, seconds (default 300)")
+    ap.add_argument("--request-deadline", type=float, dest="request_deadline_s",
+                    help="wall-clock limit of one HTTP attempt, seconds (default 300); "
+                         "operational, not compared on --resume")
+    ap.add_argument("--stall-timeout", type=float, dest="stall_timeout_s",
+                    help="stop the run as \"stalled\" after this many seconds without any "
+                         "raw-log record (default 900); operational, not compared on --resume")
     ap.add_argument("--max-invalid", type=int)
     ap.add_argument("--no-rationale", action="store_true", default=None)
     ap.add_argument("--workers", type=int)
@@ -2090,6 +2241,7 @@ def settings_from_args(args) -> dict:
         "reasoning_effort": _parse_effort(args.reasoning_effort) if args.reasoning_effort else None,
         "max_tokens": args.max_tokens, "max_invalid": args.max_invalid,
         "request_timeout_s": args.request_timeout_s,
+        "request_deadline_s": args.request_deadline_s, "stall_timeout_s": args.stall_timeout_s,
         "rationale": False if args.no_rationale else None, "workers": args.workers,
         "runs_dir": args.runs_dir, "results_dir": args.results_dir,
     }
@@ -2119,6 +2271,7 @@ def run_config(run: str, s: dict, models: dict[str, str], output: dict) -> RunCo
         stop_on_length=bool(s.get("stop_on_length", False)),
         check_snapshot=bool(s.get("check_snapshot", False)),
         request_timeout_s=s.get("request_timeout_s"),
+        request_deadline_s=s.get("request_deadline_s"), stall_timeout_s=s.get("stall_timeout_s"),
         providers=resolve_providers(s.get("providers"), models),
         isolated_frame=s.get("isolated_frame", "one_shot"),
         **output)
@@ -2182,6 +2335,13 @@ def resume_report(engine: Engine, plan: ResumePlan) -> str:
         lines.append(f"Kalan tahmini maliyet (tahmin, pgg_cost): {total_cost:.4f} USD; "
                      f"önceki ile toplam {plan.prior_cost_usd + total_cost:.4f} USD")
     lines.append("Config karşılaştırması: " + ", ".join(plan.config_checked))
+    lines.append(f"İşletim ayarları (config karşılaştırması dışında): "
+                 f"request_timeout_s={engine.timeout:g}, request_deadline_s={engine.deadline:g}, "
+                 f"stall_timeout_s={engine.stall_timeout:g}, workers={cfg.workers}, "
+                 f"parallel_units={cfg.parallel_units}")
+    if engine.stall_timeout <= engine.deadline:
+        lines.append("UYARI: stall_timeout_s, request_deadline_s'den büyük değil; tek bir uzun "
+                     "deneme bekçiyi tetikleyebilir")
     if plan.problems:
         lines.append("SORUN (sürdürme başlamaz):")
         lines += [f"  - {p}" for p in plan.problems]
@@ -2229,7 +2389,8 @@ def main(argv=None) -> int:
             models=models, n_cells=n_cells, params=params, conditions=conditions, arms=arms,
             groups_per_cell=groups_per_cell, isolated_reps=isolated_reps, n_points=len(points),
             max_tokens=s.get("max_tokens")))
-        guards = {k: s[k] for k in ("max_tokens", "request_timeout_s", "budget_usd",
+        guards = {k: s[k] for k in ("max_tokens", "request_timeout_s", "request_deadline_s",
+                                    "stall_timeout_s", "budget_usd",
                                     "invalid_rate_cap", "stop_on_length", "check_snapshot",
                                     "seed_namespace", "parallel_units", "workers",
                                     "isolated_frame") if s.get(k) is not None}
@@ -2268,6 +2429,10 @@ def main(argv=None) -> int:
     except ValueError as e:
         print(f"HATA: {e}", file=sys.stderr)
         return 1
+    if engine.stall_timeout <= engine.deadline:
+        print(f"UYARI: stall_timeout_s ({engine.stall_timeout:g}) <= request_deadline_s "
+              f"({engine.deadline:g}): a single long attempt can stop the run as stalled",
+              file=sys.stderr)
     try:
         path = engine.run(resume=args.resume)
     except ValueError as e:                  # resume refused before any call
@@ -2276,6 +2441,8 @@ def main(argv=None) -> int:
     except (RunAborted, RunStopped) as e:
         print(f"HATA: {e}", file=sys.stderr)
         _print_files(engine.files, file=sys.stderr)
+        if engine.stalled:
+            _exit_after_stall(1)
         return 1
     if engine.stopped_models:
         print(f"UYARI: durdurulan modeller: {engine.stopped_models}", file=sys.stderr)
@@ -2285,6 +2452,20 @@ def main(argv=None) -> int:
     print(f"yazıldı: {path}")
     _print_files(engine.files)
     return 0
+
+
+def _exit_after_stall(code: int) -> None:
+    """End the process after a stall: the summary is on disk, but a hung call's
+    pool thread would block the interpreter's exit (pool threads are joined)."""
+    stuck = [t for t in threading.enumerate()
+             if t is not threading.current_thread() and t.is_alive() and not t.daemon]
+    if not stuck:
+        return
+    print(f"durdu (stalled): {len(stuck)} iş parçacığı hâlâ asılı; süreç sonlandırılıyor",
+          file=sys.stderr)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
 
 
 def _print_files(files: dict | None, file=None) -> None:

@@ -66,6 +66,14 @@ tested. Design choices are in the module docstring; the main ones:
   and invalid cap count the earlier segments, and a config difference stops
   before any call. SIGINT / SIGTERM write the summary with stop_reason
   "interrupted". Details in the `pgg_game.py` docstring.
+- **Hangs:** every HTTP attempt has a wall-clock deadline
+  (`--request-deadline`, default 300 s; the 300 s client timeout only bounds
+  each read). Past it the attempt is abandoned, logged as `error_kind`
+  "transport" / `error_subkind` "deadline" and retried. If the run's raw log
+  gets no record for `--stall-timeout` seconds (default 900), the run stops
+  with stop_reason "stalled" and can go on with `--resume`. Both are
+  operational settings, not compared on `--resume`; each segment's summary
+  entry records them and the code version.
 
 ```bash
 .venv/bin/python pgg_game.py --dry-run --config configs/pilot.json   # no API, no key

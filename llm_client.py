@@ -10,6 +10,9 @@ Contract (unchanged from the first study):
   * degenerate payloads (e.g. {"action": -1}) are never coded as decisions:
     they are re-requested and counted
   * seeds are stable across processes and models (crc32, never hash())
+  * every HTTP attempt has a wall-clock deadline (DEFAULT_REQUEST_DEADLINE_S);
+    an attempt past it is abandoned, logged as a transport error with
+    error_subkind "deadline" and retried
 
 The API key is read from ../.env (OPENROUTER_API_KEY), shared with the other
 projects in this folder; it is not copied here.
@@ -59,11 +62,66 @@ SPAN_MODEL = "respan/span-01"
 # own timeout (pgg_game reads it from the run config).
 DEFAULT_TIMEOUT_S = 300.0
 
+# Wall-clock limit of one HTTP attempt, in seconds. The client timeout above
+# bounds each connect / read operation, not the whole request: a connection
+# that keeps sending bytes (or that the provider keeps alive) can stay open
+# far longer (pilot_v2_20261005 segment 3: no record for ~35 min). An attempt
+# past its deadline is abandoned, logged as error_kind "transport" with
+# error_subkind "deadline", and retried like any transport error.
+DEFAULT_REQUEST_DEADLINE_S = 300.0
+
+# The attempt thread's deadline (time.monotonic()), read by _cut_at_deadline.
+_attempt_local = threading.local()
+
+
+class _DeadlineReadTimeout(httpx.ReadTimeout):
+    """The attempt's deadline passed while the response was being read."""
+
+
+class _DeadlineStream(httpx.SyncByteStream):
+    """Response body that stops at the attempt's deadline, at the next chunk."""
+
+    def __init__(self, inner, deadline: float, request: httpx.Request):
+        self._inner, self._deadline, self._request = inner, deadline, request
+
+    def __iter__(self):
+        for chunk in self._inner:
+            if time.monotonic() > self._deadline:
+                raise _DeadlineReadTimeout(
+                    "request deadline passed while reading the response", request=self._request)
+            yield chunk
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+def _cut_at_deadline(response: httpx.Response) -> None:
+    """httpx response hook: the body of an attempt's response stops at its deadline.
+
+    call_llm stops waiting for an attempt at its deadline (_call_with_deadline).
+    So that the abandoned thread and its connection do not live on, the body
+    is cut at the first chunk after the deadline; a silent connection ends at
+    the client's read timeout. Either way the thread ends. A hook (run after
+    the headers, before the body is read) rather than a custom transport: a
+    custom transport would make httpx ignore the proxy settings of the
+    environment.
+    """
+    deadline = getattr(_attempt_local, "deadline", None)
+    if deadline is not None:
+        response.stream = _DeadlineStream(response.stream, deadline, response.request)
+
+
+def _new_http_client() -> httpx.Client:
+    """The SDK's default httpx client (limits, timeouts, proxies) plus _cut_at_deadline."""
+    return openai.DefaultHttpxClient(event_hooks={"response": [_cut_at_deadline]})
+
+
 _client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.environ["OPENROUTER_API_KEY"],
     timeout=DEFAULT_TIMEOUT_S,
     max_retries=0,  # we handle retries ourselves
+    http_client=_new_http_client(),
 )
 
 _http = httpx.Client(
@@ -101,10 +159,12 @@ def set_log_path(path: str | Path) -> Path:
     return previous
 
 
-def _append_log(record: dict) -> None:
-    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+def _append_log(record: dict, path: Path | None = None) -> None:
+    """Append one record to the raw log (path: a call's own log; None = LOG_PATH)."""
+    path = LOG_PATH if path is None else Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with _log_lock:
-        with open(LOG_PATH, "a") as f:
+        with open(path, "a") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
@@ -258,10 +318,91 @@ class _ProviderErrorResponse(Exception):
     """A response that arrived but that the provider failed to produce."""
 
 
+class RequestDeadlineExceeded(Exception):
+    """An attempt did not end within its wall-clock deadline and was abandoned."""
+
+
+# Threads of abandoned attempts that have not ended yet (see _cut_at_deadline).
+_abandoned: set[threading.Thread] = set()
+_abandoned_lock = threading.Lock()
+
+
+def abandoned_attempts_alive() -> int:
+    """Number of abandoned attempt threads still running."""
+    with _abandoned_lock:
+        return len(_abandoned)
+
+
+def _is_deadline_error(e: BaseException) -> bool:
+    """The transport cut the response at the deadline (the SDK wraps it in APITimeoutError)."""
+    return isinstance(e, _DeadlineReadTimeout) or isinstance(e.__cause__, _DeadlineReadTimeout)
+
+
+def _call_with_deadline(fn, deadline_s: float, on_late=None):
+    """fn() in its own daemon thread; RequestDeadlineExceeded after deadline_s.
+
+    The caller stops waiting at the deadline (or when an exception such as a
+    signal's interrupts the wait) and the attempt is abandoned: its thread is
+    not killed, but _cut_at_deadline ends its request, so it does not live
+    on. A response that still arrives after the attempt was abandoned goes
+    to on_late(response, reason), reason "deadline" or "interrupted", in that
+    thread. One thread per attempt, no timer object: nothing is left behind
+    once the thread has ended.
+    """
+    box: dict = {}
+    done = threading.Event()
+    lock = threading.Lock()
+
+    def target():
+        _attempt_local.deadline = time.monotonic() + deadline_s
+        try:
+            box["result"] = fn()
+        except BaseException as e:      # handed to the caller, or dropped if abandoned
+            box["error"] = e
+        finally:
+            _attempt_local.deadline = None
+            with lock:
+                done.set()
+                reason = box.get("abandoned")
+            if reason is not None:
+                try:
+                    if on_late is not None and "result" in box:
+                        on_late(box["result"], reason)
+                finally:
+                    with _abandoned_lock:
+                        _abandoned.discard(thread)
+
+    thread = threading.Thread(target=target, name="llm-attempt", daemon=True)
+    thread.start()
+    reason = "interrupted"
+    try:
+        done.wait(deadline_s)
+        reason = "deadline"
+    finally:
+        with lock:
+            finished = done.is_set()
+            if not finished:
+                box["abandoned"] = reason
+                with _abandoned_lock:
+                    _abandoned.add(thread)
+    if not finished:
+        raise RequestDeadlineExceeded(
+            f"no response within the request deadline of {deadline_s:g} s; attempt abandoned")
+    if "error" in box:
+        if _is_deadline_error(box["error"]):
+            raise RequestDeadlineExceeded(
+                f"request deadline of {deadline_s:g} s passed while reading the response"
+            ) from box["error"]
+        raise box["error"]
+    return box["result"]
+
+
 def _error_kind(e: Exception) -> str:
     """Class of a failed attempt: provider, transport, http, parse or other."""
     if isinstance(e, _ProviderErrorResponse):
         return "provider"
+    if isinstance(e, RequestDeadlineExceeded):
+        return "transport"  # error_subkind "deadline" in the log
     if isinstance(e, (openai.APIConnectionError, httpx.TransportError)):
         return "transport"  # APITimeoutError is a subclass of APIConnectionError
     if isinstance(e, openai.APIStatusError):
@@ -286,6 +427,8 @@ def _call_llm_counted(
     on_response=None,
     provider: dict | None = None,
     timeout: float | None = None,
+    request_deadline_s: float | None = None,
+    on_late_response=None,
 ) -> tuple[dict, int, int]:
     """call_llm that also returns the parse failures and provider errors it retried.
 
@@ -312,7 +455,19 @@ def _call_llm_counted(
     retried). on_response(info) runs for every response that arrived, also
     one that then failed to parse (it is billed), with info as in
     _response_info; it runs after the attempt is logged.
+
+    request_deadline_s: wall-clock limit of each attempt (None =
+    DEFAULT_REQUEST_DEADLINE_S), see _call_with_deadline. An attempt past it
+    is logged with error_kind "transport", error_subkind "deadline" and
+    retried. A response that arrives after its attempt was abandoned (it is
+    billed) is logged as a "late_response" event, never used as a decision;
+    on_late_response(info) then runs in the attempt's thread. All records of
+    the call go to the log file that was set when the call started.
     """
+    deadline_s = DEFAULT_REQUEST_DEADLINE_S if request_deadline_s is None else request_deadline_s
+    if not deadline_s > 0:
+        raise ValueError("request_deadline_s must be positive")
+    log_path = LOG_PATH
     augmented = augment_with_schema(messages, schema)
     # temperature=None: not sent, the provider's own default applies.
     extra = {} if temperature is None else {"temperature": temperature}
@@ -329,25 +484,51 @@ def _call_llm_counted(
     last_finish_reason = None
     n_parse_fail = 0
     n_provider_error = 0
+    def create():
+        return _client.chat.completions.create(
+            model=model,
+            messages=augmented,
+            max_tokens=max_tokens,
+            **extra,
+            response_format={"type": "json_object"},
+            # X-OpenRouter-Metadata: the response then names the provider
+            # that served it (openrouter_metadata, "Router Metadata" docs).
+            extra_headers={"X-Title": "GABM public goods",
+                           "X-OpenRouter-Metadata": "enabled"},
+            extra_body=body,
+        )
+
+    def late(attempt):
+        def log_late(late_resp, reason):
+            provider_name, quantization = _provider_info(late_resp)
+            try:
+                raw = late_resp.choices[0].message.content
+            except (AttributeError, IndexError, TypeError):
+                raw = None
+            _append_log({
+                "ts": time.time(), "event": "late_response", "model": model,
+                "session_id": session_id, "attempt": attempt, "abandoned": reason,
+                "request_deadline_s": deadline_s,
+                "response_raw": raw if isinstance(raw, str) else None,
+                "usage": _usage_dict(getattr(late_resp, "usage", None)),
+                "model_snapshot": getattr(late_resp, "model", None),
+                "finish_reason": _finish_reason(late_resp),
+                "reasoning_effort": effort_label,
+                "provider": provider_name, "provider_quantization": quantization,
+            }, log_path)
+            if on_late_response is not None:
+                on_late_response(_response_info(late_resp))
+        return log_late
+
     for attempt in range(max_retries):
         resp = None
         if before_call is not None:
             before_call()
+        started = time.monotonic()
         # Only the API call and the parsing are inside the try: a failing log
         # write must not trigger a retry (it would bill the same call again).
         try:
-            resp = _client.chat.completions.create(
-                model=model,
-                messages=augmented,
-                max_tokens=max_tokens,
-                **extra,
-                response_format={"type": "json_object"},
-                # X-OpenRouter-Metadata: the response then names the provider
-                # that served it (openrouter_metadata, "Router Metadata" docs).
-                extra_headers={"X-Title": "GABM public goods",
-                               "X-OpenRouter-Metadata": "enabled"},
-                extra_body=body,
-            )
+            resp = _call_with_deadline(create, deadline_s, on_late=late(attempt))
             if _is_provider_error(resp):
                 raise _ProviderErrorResponse(
                     f"provider error response (finish_reason={_finish_reason(resp)!r}, "
@@ -374,11 +555,15 @@ def _call_llm_counted(
             }
             if isinstance(e, openai.APIStatusError):
                 record["status_code"] = e.status_code
+            if isinstance(e, RequestDeadlineExceeded):
+                record.update(error_subkind="deadline", request_deadline_s=deadline_s,
+                              elapsed_s=round(time.monotonic() - started, 3),
+                              abandoned_attempts_alive=abandoned_attempts_alive())
             if resp is not None:
                 record["usage"] = _usage_dict(getattr(resp, "usage", None))
                 record["model_snapshot"] = getattr(resp, "model", None)
                 record["provider"], record["provider_quantization"] = _provider_info(resp)
-            _append_log(record)
+            _append_log(record, log_path)
             if resp is not None and on_response is not None:
                 on_response(_response_info(resp))
             time.sleep(1.5 * (attempt + 1))
@@ -394,7 +579,7 @@ def _call_llm_counted(
             "finish_reason": _finish_reason(resp),
             "reasoning_effort": effort_label,
             "provider": provider_name, "provider_quantization": quantization,
-        })
+        }, log_path)
         if on_response is not None:
             on_response(_response_info(resp))
         if meta is not None:
@@ -414,7 +599,9 @@ def _call_llm_counted(
     }
     if isinstance(last_err, openai.APIStatusError):
         final["status_code"] = last_err.status_code
-    _append_log(final)
+    if isinstance(last_err, RequestDeadlineExceeded):
+        final.update(error_subkind="deadline", request_deadline_s=deadline_s)
+    _append_log(final, log_path)
     err = RuntimeError(f"LLM call failed after {max_retries} attempts: {last_err}")
     err.n_parse_fail = n_parse_fail
     err.n_provider_error = n_provider_error
@@ -436,6 +623,8 @@ def call_llm(
     on_response=None,
     provider: dict | None = None,
     timeout: float | None = None,
+    request_deadline_s: float | None = None,
+    on_late_response=None,
 ) -> dict:
     """Call OpenRouter with structured JSON output. Retries on transient errors.
 
@@ -450,13 +639,18 @@ def call_llm(
     http). Parse failures and provider errors are retried; use
     call_llm_valid(..., return_parse_fail=True) or its counts dict to get
     their counts.
+
+    request_deadline_s bounds every attempt in wall-clock time (default
+    DEFAULT_REQUEST_DEADLINE_S); past it the attempt is abandoned and logged
+    with error_kind "transport", error_subkind "deadline" (_call_llm_counted).
     """
     parsed, _, _ = _call_llm_counted(
         model, messages, schema=schema, session_id=session_id,
         temperature=temperature, max_tokens=max_tokens, max_retries=max_retries,
         reasoning_effort=reasoning_effort, meta=meta,
         before_call=before_call, on_response=on_response,
-        provider=provider, timeout=timeout)
+        provider=provider, timeout=timeout, request_deadline_s=request_deadline_s,
+        on_late_response=on_late_response)
     return parsed
 
 
@@ -478,6 +672,8 @@ def call_llm_valid(
     provider: dict | None = None,
     timeout: float | None = None,
     counts: dict | None = None,
+    request_deadline_s: float | None = None,
+    on_late_response=None,
 ) -> tuple[dict, int] | tuple[dict, int, int]:
     """call_llm, re-requesting payloads for which is_valid(parsed) is False.
 
@@ -491,10 +687,12 @@ def call_llm_valid(
     "n_parse_fail" and "n_provider_error" (provider-error responses retried;
     a third separate count), also when the call finally fails.
 
-    reasoning_effort, meta, provider, timeout and the before_call /
-    on_response hooks are passed through to the underlying call; meta ends up
-    holding the metadata of the accepted (last) response.
+    reasoning_effort, meta, provider, timeout, request_deadline_s and the
+    before_call / on_response / on_late_response hooks are passed through to
+    the underlying call; meta ends up holding the metadata of the accepted
+    (last) response.
     """
+    log_path = LOG_PATH
     call: dict = {}
     n_parse_fail = 0
     n_provider_error = 0
@@ -507,7 +705,8 @@ def call_llm_valid(
                 temperature=temperature, max_tokens=max_tokens,
                 reasoning_effort=reasoning_effort, meta=meta,
                 before_call=before_call, on_response=on_response,
-                provider=provider, timeout=timeout)
+                provider=provider, timeout=timeout, request_deadline_s=request_deadline_s,
+                on_late_response=on_late_response)
         except RuntimeError as e:
             if counts is not None:
                 counts.update(
@@ -528,7 +727,7 @@ def call_llm_valid(
             "ts": time.time(), "model": model, "session_id": session_id,
             "event": "invalid_payload", "invalid": True,
             "n_invalid": n_invalid, "response_parsed": call,
-        })
+        }, log_path)
     if counts is not None:
         counts["n_invalid"] = max_invalid + 1
     raise RuntimeError(f"{max_invalid + 1} invalid payloads in a row: {call!r}")
