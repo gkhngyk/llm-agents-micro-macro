@@ -72,6 +72,30 @@ Design choices
   * A decision of the isolated arm has round = null, agent_id = 1 and
     others_mean = the conditioning value.
 
+Run guards (prereg_pilot.md §8; all off by default, configs/pilot.json turns
+them on). They are checked before EVERY attempt, retries included, through
+llm_client's before_call / on_response hooks:
+  budget_usd        hard cap on the accumulated usage.cost of every response
+                    that arrived (also re-requested and unparseable ones).
+                    When reached, no new call is sent; the run stops with
+                    RunStopped and a "pgg_run_stopped" event. Calls already in
+                    flight finish, so the total can overshoot by at most their
+                    cost (keep parallel_units x workers small). A response
+                    without usage.cost is priced from its tokens with
+                    pgg_cost.PRICES_USD_PER_M and counted (n_cost_estimated).
+  invalid_rate_cap  per model: n_invalid + n_parse_fail above this fraction of
+                    the planned calls (540 x 0.05 = 27 in the pilot) stops that
+                    model only ("pgg_model_stopped"); the others go on.
+  stop_on_length    the first finish_reason "length" stops the run.
+  check_snapshot    a response whose model differs from the requested slug
+                    (other than a "-<suffix>") stops the run.
+A RunAborted (no valid decision for one call) also stops the other units.
+Units = one group game or one isolated schedule; parallel_units of them run
+at the same time (round-robin over the models), each with its own `workers`.
+Rows of a stopped (incomplete) round are not written. At the end
+results/<run>_summary.json holds per-model cost, response counts, invalid
+counts and the stop reason ("pgg_run_end" event in the raw log).
+
 Output: results/<run>.jsonl, one row per decision (never overwritten: an
 existing file is an error). --dry-run prints call counts and an estimated
 cost without importing llm_client (no key, no ../.env, no API).
@@ -81,8 +105,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -109,6 +135,15 @@ def _llm():
 
 class RunAborted(RuntimeError):
     """A decision could not be obtained validly; the run was stopped."""
+
+
+# Not RuntimeError subclasses: Engine._ask turns RuntimeError into RunAborted.
+class RunStopped(Exception):
+    """A run guard (budget, finish_reason length, snapshot) stopped the run."""
+
+
+class ModelStopped(Exception):
+    """The invalid-rate cap stopped this model; other models go on."""
 
 
 # --------------------------------------------------------------------------
@@ -199,11 +234,25 @@ def check_card_text(text: str) -> None:
                 "numeric scores are not allowed on cards")
 
 
-def load_cards(path: str | Path) -> list[Card]:
-    """Cards from a JSON list of {"card_id", "style", "text"} objects."""
+def load_cards(path: str | Path, cities=None) -> list[Card]:
+    """Cards from a JSON list of {"card_id", "style", "text"} objects.
+
+    Other keys (e.g. "city") are allowed and ignored, except that with
+    `cities` only the cards whose "city" is in it are kept; then every card
+    needs a "city" and every requested city at least one card.
+    """
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(raw, list) or not raw:
         raise ValueError(f"{path}: expected a non-empty JSON list of cards")
+    if cities is not None:
+        cities = list(cities)
+        no_city = [e for e in raw if "city" not in e]
+        if no_city:
+            raise ValueError(f"{path}: filtering by city, but a card has no city: {no_city[0]!r}")
+        unknown = set(cities) - {e["city"] for e in raw}
+        if unknown:
+            raise ValueError(f"{path}: no card for city {sorted(unknown)}")
+        raw = [e for e in raw if e["city"] in cities]
     cards = []
     for entry in raw:
         missing = {"card_id", "style", "text"} - set(entry)
@@ -418,7 +467,14 @@ class RunConfig:
     max_tokens: int | None = None              # None = llm_client.DEFAULT_MAX_TOKENS
     max_invalid: int = 3
     rationale: bool = True
-    workers: int = 1
+    workers: int = 1                           # parallel calls within a round / schedule
+    parallel_units: int = 1                    # group games / schedules run at once
+    seed_namespace: str = "pgg"                # first part of every stable_seed key
+    # Run guards (module docstring); None / False = off.
+    budget_usd: float | None = None
+    invalid_rate_cap: float | None = None
+    stop_on_length: bool = False
+    check_snapshot: bool = False
     results_dir: Path = RESULTS_DIR
 
     def effort_for(self, model_key: str) -> str | None:
@@ -452,8 +508,29 @@ class RunConfig:
                 raise ValueError(f"reasoning_effort {effort!r} not in {REASONING_EFFORTS}")
         if self.max_tokens is not None and self.max_tokens <= 0:
             raise ValueError("max_tokens must be positive")
-        if self.workers < 1:
-            raise ValueError("workers must be at least 1")
+        if self.workers < 1 or self.parallel_units < 1:
+            raise ValueError("workers and parallel_units must be at least 1")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", self.seed_namespace):
+            raise ValueError(f"seed_namespace must be [A-Za-z0-9_.-]+, got {self.seed_namespace!r}")
+        if self.budget_usd is not None and not self.budget_usd > 0:
+            raise ValueError("budget_usd must be positive")
+        if self.invalid_rate_cap is not None and not 0 < self.invalid_rate_cap <= 1:
+            raise ValueError("invalid_rate_cap must be in (0, 1]")
+
+    def planned_calls_per_model(self) -> int:
+        """Accepted decisions per model of this design (re-requests not included)."""
+        counts = pgg_cost.call_counts(
+            n_cells=len(self.cards), conditions=self.conditions,
+            groups_per_cell=self.groups_per_cell, isolated_reps=self.isolated_reps,
+            n_points=len(self.isolated_points), group_size=self.params.group_size,
+            rounds=self.params.rounds, arms=self.arms)
+        return sum(counts.values())
+
+    def invalid_limit(self) -> int | None:
+        """Most invalid + parse-failed responses a model may have (None = no cap)."""
+        if self.invalid_rate_cap is None:
+            return None
+        return math.floor(self.invalid_rate_cap * self.planned_calls_per_model() + 1e-9)
 
 
 def session_id_for(run, model_key, card_id, style, condition, arm, idx: int) -> str:
@@ -480,15 +557,101 @@ class Engine:
         self.llm = llm or _llm()
         self.max_tokens = cfg.max_tokens or self.llm.DEFAULT_MAX_TOKENS
         self._out = None
+        self._lock = threading.Lock()
+        self.invalid_limit = cfg.invalid_limit()
+        self.stop_reason: str | None = None        # set once; stops every unit
+        self.aborted: RunAborted | None = None
+        self.stopped_models: dict[str, str] = {}   # model key -> reason
+        self.stats = {key: {"cost_usd": 0.0, "n_responses": 0, "n_accepted": 0,
+                            "n_invalid": 0, "n_parse_fail": 0, "n_cost_estimated": 0,
+                            "n_length": 0, "finish_reasons": {}}
+                      for key in cfg.models}
 
     # -- seeds / output ----------------------------------------------------
 
     def seed_for(self, *parts) -> int:
-        return self.llm.stable_seed("pgg", self.cfg.run, *parts)
+        return self.llm.stable_seed(self.cfg.seed_namespace, self.cfg.run, *parts)
 
     def _write(self, row: dict) -> None:
-        self._out.write(json.dumps(row, ensure_ascii=False) + "\n")
-        self._out.flush()
+        with self._lock:
+            self._out.write(json.dumps(row, ensure_ascii=False) + "\n")
+            self._out.flush()
+
+    # -- run guards --------------------------------------------------------
+
+    @property
+    def total_cost(self) -> float:
+        return sum(s["cost_usd"] for s in self.stats.values())
+
+    def _stop(self, reason: str, **detail) -> None:
+        """Stop the whole run (first reason wins); logged once."""
+        with self._lock:
+            if self.stop_reason is not None:
+                return
+            self.stop_reason = reason
+        self.llm._append_log({"ts": time.time(), "event": "pgg_run_stopped", "run": self.cfg.run,
+                              "reason": reason, "total_cost_usd": self.total_cost, **detail})
+
+    def _before_call(self, model_key: str) -> None:
+        """Runs before every attempt: raises instead of sending when a guard is hit."""
+        budget = self.cfg.budget_usd
+        if budget is not None and self.stop_reason is None and self.total_cost >= budget:
+            self._stop("budget", budget_usd=budget)
+        if self.stop_reason is not None:
+            raise RunStopped(self.stop_reason)
+        if model_key in self.stopped_models:
+            raise ModelStopped(self.stopped_models[model_key])
+
+    def _response_cost(self, model_key: str, usage) -> tuple[float, bool]:
+        """(USD, estimated?): usage.cost, else priced from tokens (pgg_cost)."""
+        usage = usage if isinstance(usage, dict) else {}
+        cost = usage.get("cost")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            return float(cost), False
+        price_in, price_out = pgg_cost.PRICES_USD_PER_M.get(
+            self.cfg.models[model_key], max(pgg_cost.PRICES_USD_PER_M.values()))
+        tokens_in = usage.get("prompt_tokens") or 0
+        # unknown tokens: price a full max_tokens completion, the worst case
+        tokens_out = usage.get("completion_tokens") or self.max_tokens
+        return (tokens_in * price_in + tokens_out * price_out) / 1e6, True
+
+    def _on_response(self, model_key: str, info: dict) -> None:
+        """Runs for every response that arrived (billed): cost, finish_reason, model."""
+        cost, estimated = self._response_cost(model_key, info.get("usage"))
+        finish = info.get("finish_reason")
+        with self._lock:
+            s = self.stats[model_key]
+            s["cost_usd"] += cost
+            s["n_responses"] += 1
+            s["n_cost_estimated"] += estimated
+            s["finish_reasons"][str(finish)] = s["finish_reasons"].get(str(finish), 0) + 1
+            if finish == "length":
+                s["n_length"] += 1
+        slug = self.cfg.models[model_key]
+        snapshot = info.get("model_snapshot")
+        if self.cfg.stop_on_length and finish == "length":
+            self._stop("finish_reason_length", model=slug)
+        if (self.cfg.check_snapshot and snapshot is not None and snapshot != slug
+                and not snapshot.startswith(slug + "-")):
+            self._stop("model_snapshot_mismatch", model=slug, model_snapshot=snapshot)
+
+    def _count_invalid(self, model_key: str, ans: "Answer") -> None:
+        with self._lock:
+            s = self.stats[model_key]
+            s["n_accepted"] += 1
+            s["n_invalid"] += ans.n_invalid
+            s["n_parse_fail"] += ans.n_parse_fail
+            n_bad = s["n_invalid"] + s["n_parse_fail"]
+            hit = (self.invalid_limit is not None and n_bad > self.invalid_limit
+                   and model_key not in self.stopped_models)
+            if hit:
+                self.stopped_models[model_key] = "invalid_rate_cap"
+        if hit:
+            self.llm._append_log({
+                "ts": time.time(), "event": "pgg_model_stopped", "run": self.cfg.run,
+                "model": self.cfg.models[model_key], "reason": "invalid_rate_cap",
+                "n_invalid": s["n_invalid"], "n_parse_fail": s["n_parse_fail"],
+                "limit": self.invalid_limit})
 
     def _map(self, fn, items):
         items = list(items)
@@ -506,7 +669,8 @@ class Engine:
                 self.cfg.models[model_key], messages, schema=schema, session_id=session_id,
                 is_valid=is_valid, max_tokens=self.max_tokens, max_invalid=self.cfg.max_invalid,
                 return_parse_fail=True, reasoning_effort=self.cfg.effort_for(model_key),
-                meta=meta)
+                meta=meta, before_call=lambda: self._before_call(model_key),
+                on_response=lambda info: self._on_response(model_key, info))
         except RuntimeError as e:
             self.llm._append_log({
                 "ts": time.time(), "event": "pgg_run_aborted", "run": self.cfg.run,
@@ -516,7 +680,9 @@ class Engine:
             raise RunAborted(
                 f"run {self.cfg.run!r} stopped: no valid decision for {ctx} "
                 f"(model {model_key}): {e}") from e
-        return Answer(parsed, n_invalid, n_parse_fail, meta)
+        ans = Answer(parsed, n_invalid, n_parse_fail, meta)
+        self._count_invalid(model_key, ans)
+        return ans
 
     def _row(self, *, condition, arm, model_key, card, session_id, group_id, agent_id,
              round_no, step, ans: Answer, seed: int, **fields) -> dict:
@@ -637,25 +803,82 @@ class Engine:
 
     # -- whole run ---------------------------------------------------------
 
+    def units(self) -> list[tuple[str, object]]:
+        """(model key, callable) per group game / schedule, round-robin over models."""
+        cfg = self.cfg
+        per_model = {}
+        for model_key in cfg.models:
+            units = []
+            for card in cfg.cards:
+                if "group" in cfg.arms:
+                    for condition in cfg.conditions:
+                        for idx in range(cfg.groups_per_cell):
+                            units.append(lambda m=model_key, c=card, k=condition, i=idx:
+                                         self.play_group(m, [c] * cfg.params.group_size, k, i))
+                if "isolated" in cfg.arms:
+                    for rep in range(cfg.isolated_reps):
+                        units.append(lambda m=model_key, c=card, r=rep: self.play_isolated(m, c, r))
+            per_model[model_key] = units
+        out = []
+        for k in range(max(len(u) for u in per_model.values())):
+            out += [(m, u[k]) for m, u in per_model.items() if k < len(u)]
+        return out
+
+    def _run_unit(self, unit) -> None:
+        model_key, fn = unit
+        if self.stop_reason is not None or model_key in self.stopped_models:
+            return
+        try:
+            fn()
+        except (RunStopped, ModelStopped):
+            pass
+        except RunAborted as e:
+            with self._lock:
+                if self.aborted is None:
+                    self.aborted = e
+            self._stop("run_aborted", error=str(e))
+
+    def summary(self, started: float) -> dict:
+        return {
+            "run": self.cfg.run, "seed_namespace": self.cfg.seed_namespace,
+            "stop_reason": self.stop_reason, "stopped_models": dict(self.stopped_models),
+            "budget_usd": self.cfg.budget_usd, "invalid_rate_cap": self.cfg.invalid_rate_cap,
+            "invalid_limit_per_model": self.invalid_limit,
+            "planned_calls_per_model": self.cfg.planned_calls_per_model(),
+            "max_tokens": self.max_tokens,
+            "reasoning_effort": {k: self.llm.reasoning_effort_label(self.cfg.effort_for(k))
+                                 for k in self.cfg.models},
+            "parallel_units": self.cfg.parallel_units, "workers": self.cfg.workers,
+            "total_cost_usd": self.total_cost, "duration_s": time.time() - started,
+            "per_model": {self.cfg.models[k]: dict(s) for k, s in self.stats.items()},
+        }
+
     def run(self) -> Path:
         cfg = self.cfg
         cfg.results_dir.mkdir(parents=True, exist_ok=True)
         path = cfg.results_dir / f"{cfg.run}.jsonl"
+        started = time.time()
         with open(path, "x", encoding="utf-8") as out:   # "x": never overwrite a run
             self._out = out
             try:
-                for model_key in cfg.models:
-                    for card in cfg.cards:
-                        if "group" in cfg.arms:
-                            for condition in cfg.conditions:
-                                for idx in range(cfg.groups_per_cell):
-                                    self.play_group(model_key, [card] * cfg.params.group_size,
-                                                    condition, idx)
-                        if "isolated" in cfg.arms:
-                            for rep in range(cfg.isolated_reps):
-                                self.play_isolated(model_key, card, rep)
+                units = self.units()
+                if cfg.parallel_units <= 1:
+                    for unit in units:
+                        self._run_unit(unit)
+                else:
+                    with ThreadPoolExecutor(max_workers=cfg.parallel_units) as pool:
+                        list(pool.map(self._run_unit, units))
             finally:
                 self._out = None
+                summary = self.summary(started)
+                (cfg.results_dir / f"{cfg.run}_summary.json").write_text(
+                    json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                self.llm._append_log({"ts": time.time(), "event": "pgg_run_end", **summary})
+        if self.aborted is not None:
+            raise self.aborted
+        if self.stop_reason is not None:
+            raise RunStopped(f"run {cfg.run!r} stopped: {self.stop_reason} "
+                             f"(accumulated cost {self.total_cost:.4f} USD)")
         return path
 
 
@@ -696,6 +919,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--run", help="run name; output goes to results/<run>.jsonl")
     ap.add_argument("--config", help="JSON file with the options below (CLI wins)")
     ap.add_argument("--cards", help="JSON list of {card_id, style, text}")
+    ap.add_argument("--cities", help="comma-separated: keep only these cards' \"city\" values")
     ap.add_argument("--cells", type=int, help="dry-run only: number of card x style cells "
                     "(default: cards file, else 6 = 2 identities x 3 styles)")
     ap.add_argument("--models", help="comma-separated keys or slugs (default: the 3 pilot models)")
@@ -714,6 +938,13 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--max-invalid", type=int)
     ap.add_argument("--no-rationale", action="store_true", default=None)
     ap.add_argument("--workers", type=int)
+    ap.add_argument("--parallel-units", type=int, help="group games / schedules at once")
+    ap.add_argument("--seed-namespace", help="first part of the stable_seed key (default pgg)")
+    ap.add_argument("--budget-usd", type=float, help="hard cap on accumulated usage.cost")
+    ap.add_argument("--invalid-rate-cap", type=float,
+                    help="per model, fraction of planned calls (e.g. 0.05)")
+    ap.add_argument("--stop-on-length", action="store_true", default=None)
+    ap.add_argument("--check-snapshot", action="store_true", default=None)
     ap.add_argument("--results-dir")
     return ap
 
@@ -725,6 +956,10 @@ def settings_from_args(args) -> dict:
         s.update(json.loads(Path(args.config).read_text(encoding="utf-8")))
     cli = {
         "cards": args.cards, "cells": args.cells,
+        "cities": _csv(args.cities) if args.cities else None,
+        "parallel_units": args.parallel_units, "seed_namespace": args.seed_namespace,
+        "budget_usd": args.budget_usd, "invalid_rate_cap": args.invalid_rate_cap,
+        "stop_on_length": args.stop_on_length, "check_snapshot": args.check_snapshot,
         "models": _csv(args.models) if args.models else None,
         "conditions": _csv(args.conditions) if args.conditions else None,
         "arms": _csv(args.arms) if args.arms else None,
@@ -755,33 +990,48 @@ def main(argv=None) -> int:
     points = tuple(s.get("isolated_points", ISOLATED_POINTS))
     names = s.get("models") or list(pgg_cost.PILOT_MODELS)
 
+    cities = s.get("cities")
     if args.dry_run:
         models = resolve_models(names, pgg_cost.PILOT_MODELS)
         if s.get("cards"):
-            n_cells = len(load_cards(s["cards"]))
+            n_cells = len(load_cards(s["cards"], cities))
         else:
             n_cells = s.get("cells", 6)
         print(dry_run_report(
             models=models, n_cells=n_cells, params=params, conditions=conditions, arms=arms,
             groups_per_cell=groups_per_cell, isolated_reps=isolated_reps, n_points=len(points)))
+        guards = {k: s[k] for k in ("max_tokens", "budget_usd", "invalid_rate_cap",
+                                    "stop_on_length", "check_snapshot", "seed_namespace",
+                                    "parallel_units", "workers") if s.get(k) is not None}
+        print(f"Ayarlar: reasoning_effort={s.get('reasoning_effort') or 'gönderilmez'}, "
+              + ", ".join(f"{k}={v}" for k, v in guards.items()))
         return 0
 
     if not args.run or not s.get("cards"):
         build_parser().error("a real run needs --run and --cards (or use --dry-run)")
     llm = _llm()
     cfg = RunConfig(
-        run=args.run, cards=load_cards(s["cards"]),
+        run=args.run, cards=load_cards(s["cards"], cities),
         models=resolve_models(names, llm.MODELS), params=params, conditions=conditions,
         arms=arms, groups_per_cell=groups_per_cell, isolated_reps=isolated_reps,
         isolated_points=points, reasoning_effort=s.get("reasoning_effort"),
         max_tokens=s.get("max_tokens"), max_invalid=s.get("max_invalid", 3),
         rationale=s.get("rationale", True), workers=s.get("workers", 1),
+        parallel_units=s.get("parallel_units", 1), seed_namespace=s.get("seed_namespace", "pgg"),
+        budget_usd=s.get("budget_usd"), invalid_rate_cap=s.get("invalid_rate_cap"),
+        stop_on_length=bool(s.get("stop_on_length", False)),
+        check_snapshot=bool(s.get("check_snapshot", False)),
         results_dir=Path(s["results_dir"]) if s.get("results_dir") else RESULTS_DIR)
+    engine = Engine(cfg, llm=llm)
     try:
-        path = Engine(cfg, llm=llm).run()
-    except RunAborted as e:
+        path = engine.run()
+    except (RunAborted, RunStopped) as e:
         print(f"HATA: {e}", file=sys.stderr)
         return 1
+    if engine.stopped_models:
+        print(f"UYARI: durdurulan modeller: {engine.stopped_models}", file=sys.stderr)
+        print(f"yazıldı: {path}")
+        return 2
     print(f"yazıldı: {path}")
     return 0
 

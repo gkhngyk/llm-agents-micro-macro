@@ -153,6 +153,15 @@ def _reasoning_text(resp) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
+def _response_info(resp) -> dict:
+    """What on_response hooks receive: usage, finish_reason, model_snapshot."""
+    return {
+        "usage": _usage_dict(getattr(resp, "usage", None)),
+        "finish_reason": _finish_reason(resp),
+        "model_snapshot": getattr(resp, "model", None),
+    }
+
+
 def reasoning_effort_label(reasoning_effort: str | None) -> str:
     """What the logs record: the effort sent, or "default" when none was sent."""
     return "default" if reasoning_effort is None else reasoning_effort
@@ -184,6 +193,8 @@ def _call_llm_counted(
     max_retries: int = 4,
     reasoning_effort: str | None = None,
     meta: dict | None = None,
+    before_call=None,
+    on_response=None,
 ) -> tuple[dict, int]:
     """call_llm that also returns the number of parse failures it retried.
 
@@ -194,6 +205,12 @@ def _call_llm_counted(
     otherwise it goes out as OpenRouter's reasoning.effort. When meta is a
     dict, the successful response's model_snapshot, finish_reason, usage and
     reasoning text are written into it.
+
+    Hooks (both optional): before_call() runs before every attempt, retries
+    included, and may raise to stop without sending (the exception is not
+    retried). on_response(info) runs for every response that arrived, also
+    one that then failed to parse (it is billed), with info = {"usage",
+    "finish_reason", "model_snapshot"}; it runs after the attempt is logged.
     """
     augmented = augment_with_schema(messages, schema)
     # temperature=None: not sent, the provider's own default applies.
@@ -208,6 +225,8 @@ def _call_llm_counted(
     n_parse_fail = 0
     for attempt in range(max_retries):
         resp = None
+        if before_call is not None:
+            before_call()
         # Only the API call and the parsing are inside the try: a failing log
         # write must not trigger a retry (it would bill the same call again).
         try:
@@ -240,7 +259,12 @@ def _call_llm_counted(
             }
             if isinstance(e, openai.APIStatusError):
                 record["status_code"] = e.status_code
+            if resp is not None:
+                record["usage"] = _usage_dict(getattr(resp, "usage", None))
+                record["model_snapshot"] = getattr(resp, "model", None)
             _append_log(record)
+            if resp is not None and on_response is not None:
+                on_response(_response_info(resp))
             time.sleep(1.5 * (attempt + 1))
             continue
         _append_log({
@@ -253,6 +277,8 @@ def _call_llm_counted(
             "finish_reason": _finish_reason(resp),
             "reasoning_effort": effort_label,
         })
+        if on_response is not None:
+            on_response(_response_info(resp))
         if meta is not None:
             meta.update({
                 "model_snapshot": getattr(resp, "model", None),
@@ -287,6 +313,8 @@ def call_llm(
     max_retries: int = 4,
     reasoning_effort: str | None = None,
     meta: dict | None = None,
+    before_call=None,
+    on_response=None,
 ) -> dict:
     """Call OpenRouter with structured JSON output. Retries on transient errors.
 
@@ -304,7 +332,8 @@ def call_llm(
     parsed, _ = _call_llm_counted(
         model, messages, schema=schema, session_id=session_id,
         temperature=temperature, max_tokens=max_tokens, max_retries=max_retries,
-        reasoning_effort=reasoning_effort, meta=meta)
+        reasoning_effort=reasoning_effort, meta=meta,
+        before_call=before_call, on_response=on_response)
     return parsed
 
 
@@ -321,6 +350,8 @@ def call_llm_valid(
     return_parse_fail: bool = False,
     reasoning_effort: str | None = None,
     meta: dict | None = None,
+    before_call=None,
+    on_response=None,
 ) -> tuple[dict, int] | tuple[dict, int, int]:
     """call_llm, re-requesting payloads for which is_valid(parsed) is False.
 
@@ -330,8 +361,9 @@ def call_llm_valid(
     unparseable responses retried across all calls. It is a separate count: it
     is not added to n_invalid.
 
-    reasoning_effort and meta are passed through to the underlying call; meta
-    ends up holding the metadata of the accepted (last) response.
+    reasoning_effort, meta and the before_call / on_response hooks are passed
+    through to the underlying call; meta ends up holding the metadata of the
+    accepted (last) response.
     """
     call: dict = {}
     n_parse_fail = 0
@@ -339,7 +371,8 @@ def call_llm_valid(
         call, n_pf = _call_llm_counted(
             model, messages, schema=schema, session_id=session_id,
             temperature=temperature, max_tokens=max_tokens,
-            reasoning_effort=reasoning_effort, meta=meta)
+            reasoning_effort=reasoning_effort, meta=meta,
+            before_call=before_call, on_response=on_response)
         n_parse_fail += n_pf
         if is_valid(call):
             if return_parse_fail:

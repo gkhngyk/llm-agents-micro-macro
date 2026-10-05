@@ -36,9 +36,19 @@ tested. Design choices are in the module docstring; the main ones:
   `--max-tokens` are configurable and written to every row; temperature is not
   sent. Output: `results/<run>.jsonl`, one row per decision (git-ignored).
 
+- Run guards (off by default): `--budget-usd` (hard cap on accumulated
+  `usage.cost`, no new call once reached), `--invalid-rate-cap` (per model,
+  stops that model), `--stop-on-length`, `--check-snapshot`. `--cities` keeps
+  only some cards of a file; `--parallel-units` runs several group games at
+  once. Per-model cost and counts go to `results/<run>_summary.json`.
+- The pilot (prereg_pilot.md) is `configs/pilot.json`: cards
+  `cards/pilot_cards.json` filtered to Boston + Riyadh, N, 3 models,
+  `max_tokens` 4000, `reasoning_effort` not sent, 1 USD cap, 5 % invalid cap,
+  seed namespace `pgg-pilot`.
+
 ```bash
-.venv/bin/python pgg_game.py --dry-run          # call counts + estimated cost, no API, no key
-.venv/bin/python pgg_game.py --run pilot1 --cards cards.json --reasoning-effort low --max-tokens 4000
+.venv/bin/python pgg_game.py --dry-run --config configs/pilot.json   # no API, no key
+.venv/bin/python pgg_game.py --config configs/pilot.json --run pilot_<date>
 .venv/bin/python -m unittest discover -s tests -v
 ```
 

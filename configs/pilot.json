@@ -1,0 +1,20 @@
+{
+  "cards": "cards/pilot_cards.json",
+  "cities": ["Boston", "Riyadh"],
+  "models": ["deepseek/deepseek-v4.1-flash", "openai/gpt-6-luna", "google/gemini-2.5-flash-lite"],
+  "conditions": ["N"],
+  "arms": ["group", "isolated"],
+  "groups_per_cell": 2,
+  "isolated_reps": 2,
+  "isolated_points": [0, 5, 10, 15, 20],
+  "max_tokens": 4000,
+  "max_invalid": 3,
+  "rationale": true,
+  "workers": 4,
+  "parallel_units": 6,
+  "seed_namespace": "pgg-pilot",
+  "budget_usd": 1.0,
+  "invalid_rate_cap": 0.05,
+  "stop_on_length": true,
+  "check_snapshot": true
+}
