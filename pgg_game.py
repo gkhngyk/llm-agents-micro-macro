@@ -78,6 +78,9 @@ Design choices
     are part of the row; an aborted round is only in the raw log.
   * A decision of the isolated arm has round = null, agent_id = 1 and
     others_mean = the conditioning value.
+  * Every row carries the length of its card text, card_n_words (whitespace-
+    separated words) and card_n_chars (characters): card length differs
+    between styles and is a covariate (prereg_pilot.md amendment, A6 item 9).
 
 Run guards (prereg_pilot.md §8; all off by default, configs/pilot.json turns
 them on). They are checked before EVERY attempt, retries included, through
@@ -102,6 +105,9 @@ llm_client's before_call / on_response hooks:
                     (and quantization, if the response has one) goes to the
                     raw log and the row; a provider name other than "name"
                     stops the run (prereg §8.2 item 5, "provider_mismatch").
+                    A response without a provider name does not stop the
+                    run; it is counted as n_provider_unknown (per model and
+                    in total in the summary).
 Provider errors (finish_reason "error", or 0 tokens at 0 cost) are retried and
 counted as n_provider_error, apart from n_parse_fail and outside the
 invalid-rate cap. A RunAborted (no valid decision for one call) also stops
@@ -319,6 +325,11 @@ def load_cards(path: str | Path, cities=None) -> list[Card]:
             raise ValueError(f"{path}: card without {sorted(missing)}: {entry!r}")
         cards.append(Card(str(entry["card_id"]), str(entry["style"]), str(entry["text"])))
     return validate_cards(cards)
+
+
+def card_length(card: Card) -> dict:
+    """Length of the card text: whitespace-separated words and characters."""
+    return {"card_n_words": len(card.text.split()), "card_n_chars": len(card.text)}
 
 
 def validate_cards(cards: list[Card]) -> list[Card]:
@@ -976,6 +987,7 @@ class Engine:
             "model_snapshot": ans.meta.get("model_snapshot"),
             "session_id": session_id, "group_id": group_id, "agent_id": agent_id,
             "round": round_no, "card_id": card.card_id, "style": card.style,
+            **card_length(card),
             **fields,
             "n_invalid": ans.n_invalid, "n_parse_fail": ans.n_parse_fail,
             "n_provider_error": ans.n_provider_error,
@@ -1174,6 +1186,7 @@ class Engine:
             "parallel_units": self.cfg.parallel_units, "workers": self.cfg.workers,
             "total_cost_usd": self.total_cost, "duration_s": time.time() - started,
             "n_provider_error": sum(s["n_provider_error"] for s in self.stats.values()),
+            "n_provider_unknown": sum(s["n_provider_unknown"] for s in self.stats.values()),
             "per_model": {self.cfg.models[k]: dict(s) for k, s in self.stats.items()},
             "unit_order": list(self.unit_order),
         }
@@ -1404,6 +1417,12 @@ def main(argv=None) -> int:
         open_ = open_choices(s)
         if open_:
             print("SEÇİLMEMİŞ (gerçek koşu başlamaz): " + ", ".join(open_))
+        else:
+            try:
+                where = next(iter(resolve_output(s).values()))
+                print(f"Çıktı dizini: {where} (mevcut)")
+            except ValueError as e:
+                print(f"ÇIKTI DİZİNİ KULLANILAMIYOR (gerçek koşu başlamaz): {e}")
         return 0
 
     if not args.run or not s.get("cards"):

@@ -257,6 +257,32 @@ class ProviderPinning(GuardTestBase):
         Engine(self.cfg(params=GameParams(rounds=1), providers=PINNED)).run()
         self.assertEqual(self.summary()["per_model"]["vendor/model-1"]["n_provider_unknown"], 4)
 
+    def test_missing_provider_name_does_not_stop_and_is_summed(self):
+        # some responses carry no provider name: the run goes on (no stop, no
+        # event), they are counted per model and in total; the rows say null
+        pinned = PINNED | {"m2": {"slug": "prov-b", "name": "Prov B"}}
+        names = {"v/m1": "Prov A", "v/m2": "Prov B"}
+        self.use(CostAPI(provider_fn=lambda k: None if len(self.api.calls) % 3 == 0
+                         else names[k["model"]]))
+        rows = self.run_engine(params=GameParams(rounds=3), providers=pinned,
+                               models={"m1": "v/m1", "m2": "v/m2"})
+        self.assertEqual(len(rows), 24)
+        s = self.summary()
+        self.assertIsNone(s["stop_reason"])
+        self.assertEqual(self.events("pgg_run_stopped"), [])
+        per = {m: v["n_provider_unknown"] for m, v in s["per_model"].items()}
+        self.assertEqual(sum(per.values()), 8)               # every 3rd of 24 calls
+        self.assertTrue(all(v > 0 for v in per.values()))
+        self.assertEqual(s["n_provider_unknown"], 8)
+        self.assertEqual(sum(r["provider"] is None for r in rows), 8)
+        for m, v in s["per_model"].items():
+            self.assertEqual(v["providers"].get("None"), per[m])
+
+    def test_unpinned_models_do_not_count_provider_unknown(self):
+        self.use(CostAPI(provider_fn=lambda k: None))
+        self.run_engine(params=GameParams(rounds=1))
+        self.assertEqual(self.summary()["n_provider_unknown"], 0)
+
     def test_placeholder_or_incomplete_providers_do_not_start(self):
         for bad in ({"m1": {"slug": "<SEÇİLECEK>", "name": "X"}},
                     {"m1": {"slug": "x", "name": "X", "quantizations": ["<SEÇİLECEK: fp8>"]}},
@@ -548,3 +574,29 @@ class IsolatedFrame(GuardTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------------------------------------------------------
+# (h) card length on every row
+# --------------------------------------------------------------------------
+
+class CardLength(GuardTestBase):
+    def test_card_length_function(self):
+        self.assertEqual(pgg_game.card_length(Card("a", "s", "You are a 21-year-old student.")),
+                         {"card_n_words": 5, "card_n_chars": 30})
+        self.assertEqual(pgg_game.card_length(Card("a", "s", "  two\n words ")),
+                         {"card_n_words": 2, "card_n_chars": 13})
+
+    def test_every_row_has_its_cards_length(self):
+        short = Card("short", "minimal", "You are a student.")
+        long_ = Card("long", "factual", "You are a student. The city has a long history.")
+        rows = self.run_engine(cards=[short, long_], arms=("group", "isolated"),
+                               params=GameParams(rounds=1))
+        self.assertEqual(len(rows), 2 * (4 + 5))
+        by_card = {c.card_id: c for c in (short, long_)}
+        for r in rows:
+            card = by_card[r["card_id"]]
+            self.assertEqual((r["card_n_words"], r["card_n_chars"]),
+                             (len(card.text.split()), len(card.text)), r["arm"])
+        self.assertEqual({(r["card_id"], r["card_n_words"]) for r in rows},
+                         {("short", 4), ("long", 10)})

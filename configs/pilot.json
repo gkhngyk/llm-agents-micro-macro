@@ -1,6 +1,6 @@
 {
-  "_notes": "Values starting with '<' are placeholders the user chooses; a real run does not start while one is left (dry runs only list them). providers: slug/name from GET /api/v1/models/{id}/endpoints (tag / provider_name); quantizations is optional (remove the key if not wanted). runs_dir: if absent, --runs-dir, PGG_RUNS_DIR or the orc workspace/runs is used.",
-  "cards": "cards/pilot_cards.json",
+  "_notes": "Pilot v2 (prereg_pilot.md, amendment 2026-10-05, A6 decisions). providers: tag / provider_name from GET /api/v1/models/{id}/endpoints, checked 2026-10-05 (deepinfra/fp8 = DeepInfra fp8; openai = OpenAI; google-vertex = Google). Fallback off (allow_fallbacks false). reasoning_effort and temperature are not sent. Run name: pilot_v2_<run day YYYYMMDD>. runs_dir must exist (the user creates it); outputs go to runs_dir/<run>/.",
+  "cards": "cards/pilot_cards_v2.json",
   "cities": ["Boston", "Riyadh"],
   "models": ["deepseek/deepseek-v4.1-flash", "openai/gpt-6-luna", "google/gemini-2.5-flash-lite"],
   "conditions": ["N"],
@@ -8,29 +8,30 @@
   "groups_per_cell": 2,
   "isolated_reps": 2,
   "isolated_points": [0, 5, 10, 15, 20],
-  "isolated_frame": "<SEÇİLECEK: one_shot | repeated>",
+  "isolated_frame": "repeated",
   "max_tokens": 16000,
   "request_timeout_s": 300,
   "providers": {
     "deepseek": {
-      "slug": "<SEÇİLECEK: uç noktanın tag değeri>",
-      "name": "<SEÇİLECEK: uç noktanın provider_name değeri>",
-      "quantizations": ["<SEÇİLECEK: fp8 | fp4; istenmezse anahtarı sil>"]
+      "slug": "deepinfra/fp8",
+      "name": "DeepInfra",
+      "quantizations": ["fp8"]
     },
     "gpt": {
-      "slug": "<SEÇİLECEK: uç noktanın tag değeri>",
-      "name": "<SEÇİLECEK: uç noktanın provider_name değeri>"
+      "slug": "openai",
+      "name": "OpenAI"
     },
     "gemini": {
-      "slug": "<SEÇİLECEK: uç noktanın tag değeri>",
-      "name": "<SEÇİLECEK: uç noktanın provider_name değeri>"
+      "slug": "google-vertex",
+      "name": "Google"
     }
   },
+  "runs_dir": "/Users/karbon/Desktop/Veri Bilimi/complexity-prj/orc/data/projects/PublicGoods/workspace/runs",
   "max_invalid": 3,
   "rationale": true,
   "workers": 4,
   "parallel_units": 6,
-  "seed_namespace": "pgg-pilot",
+  "seed_namespace": "pgg-pilot-v2",
   "budget_usd": 1.0,
   "invalid_rate_cap": 0.05,
   "stop_on_length": true,

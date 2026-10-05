@@ -19,7 +19,13 @@ import pgg_game  # noqa: E402
 from pgg_game import Engine, GameParams, ModelStopped, RunAborted, RunStopped  # noqa: E402
 
 PILOT_CONFIG = ROOT / "configs" / "pilot.json"
-PILOT_CARDS = ROOT / "cards" / "pilot_cards.json"
+PILOT_CARDS = ROOT / "cards" / "pilot_cards.json"            # first pilot, kept unchanged
+PILOT_CARDS_V2 = ROOT / "cards" / "pilot_cards_v2.json"      # pilot v2 (configs/pilot.json)
+# Pinned providers of pilot v2 (endpoints list checked 2026-10-05): model key ->
+# (slug, provider name the responses carry, quantizations).
+PILOT_V2_PROVIDERS = {"deepseek": ("deepinfra/fp8", "DeepInfra", ["fp8"]),
+                      "gpt": ("openai", "OpenAI", None),
+                      "gemini": ("google-vertex", "Google", None)}
 
 
 def _response(content, *, model, cost=None, finish_reason="stop", reasoning_tokens=5,
@@ -93,6 +99,44 @@ class PilotConfig(GuardTestBase):
         by_id = {e["card_id"]: e["text"] for e in raw}
         self.assertTrue(all(c.text == by_id[c.card_id] for c in cards))  # texts untouched
 
+    def test_pilot_cards_v2_file(self):
+        raw = json.loads(PILOT_CARDS_V2.read_text(encoding="utf-8"))
+        self.assertEqual(len(raw), 12)
+        cards = pgg_game.load_cards(PILOT_CARDS_V2, ["Boston", "Riyadh"])
+        self.assertEqual([c.card_id for c in cards],
+                         ["boston_minimal", "boston_value", "boston_factual",
+                          "riyadh_minimal", "riyadh_value", "riyadh_factual"])
+        by_id = {e["card_id"]: e["text"] for e in raw}
+        self.assertTrue(all(c.text == by_id[c.card_id] for c in cards))  # texts untouched
+        self.assertTrue(all("21-year-old" in c.text for c in cards))
+        # lengths as in kart_tasarimi_v2.md / #39 (words, characters)
+        self.assertEqual({c.card_id: tuple(pgg_game.card_length(c).values()) for c in cards},
+                         {"boston_minimal": (9, 58), "boston_value": (22, 142),
+                          "boston_factual": (27, 151), "riyadh_minimal": (9, 58),
+                          "riyadh_value": (21, 135), "riyadh_factual": (26, 144)})
+
+    def test_pilot_v2_config_values(self):
+        raw = json.loads(PILOT_CONFIG.read_text(encoding="utf-8"))
+        self.assertEqual(pgg_game.open_choices(raw), [])           # nothing left to choose
+        self.assertEqual(ROOT / raw["cards"], PILOT_CARDS_V2)
+        self.assertEqual(raw["cities"], ["Boston", "Riyadh"])
+        self.assertEqual(raw["conditions"], ["N"])
+        self.assertEqual(raw["isolated_frame"], "repeated")
+        self.assertEqual(raw["seed_namespace"], "pgg-pilot-v2")
+        self.assertEqual((raw["max_tokens"], raw["request_timeout_s"]), (16000, 300))
+        self.assertEqual((raw["budget_usd"], raw["invalid_rate_cap"]), (1.0, 0.05))
+        self.assertNotIn("reasoning_effort", raw)
+        self.assertNotIn("temperature", raw)
+        self.assertEqual(raw["runs_dir"], "/Users/karbon/Desktop/Veri Bilimi/complexity-prj/orc/"
+                                          "data/projects/PublicGoods/workspace/runs")
+        for key, (slug, name, quant) in PILOT_V2_PROVIDERS.items():
+            spec = raw["providers"][key]
+            self.assertEqual((spec["slug"], spec["name"], spec.get("quantizations")),
+                             (slug, name, quant))
+            routing = pgg_game.provider_routing(spec)
+            self.assertFalse(routing["allow_fallbacks"])
+            self.assertEqual((routing["order"], routing["only"]), ([slug], [slug]))
+
     def test_city_filter_errors(self):
         path = self.tmp / "c.json"
         path.write_text(json.dumps([{"card_id": "a", "style": "s", "text": "t", "city": "X"}]))
@@ -107,7 +151,7 @@ class PilotConfig(GuardTestBase):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             self.assertEqual(pgg_game.main(["--dry-run", "--config", str(PILOT_CONFIG),
-                                            "--cards", str(PILOT_CARDS)]), 0)
+                                            "--cards", str(PILOT_CARDS_V2)]), 0)
         text = buf.getvalue()
         self.create.assert_not_called()
         self.assertEqual(text.count("540 çağrı (contribute_N=480, isolated=60)"), 3)
@@ -117,26 +161,40 @@ class PilotConfig(GuardTestBase):
         self.assertIn("max_tokens=16000", text)
         self.assertIn("request_timeout_s=300", text)
         self.assertIn("budget_usd=1.0", text)
-        self.assertIn("SEÇİLMEMİŞ (gerçek koşu başlamaz)", text)   # providers, isolated_frame
+        self.assertIn("isolated_frame=repeated", text)
+        self.assertIn("seed_namespace=pgg-pilot-v2", text)
+        self.assertNotIn("SEÇİLMEMİŞ", text)
+
+    def test_dry_run_reports_whether_the_output_dir_exists(self):
+        config = self.tmp / "cfg.json"
+        for runs_dir, expected in ((self.tmp / "missing", "ÇIKTI DİZİNİ KULLANILAMIYOR"),
+                                   (self.tmp, f"Çıktı dizini: {self.tmp} (mevcut)")):
+            filled = json.loads(PILOT_CONFIG.read_text(encoding="utf-8"))
+            filled["runs_dir"] = str(runs_dir)
+            config.write_text(json.dumps(filled), encoding="utf-8")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(pgg_game.main(["--dry-run", "--config", str(config),
+                                                "--cards", str(PILOT_CARDS_V2)]), 0)
+            self.assertIn(expected, buf.getvalue())
+        self.create.assert_not_called()
 
     def test_pilot_config_end_to_end_with_mock_client(self):
-        # The committed config has placeholders (providers, isolated_frame): a
-        # real run must refuse without a call. A filled copy then runs.
-        self.use(CostAPI(cost=0.0001, provider_fn=lambda k: "Prov " + k["model"].split("/")[0]))
+        # The committed config is complete; without an existing runs_dir a real
+        # run refuses without a call. With one (a copy whose cards path is
+        # absolute) it runs the 1620 calls of pilot v2.
+        names = {slug: PILOT_V2_PROVIDERS[key][1] for key, slug in llm_client.MODELS.items()}
+        self.use(CostAPI(cost=0.0001, provider_fn=lambda k: names[k["model"]]))
         err = io.StringIO()
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
             code = pgg_game.main(["--config", str(PILOT_CONFIG), "--run", "pilot_mock",
-                                  "--runs-dir", str(self.tmp)])
+                                  "--runs-dir", str(self.tmp / "no_such_dir")])
         self.assertEqual(code, 1)
-        self.assertIn("yer tutucu", err.getvalue())
+        self.assertIn("does not exist", err.getvalue())
         self.create.assert_not_called()
-        self.assertFalse((self.tmp / "pilot_mock").exists())
 
         filled = json.loads(PILOT_CONFIG.read_text(encoding="utf-8"))
-        filled["cards"] = str(PILOT_CARDS)
-        filled["isolated_frame"] = "one_shot"
-        filled["providers"] = {key: {"slug": f"{key}-slug", "name": f"Prov {slug.split('/')[0]}"}
-                               for key, slug in llm_client.MODELS.items()}
+        filled["cards"] = str(PILOT_CARDS_V2)
         config = self.tmp / "pilot_filled.json"
         config.write_text(json.dumps(filled), encoding="utf-8")
         (self.tmp / "runs").mkdir()
@@ -154,24 +212,43 @@ class PilotConfig(GuardTestBase):
             self.assertEqual(sum(r["arm"] == "group" for r in mine), 480)
             self.assertEqual(sum(r["arm"] == "isolated" for r in mine), 60)
             self.assertEqual(len({r["group_id"] for r in mine if r["arm"] == "group"}), 12)
+            self.assertEqual({r["provider"] for r in mine}, {names[slug]})
         self.assertEqual({r["card_id"].split("_")[0] for r in rows}, {"boston", "riyadh"})
         self.assertEqual({r["condition"] for r in rows}, {"N"})
+        texts = {e["card_id"]: e["text"] for e in json.loads(PILOT_CARDS_V2.read_text())}
+        for r in rows:                    # card length on every row
+            self.assertEqual((r["card_n_words"], r["card_n_chars"]),
+                             (len(texts[r["card_id"]].split()), len(texts[r["card_id"]])))
+        self.assertEqual({r["isolated_frame"] for r in rows if r["arm"] == "isolated"},
+                         {"repeated"})
+        slug_of = {slug: key for key, slug in llm_client.MODELS.items()}
         for kwargs in self.api.calls:     # reasoning_effort not sent, no temperature
             self.assertEqual(kwargs["max_tokens"], 16000)
             self.assertEqual(kwargs["timeout"], 300)
             self.assertNotIn("reasoning", kwargs["extra_body"])
-            self.assertFalse(kwargs["extra_body"]["provider"]["allow_fallbacks"])
             self.assertNotIn("temperature", kwargs)
+            pslug, _, quant = PILOT_V2_PROVIDERS[slug_of[kwargs["model"]]]
+            expected = {"order": [pslug], "only": [pslug], "allow_fallbacks": False}
+            if quant:
+                expected["quantizations"] = quant
+            self.assertEqual(kwargs["extra_body"]["provider"], expected)
+            user = kwargs["messages"][-1]["content"]
+            if "Suppose" in user or "In the previous round the other" in user:
+                self.assertIn("neither the first nor the last round", user)
+        n_iso_prompts = sum("neither the first nor the last round" in c["messages"][-1]["content"]
+                            for c in self.api.calls)
+        self.assertEqual(n_iso_prompts, 3 * 60)
         self.assertEqual({r["reasoning_effort"] for r in rows}, {"default"})
         self.assertEqual({r["max_tokens"] for r in rows}, {16000})
         first = [r for r in rows if r["arm"] == "group" and r["group_id"].endswith("-g00")][0]
         self.assertTrue(first["session_id"].startswith("pgg-pilot_mock-"))
         args = (first["model_key"], first["card_id"], first["style"], "N", "group", 0,
                 first["agent_id"], first["round"], "contribute")
-        self.assertEqual(first["seed"], llm_client.stable_seed("pgg-pilot", "pilot_mock", *args))
-        self.assertNotEqual(first["seed"], llm_client.stable_seed("pgg", "pilot_mock", *args))
+        self.assertEqual(first["seed"], llm_client.stable_seed("pgg-pilot-v2", "pilot_mock", *args))
+        self.assertNotEqual(first["seed"], llm_client.stable_seed("pgg-pilot", "pilot_mock", *args))
         summary = json.loads((run_dir / "pilot_mock_summary.json").read_text())
         self.assertEqual(summary["files"]["results"]["lines"], 1620)
+        self.assertEqual(summary["n_provider_unknown"], 0)
         self.assertTrue((run_dir / "raw_calls.jsonl").exists())
         self.assertIsNone(summary["stop_reason"])
         self.assertEqual(summary["invalid_limit_per_model"], 27)   # 5 % of 540

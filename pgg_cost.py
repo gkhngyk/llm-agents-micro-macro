@@ -31,6 +31,9 @@ PILOT_MODELS = {
 #   deepseek: line 26 (0,14 / 0,42; billed price of #24, provider not pinned)
 #   gpt-6-luna: line 27 (0,10 / 0,50; back-calculated)
 #   gemini-2.5-flash-lite: line 28 (0,10 / 0,40; OpenRouter /models list)
+# The pinned providers of pilot v2 (configs/pilot.json) have the same prices in
+# GET /api/v1/models/{id}/endpoints on 2026-10-05: deepinfra/fp8 0,14 / 0,42,
+# openai 0,10 / 0,50, google-vertex 0,10 / 0,40.
 PRICES_USD_PER_M = {
     "deepseek/deepseek-v4.1-flash": (0.14, 0.42),
     "openai/gpt-6-luna":            (0.10, 0.50),
