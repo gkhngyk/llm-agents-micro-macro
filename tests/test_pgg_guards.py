@@ -373,7 +373,8 @@ class LengthAndSnapshot(GuardTestBase):
 class ParallelUnits(GuardTestBase):
     def test_parallel_units_write_the_same_rows(self):
         def stable(rows):
-            return sorted(json.dumps({k: v for k, v in r.items() if k not in ("ts", "run")},
+            return sorted(json.dumps({k: v for k, v in r.items()
+                                      if k not in ("ts", "run", "elapsed_s")},
                                      sort_keys=True).replace("-t2-", "-t1-") for r in rows)
 
         kw = dict(cards=[CARD_A, CARD_B], arms=("group", "isolated"), groups_per_cell=2,

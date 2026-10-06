@@ -362,7 +362,8 @@ class ProviderErrors(GuardTestBase):
             session_id="s", is_valid=lambda c: c.get("x") == 1, return_parse_fail=True,
             counts=counts)
         self.assertEqual(out, ({"x": 1}, 0, 0))                 # n_parse_fail stays 0
-        self.assertEqual(counts, {"n_invalid": 0, "n_parse_fail": 0, "n_provider_error": 2})
+        self.assertEqual(counts, {"n_invalid": 0, "n_parse_fail": 0, "n_provider_error": 2,
+                                  "n_transport": 0, "n_deadline": 0})
         kinds = [r.get("error_kind") for r in self.raw_log()]
         self.assertEqual(kinds, ["provider", "provider", None])
 
@@ -392,7 +393,8 @@ class ProviderErrors(GuardTestBase):
             llm_client.call_llm_valid("m", [{"role": "user", "content": "hi"}],
                                       schema={"type": "object"}, session_id="s",
                                       is_valid=lambda c: True, counts=counts)
-        self.assertEqual(counts, {"n_invalid": 0, "n_parse_fail": 0, "n_provider_error": 4})
+        self.assertEqual(counts, {"n_invalid": 0, "n_parse_fail": 0, "n_provider_error": 4,
+                                  "n_transport": 0, "n_deadline": 0})
 
     def test_engine_counts_them_apart_and_not_in_the_invalid_cap(self):
         n = []

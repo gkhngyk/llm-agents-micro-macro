@@ -75,13 +75,23 @@ tested. Design choices are in the module docstring; the main ones:
   SIGINT / SIGTERM write the summary with stop_reason "interrupted". Details
   in the `pgg_game.py` docstring.
 - **Hangs:** every HTTP attempt has a wall-clock deadline
-  (`--request-deadline`, default 300 s; the 300 s client timeout only bounds
+  (`--request-deadline`, default 900 s; the 300 s client timeout only bounds
   each read). Past it the attempt is abandoned, logged as `error_kind`
-  "transport" / `error_subkind` "deadline" and retried. If the run's raw log
-  gets no record for `--stall-timeout` seconds (default 900), the run stops
-  with stop_reason "stalled" and can go on with `--resume`. Both are
-  operational settings, not compared on `--resume`; each segment's summary
-  entry records them and the code version.
+  "transport" / `error_subkind` "deadline" with what had arrived of the
+  response (`response_partial`, usage and cost when known, else
+  `"cost_unknown": true`) and retried; a known cost counts in the budget. If
+  the run's raw log gets no record for `--stall-timeout` seconds (default
+  1800), the run stops with stop_reason "stalled" and can go on with
+  `--resume`. `--resume` compares both with the previous segment and stops on
+  a difference unless `--allow-timeout-change` (recorded in the summary,
+  `timeout_changes`); each segment's summary entry records them and the code
+  version.
+- Every row has `elapsed_s`, `n_transport`, `n_deadline` and
+  `reasoning_capped` (reasoning_tokens >= max_tokens - 4096: the provider cut
+  the hidden reasoning although finish_reason is "stop"; flagged, kept, not
+  re-requested). The summary counts them per model, per segment and in total
+  (`n_reasoning_capped`, `n_transport`, `n_deadline`, `n_cost_unknown`,
+  `deadline_cost_usd`).
 
 ```bash
 .venv/bin/python pgg_game.py --dry-run --config configs/pilot.json   # no API, no key

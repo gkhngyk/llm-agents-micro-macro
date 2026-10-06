@@ -69,8 +69,10 @@ class ReasoningEffortAndMeta(unittest.TestCase):
         meta = {}
         out = self.valid(return_parse_fail=True, meta=meta)
         self.assertEqual(out, ({"action": 3}, 1, 0))
+        self.assertGreaterEqual(meta.pop("elapsed_s"), 0)       # seconds of the accepted attempt
         self.assertEqual(meta, {"model_snapshot": "snap-2", "finish_reason": "stop",
-                                "usage": {"completion_tokens": 7}, "reasoning": "second"})
+                                "usage": {"completion_tokens": 7}, "reasoning": "second",
+                                "reasoning_capped": None})
 
     def test_missing_or_non_string_reasoning_is_none(self):
         no_field = _resp('{"action": 1}')

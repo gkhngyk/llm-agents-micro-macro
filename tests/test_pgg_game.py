@@ -231,7 +231,7 @@ class GroupGameN(EngineTestBase):
 
     def test_workers_do_not_change_the_rows(self):
         def stable(rows):
-            return [{k: v for k, v in r.items() if k != "ts"} for r in rows]
+            return [{k: v for k, v in r.items() if k not in ("ts", "elapsed_s")} for r in rows]
         serial = stable(self.run_engine(params=GameParams(rounds=3)))
         parallel = stable(self.run_engine(run="t2", params=GameParams(rounds=3), workers=4))
         for r in parallel:

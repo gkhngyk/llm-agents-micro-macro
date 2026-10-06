@@ -206,18 +206,37 @@ SIGINT and SIGTERM stop the run with stop_reason "interrupted": the summary is
 written at once, then once more after the calls in flight have ended.
 
 Hangs. Every HTTP attempt has a wall-clock deadline, request_deadline_s
-(default llm_client.DEFAULT_REQUEST_DEADLINE_S = 300 s; config / CLI
+(default llm_client.DEFAULT_REQUEST_DEADLINE_S = 900 s; config / CLI
 --request-deadline): past it the attempt is abandoned, logged as a transport
-error with error_subkind "deadline" and retried. Units run in a thread pool
-(parallel_units threads, also when it is 1) while the main thread watches the
-run's raw log: when no record (response, error or event) has been written to
-it for stall_timeout_s (default DEFAULT_STALL_TIMEOUT_S = 900 s; config / CLI
+error with error_subkind "deadline" and retried. Its record holds what had
+arrived of the response ("response_partial"; usage, content and cost when the
+body was whole) and "cost_unknown"; a known cost goes into the cost and the
+budget (deadline_cost_usd), an unknown one is counted (n_cost_unknown); such a
+response is never a decision. Units run in a thread pool (parallel_units
+threads, also when it is 1) while the main thread watches the run's raw log:
+when no record (response, error or event) has been written to it for
+stall_timeout_s (default DEFAULT_STALL_TIMEOUT_S = 1800 s; config / CLI
 --stall-timeout), the run stops with stop_reason "stalled" without waiting
 for the calls in flight; the summary is written and the run can go on with
---resume. Both settings are operational: like workers, parallel_units and
-request_timeout_s they are outside the config compared on --resume, and they
-may differ between segments. Every segment's summary entry records them and
-the code version (git commit and sha256 of the code files).
+--resume. Both settings are outside the "config" record, but --resume
+compares them with the last earlier segment that recorded them (segments of
+the code before #46 recorded none: not compared): a difference stops before
+any call, unless allow_timeout_change (CLI --allow-timeout-change); an allowed
+change is in the segment entry and in "timeout_changes" of the summary.
+workers, parallel_units and request_timeout_s may differ between segments.
+Every segment's summary entry records the settings and the code version (git
+commit and sha256 of the code files).
+
+Per row and summary (A2, A3). Every row has elapsed_s (seconds of the accepted
+attempt), n_transport and n_deadline (connection errors and attempts past the
+deadline while the decision was obtained) and reasoning_capped:
+reasoning_tokens >= max_tokens (of the row) - llm_client.REASONING_RESERVE_TOKENS
+(4096), null without reasoning_tokens. pilot_v2_20261005: 10 of DeepSeek's
+answers stopped reasoning at exactly 11 904 tokens with finish_reason "stop".
+Such answers are flagged, kept and not re-requested (re-requesting would
+select on the length of the reasoning). The summary (per model, per segment
+and in total) counts n_reasoning_capped, n_transport, n_deadline,
+n_cost_unknown and deadline_cost_usd.
 """
 
 from __future__ import annotations
@@ -258,8 +277,12 @@ ISOLATED_FRAMES = ("one_shot", "repeated")
 QUANTIZATIONS = ("int4", "int8", "fp4", "mxfp4", "nvfp4", "fp6", "fp8", "mxfp8",
                  "fp16", "bf16", "fp32", "unknown")
 # Seconds without any raw-log record after which a run stops as "stalled".
-# Keep it well above request_deadline_s: one attempt may take that long.
-DEFAULT_STALL_TIMEOUT_S = 900.0
+# Keep it well above request_deadline_s (default 900 s): one attempt may take
+# that long.
+DEFAULT_STALL_TIMEOUT_S = 1800.0
+# Operational limits compared with the previous segment on --resume (a
+# difference needs allow_timeout_change / --allow-timeout-change).
+TIMEOUT_SETTINGS = ("request_deadline_s", "stall_timeout_s")
 # Files whose sha256 goes into code_version().
 CODE_FILES = ("pgg_game.py", "llm_client.py", "pgg_cost.py")
 # A config value the user still has to choose, e.g. "<SEÇİLECEK: ...>". A
@@ -332,6 +355,15 @@ def _offline_stable_seed(namespace: str, *parts, base: int = 0) -> int:
     return base + zlib.crc32(key.encode()) % 1_000_000
 
 
+def _offline_reasoning_capped(usage, max_tokens: int) -> bool | None:
+    """Copy of llm_client.reasoning_capped for dry runs; a test checks that both agree."""
+    details = usage.get("completion_tokens_details") if isinstance(usage, dict) else None
+    n = details.get("reasoning_tokens") if isinstance(details, dict) else None
+    if not isinstance(n, int) or isinstance(n, bool):
+        return None
+    return n >= max_tokens - OfflineLLM.REASONING_RESERVE_TOKENS
+
+
 class OfflineLLM:
     """What a read-only resume plan (--resume --dry-run) needs of llm_client.
 
@@ -340,9 +372,11 @@ class OfflineLLM:
     """
     DEFAULT_MAX_TOKENS = 16000
     DEFAULT_TIMEOUT_S = 300.0
-    DEFAULT_REQUEST_DEADLINE_S = 300.0
+    DEFAULT_REQUEST_DEADLINE_S = 900.0
+    REASONING_RESERVE_TOKENS = 4096
     LOG_PATH = None
     stable_seed = staticmethod(_offline_stable_seed)
+    reasoning_capped = staticmethod(_offline_reasoning_capped)
 
     @staticmethod
     def reasoning_effort_label(reasoning_effort):
@@ -955,6 +989,9 @@ class RunConfig:
     request_deadline_s: float | None = None
     # raw log idle this long -> stop_reason "stalled"; None = DEFAULT_STALL_TIMEOUT_S
     stall_timeout_s: float | None = None
+    # --resume: request_deadline_s / stall_timeout_s may differ from the
+    # previous segment's (recorded in the summary); otherwise a difference stops
+    allow_timeout_change: bool = False
     # {model key: {"slug", "name"[, "quantizations"]}}: pins one provider per
     # model (order + only, allow_fallbacks false); a response from another
     # provider stops the run (prereg §8.2 item 5). None = not pinned.
@@ -1004,6 +1041,8 @@ class RunConfig:
             if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
                                       or not value > 0):
                 raise ValueError(f"{name} must be positive")
+        if not isinstance(self.allow_timeout_change, bool):
+            raise ValueError("allow_timeout_change must be true or false")
         if self.providers is not None:
             if not isinstance(self.providers, dict):
                 raise ValueError("providers must be a {model key: spec} object")
@@ -1149,10 +1188,23 @@ def _new_stats() -> dict:
     # "provider"); not in n_parse_fail and not in the invalid-rate cap.
     # providers: provider name of every response -> count ("null" = none).
     # n_discarded: accepted decisions that never became a row (billed).
+    # n_reasoning_capped: accepted decisions whose reasoning reached
+    # max_tokens - REASONING_RESERVE_TOKENS (kept, flagged on the row).
+    # n_transport / n_deadline: attempts that failed with a connection error /
+    # passed their deadline. A response past its deadline is billed: its cost
+    # is in cost_usd (also in deadline_cost_usd) when its usage arrived, else
+    # it is counted in n_cost_unknown (not priced).
     return {"cost_usd": 0.0, "n_responses": 0, "n_accepted": 0,
             "n_invalid": 0, "n_parse_fail": 0, "n_provider_error": 0,
             "n_cost_estimated": 0, "n_length": 0, "finish_reasons": {},
-            "providers": {}, "n_provider_unknown": 0, "n_discarded": 0}
+            "providers": {}, "n_provider_unknown": 0, "n_discarded": 0,
+            "n_reasoning_capped": 0, "n_transport": 0, "n_deadline": 0,
+            "n_cost_unknown": 0, "deadline_cost_usd": 0.0}
+
+
+# Totals of the summary and of each segment entry (A2, A3).
+_A3_TOTALS = ("n_reasoning_capped", "n_transport", "n_deadline", "n_cost_unknown",
+              "deadline_cost_usd")
 
 
 def _merge_stats(*parts: dict) -> dict:
@@ -1218,6 +1270,11 @@ class ResumePlan:
     config_checked: list[str]          # what the config was compared on
     problems: list[str]                # config differences and anomalies
     histories: dict = field(default_factory=dict)   # unit label -> [RoundRecord] (resume)
+    # request_deadline_s / stall_timeout_s: {"from_segment", "earlier", "now",
+    # "allowed"} when they differ from the last earlier segment that recorded
+    # them; timeout_check says what they were compared with
+    timeout_change: dict | None = None
+    timeout_check: str = ""
     # accepted responses of earlier segments without a row and without a
     # "pgg_discarded" event yet: [(model key, session_id, call)]
     unmarked_discarded: list = field(default_factory=list)
@@ -1240,6 +1297,8 @@ class Answer:
     meta: dict
     n_provider_error: int = 0
     call: dict | None = None       # call_info of the decision (segment, step, round, ...)
+    n_transport: int = 0           # connection errors while this decision was obtained
+    n_deadline: int = 0            # attempts past their deadline while it was obtained
 
 
 class _Pending:
@@ -1445,12 +1504,39 @@ class Engine:
         with self._lock:
             self._count_response(self.stats[model_key], model_key, info)
 
+    def _count_deadline_cost(self, s: dict, model_key: str, usage, cost_unknown: bool,
+                             late_response: bool) -> None:
+        """Cost of a response past its deadline (never a decision) into counters s.
+
+        Its usage arrived: priced like any response (usage.cost, else from its
+        tokens) into cost_usd and deadline_cost_usd. A late response is counted
+        when it arrives (_on_late_response). Otherwise n_cost_unknown.
+        """
+        if late_response:
+            return
+        if isinstance(usage, dict):
+            cost, estimated = self._response_cost(model_key, usage)
+            s["cost_usd"] += cost
+            s["deadline_cost_usd"] += cost
+            s["n_cost_estimated"] += estimated
+        elif cost_unknown:
+            s["n_cost_unknown"] += 1
+
+    def _on_deadline(self, model_key: str, info: dict) -> None:
+        """An attempt passed its deadline: what arrived of it counts in the budget."""
+        with self._lock:
+            self._count_deadline_cost(self.stats[model_key], model_key, info.get("usage"),
+                                      info.get("cost_unknown", True),
+                                      info.get("late_response", False))
+
     def _count_invalid(self, model_key: str, ans: "Answer") -> None:
         with self._lock:
             s = self.stats[model_key]
             s["n_accepted"] += 1
             s["n_invalid"] += ans.n_invalid
             s["n_parse_fail"] += ans.n_parse_fail
+            s["n_reasoning_capped"] += bool(
+                self.llm.reasoning_capped(ans.meta.get("usage"), self.max_tokens))
             prior = self.prior_stats[model_key]          # earlier segments (resume)
             n_invalid = s["n_invalid"] + prior["n_invalid"]
             n_parse_fail = s["n_parse_fail"] + prior["n_parse_fail"]
@@ -1515,7 +1601,7 @@ class Engine:
                 provider=provider_routing(pinned) if pinned else None,
                 request_deadline_s=self.deadline,
                 on_late_response=lambda info: self._on_late_response(model_key, info),
-                call_info=call)
+                call_info=call, on_deadline=lambda info: self._on_deadline(model_key, info))
         except RuntimeError as e:
             self.llm._append_log({
                 "ts": time.time(), "event": "pgg_run_aborted", "run": self.cfg.run,
@@ -1525,10 +1611,17 @@ class Engine:
             raise RunAborted(
                 f"run {self.cfg.run!r} stopped: no valid decision for {ctx} "
                 f"(model {model_key}): {e}") from e
+        finally:
+            # connection errors and deadlines also when the call failed or was stopped
+            with self._lock:
+                for k in ("n_transport", "n_deadline"):
+                    self.stats[model_key][k] += counts.get(k, 0)
         meta["provider"] = last.get("provider")
         meta["provider_quantization"] = last.get("provider_quantization")
         ans = Answer(parsed, n_invalid, n_parse_fail, meta,
-                     n_provider_error=counts.get("n_provider_error", 0), call=call)
+                     n_provider_error=counts.get("n_provider_error", 0), call=call,
+                     n_transport=counts.get("n_transport", 0),
+                     n_deadline=counts.get("n_deadline", 0))
         self._count_invalid(model_key, ans)
         return ans
 
@@ -1545,6 +1638,9 @@ class Engine:
             **fields,
             "n_invalid": ans.n_invalid, "n_parse_fail": ans.n_parse_fail,
             "n_provider_error": ans.n_provider_error,
+            "n_transport": ans.n_transport, "n_deadline": ans.n_deadline,
+            "elapsed_s": ans.meta.get("elapsed_s"),
+            "reasoning_capped": self.llm.reasoning_capped(ans.meta.get("usage"), self.max_tokens),
             "provider": ans.meta.get("provider"),
             "provider_quantization": ans.meta.get("provider_quantization"),
             "finish_reason": ans.meta.get("finish_reason"), "usage": ans.meta.get("usage"),
@@ -1780,9 +1876,12 @@ class Engine:
     def config_record(self) -> dict:
         """What every segment of a run must share (summary "config").
 
-        workers, parallel_units, request_timeout_s, request_deadline_s and
-        stall_timeout_s may differ between segments: they change neither the
-        prompts nor the guards.
+        workers, parallel_units and request_timeout_s may differ between
+        segments: they change neither the prompts nor the guards.
+        request_deadline_s and stall_timeout_s are not in it either (runs of
+        the earlier code resume), but resume_plan compares them with the last
+        earlier segment that recorded them: a difference stops, unless
+        allow_timeout_change (summary "timeout_changes").
         """
         cfg = self.cfg
         return _json_round({
@@ -2047,6 +2146,14 @@ class Engine:
         record's "call", else read from its prompt; an invalid_payload event
         takes back the success record it rejected), and "marked", the
         _call_keys that already have a "pgg_discarded" event.
+
+        n_reasoning_capped: the success record's "reasoning_capped", else
+        computed from its usage (older logs), taken back with its record by an
+        invalid_payload event. n_transport / n_deadline: retried attempts with
+        error_kind "transport" (error_subkind "deadline"). An attempt past its
+        deadline adds its cost when its usage was logged; otherwise (also every
+        such record of the code before A3, which logged nothing of the
+        response) it is counted in n_cost_unknown.
         """
         sessions = {s.session_id: s for s in specs}
         per_segment: dict[int, dict] = {}
@@ -2055,6 +2162,7 @@ class Engine:
         accepted: dict[tuple, int] = {}
         marked: set = set()
         recent: dict[str, list] = {}           # session -> [(call key, parsed)] (older logs)
+        capped: dict[tuple, bool] = {}         # call key -> its last success record was capped
         n_unparsed = 0
         seg = 0
         lines, ends_with_newline = _read_jsonl(path)
@@ -2096,6 +2204,8 @@ class Engine:
                         recent[spec.session_id].remove((ck, rec.get("response_parsed")))
                 if ck is not None and accepted.get(ck):
                     accepted[ck] -= 1
+                if ck is not None and capped.pop(ck, False):
+                    s["n_reasoning_capped"] -= 1
                 continue
             if event == "pgg_discarded":
                 call = rec.get("call") if isinstance(rec.get("call"), dict) else {}
@@ -2106,6 +2216,15 @@ class Engine:
             messages = rec.get("messages")
             if spec.session_id not in system_text and isinstance(messages, list) and messages:
                 system_text[spec.session_id] = (messages[0] or {}).get("content")
+            if rec.get("error_kind") == "transport" and rec.get("retrying"):
+                if rec.get("error_subkind") == "deadline":
+                    s["n_deadline"] += 1
+                    self._count_deadline_cost(s, key, rec.get("usage"),
+                                              rec.get("cost_unknown", True),
+                                              rec.get("late_response", False))
+                else:
+                    s["n_transport"] += 1
+                continue
             if "usage" in rec:                  # a response arrived: billed
                 self._count_response(s, key, {
                     "usage": rec.get("usage"), "finish_reason": rec.get("finish_reason"),
@@ -2122,8 +2241,14 @@ class Engine:
                             (ck, rec.get("response_parsed")))
                 else:
                     ck = _call_key(call.get("segment", seg), spec.session_id, call)
+                is_capped = rec.get("reasoning_capped")
+                if "reasoning_capped" not in rec:        # older log
+                    is_capped = self.llm.reasoning_capped(rec.get("usage"),
+                                                          rec.get("max_tokens", self.max_tokens))
+                s["n_reasoning_capped"] += bool(is_capped)
                 if call is not None:
                     accepted[ck] = accepted.get(ck, 0) + 1
+                    capped[ck] = bool(is_capped)
             elif rec.get("retrying") and rec.get("error_kind") == "parse":
                 s["n_parse_fail"] += 1
         for session_id, text in system_text.items():
@@ -2298,7 +2423,7 @@ class Engine:
             # operational settings and code version, as the segment recorded them
             # (summary entry, else its start / resume event; absent before #46)
             for k in ("stalled", "request_deadline_s", "stall_timeout_s", "code_version", "lock",
-                      "resume_points", "n_discarded"):
+                      "resume_points", "n_discarded", "timeout_change"):
                 if k in entry:
                     item[k] = entry[k]
                 elif k in started_by_seg.get(seg, {}):
@@ -2308,12 +2433,36 @@ class Engine:
                 item.update(cost_usd=sum(s["cost_usd"] for s in by_model.values()),
                             n_responses=sum(s["n_responses"] for s in by_model.values()),
                             n_discarded=sum(s["n_discarded"] for s in by_model.values()),
+                            **{k: sum(s[k] for s in by_model.values()) for k in _A3_TOTALS},
                             per_model={cfg.models[k]: s for k, s in by_model.items()})
             else:
                 item.update(cost_usd=entry.get("cost_usd"), per_model=entry.get("per_model"))
             item["n_rows"] = rows["rows_per_segment"].get(seg, 0)
             item["n_units_completed"] = sum(1 for s in rows["complete"].values() if s == seg)
             segments.append(item)
+
+        # request_deadline_s / stall_timeout_s: as the last earlier segment that
+        # recorded them (segments of the code before #46 recorded none)
+        now = {"request_deadline_s": self.deadline, "stall_timeout_s": self.stall_timeout}
+        last = next((e for e in reversed(segments)
+                     if any(e.get(k) is not None for k in TIMEOUT_SETTINGS)), None)
+        timeout_change = None
+        if last is None:
+            timeout_check = ("not compared: no earlier segment recorded request_deadline_s / "
+                             "stall_timeout_s (code before #46)")
+        else:
+            earlier = {k: last.get(k) for k in TIMEOUT_SETTINGS}
+            timeout_check = f"compared with segment {last['segment']}: {earlier}"
+            checked.append(f"request_deadline_s / stall_timeout_s (segment {last['segment']})")
+            if earlier != now:
+                timeout_change = {"from_segment": last["segment"], "earlier": earlier, "now": now,
+                                  "allowed": cfg.allow_timeout_change}
+                if not cfg.allow_timeout_change:
+                    problems.append(
+                        "request_deadline_s / stall_timeout_s differ from segment "
+                        f"{last['segment']}: earlier {_short(earlier)}, now {_short(now)}; give the "
+                        "same values (config / --request-deadline / --stall-timeout) or allow the "
+                        "change with --allow-timeout-change")
 
         if previous is not None:
             backup = self._backup_path(previous)
@@ -2335,7 +2484,8 @@ class Engine:
             truncated_lines=rows["truncated_lines"], previous_summary=previous,
             config_checked=checked, problems=list(dict.fromkeys(problems)),
             histories=histories, unmarked_discarded=unmarked,
-            lock=read_run_lock(self._lock_path()))
+            lock=read_run_lock(self._lock_path()),
+            timeout_change=timeout_change, timeout_check=timeout_check)
 
     def _lock_path(self) -> Path:
         return self.cfg.output_dir() / f"{self.cfg.run}.lock"
@@ -2432,10 +2582,13 @@ class Engine:
             "n_rows": rows["rows_per_segment"].get(self.segment, 0) if rows else None,
             "n_units_completed": units["n_complete_this_segment"] if units else None,
             "n_discarded": sum(s["n_discarded"] for s in self.stats.values()),
+            **{k: sum(s[k] for s in self.stats.values()) for k in _A3_TOTALS},
             "stalled": self.stalled,
             "request_deadline_s": self.deadline, "stall_timeout_s": self.stall_timeout,
+            "timeout_change": self.plan.timeout_change if self.plan else None,
             "code_version": self.code_version, "lock": lock, "resume_points": resume_points,
         }
+        segments = [*(self.plan.segments if self.plan else []), current]
         out = {
             "run": self.cfg.run, "seed_namespace": self.cfg.seed_namespace,
             "segment": self.segment, "resumed": self.segment > 0,
@@ -2455,6 +2608,13 @@ class Engine:
             "n_provider_error": sum(s["n_provider_error"] for s in per_model.values()),
             "n_provider_unknown": sum(s["n_provider_unknown"] for s in per_model.values()),
             "n_discarded": sum(s["n_discarded"] for s in per_model.values()),
+            **{k: sum(s[k] for s in per_model.values()) for k in _A3_TOTALS},
+            "reasoning_capped_rule": (
+                "reasoning_tokens >= max_tokens - "
+                f"{self.llm.REASONING_RESERVE_TOKENS} (llm_client.REASONING_RESERVE_TOKENS): "
+                "flagged on the row (reasoning_capped), kept as a decision, not re-requested; "
+                "n_reasoning_capped counts such accepted decisions"),
+            "timeout_changes": [s["timeout_change"] for s in segments if s.get("timeout_change")],
             "per_model": per_model,
             "units": units,
             "resume_points": resume_points,
@@ -2470,7 +2630,7 @@ class Engine:
                 "incomplete round and the rest of that segment are superseded "
                 "(superseded_rows); rows without a segment are segment 0; cut-off lines "
                 "(truncated_lines) are no rows"),
-            "segments": [*(self.plan.segments if self.plan else []), current],
+            "segments": segments,
             "unit_order": list(self.unit_order),
             "config": self.config_record(),
         }
@@ -2505,6 +2665,7 @@ class Engine:
                  "run": self.cfg.run, "segment": self.segment,
                  "seed_namespace": self.cfg.seed_namespace, "output_dir": str(out_dir),
                  "request_deadline_s": self.deadline, "stall_timeout_s": self.stall_timeout,
+                 "timeout_change": self.plan.timeout_change if self.plan else None,
                  "code_version": self.code_version, "lock": self.lock,
                  "unit_order": self.unit_order, "config": self.config_record()}
         if self.plan:
@@ -2792,11 +2953,15 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--request-timeout", type=float, dest="request_timeout_s",
                     help="client timeout per read / connect operation, seconds (default 300)")
     ap.add_argument("--request-deadline", type=float, dest="request_deadline_s",
-                    help="wall-clock limit of one HTTP attempt, seconds (default 300); "
-                         "operational, not compared on --resume")
+                    help="wall-clock limit of one HTTP attempt, seconds (default 900); "
+                         "on --resume it must equal the previous segment's")
     ap.add_argument("--stall-timeout", type=float, dest="stall_timeout_s",
                     help="stop the run as \"stalled\" after this many seconds without any "
-                         "raw-log record (default 900); operational, not compared on --resume")
+                         "raw-log record (default 1800); on --resume it must equal the "
+                         "previous segment's")
+    ap.add_argument("--allow-timeout-change", action="store_true", default=None,
+                    help="--resume: allow request_deadline_s / stall_timeout_s other than the "
+                         "previous segment's (recorded in the summary, timeout_changes)")
     ap.add_argument("--max-invalid", type=int)
     ap.add_argument("--no-rationale", action="store_true", default=None)
     ap.add_argument("--workers", type=int)
@@ -2836,6 +3001,7 @@ def settings_from_args(args) -> dict:
         "max_tokens": args.max_tokens, "max_invalid": args.max_invalid,
         "request_timeout_s": args.request_timeout_s,
         "request_deadline_s": args.request_deadline_s, "stall_timeout_s": args.stall_timeout_s,
+        "allow_timeout_change": args.allow_timeout_change,
         "rationale": False if args.no_rationale else None, "workers": args.workers,
         "runs_dir": args.runs_dir, "results_dir": args.results_dir,
     }
@@ -2866,6 +3032,7 @@ def run_config(run: str, s: dict, models: dict[str, str], output: dict) -> RunCo
         check_snapshot=bool(s.get("check_snapshot", False)),
         request_timeout_s=s.get("request_timeout_s"),
         request_deadline_s=s.get("request_deadline_s"), stall_timeout_s=s.get("stall_timeout_s"),
+        allow_timeout_change=bool(s.get("allow_timeout_change", False)),
         providers=resolve_providers(s.get("providers"), models),
         isolated_frame=s.get("isolated_frame", "one_shot"),
         **output)
@@ -2941,6 +3108,18 @@ def resume_report(engine: Engine, plan: ResumePlan) -> str:
         + (" — geçersiz tavanı aşılmış, koşulmaz"
            if limit is not None and s["n_invalid"] + s["n_parse_fail"] > limit else "")
         for k, s in plan.prior_stats.items()) + (f" (geçersiz sınırı {limit})" if limit else ""))
+    reserve = engine.llm.REASONING_RESERVE_TOKENS
+    lines.append(
+        f"Akıl yürütme tavanı (reasoning_tokens >= max_tokens - {reserve} = "
+        f"{engine.max_tokens - reserve}; işaretlenir, atılmaz) — kabul edilen kararlarda: "
+        + ", ".join(f"{k} {s['n_reasoning_capped']}" for k, s in plan.prior_stats.items()))
+    lines.append(
+        "Bağlantı hatası / süre aşımı (yeniden denenmiş denemeler): " + ", ".join(
+            f"{k} {s['n_transport']} / {s['n_deadline']}" for k, s in plan.prior_stats.items())
+        + "; süre aşımında maliyeti bilinmeyen: " + ", ".join(
+            f"{k} {s['n_cost_unknown']}" for k, s in plan.prior_stats.items())
+        + "; süre aşımı maliyeti (bütçede): "
+        f"{sum(s['deadline_cost_usd'] for s in plan.prior_stats.values()):.6f} USD")
     calls: dict[str, dict[str, int]] = {k: {} for k in cfg.models}
     rounds = cfg.params.rounds
     for spec in remaining:
@@ -2965,9 +3144,21 @@ def resume_report(engine: Engine, plan: ResumePlan) -> str:
         lines.append(f"Kalan tahmini maliyet (tahmin, pgg_cost): {total_cost:.4f} USD; "
                      f"önceki ile toplam {plan.prior_cost_usd + total_cost:.4f} USD")
     lines.append("Config karşılaştırması: " + ", ".join(plan.config_checked))
+    lines.append(f"Süre sınırları: request_deadline_s={engine.deadline:g}, "
+                 f"stall_timeout_s={engine.stall_timeout:g} (sürdürmede önceki segmentle "
+                 f"karşılaştırılır; {plan.timeout_check})")
+    change = plan.timeout_change
+    if change is not None:
+        diff = ", ".join(f"{k} {change['earlier'][k]:g} -> {change['now'][k]:g}"
+                         for k in TIMEOUT_SETTINGS if change["earlier"][k] != change["now"][k])
+        lines.append(
+            f"  FARKLI (segment {change['from_segment']}'e göre): {diff}; "
+            + ("--allow-timeout-change verildi: sürdürmeye izin var, değişiklik özete "
+               "(timeout_changes) yazılır" if change["allowed"] else
+               "aynı değerleri verin ya da --allow-timeout-change ile izin verin; "
+               "aksi halde sürdürme başlamaz"))
     lines.append(f"İşletim ayarları (config karşılaştırması dışında): "
-                 f"request_timeout_s={engine.timeout:g}, request_deadline_s={engine.deadline:g}, "
-                 f"stall_timeout_s={engine.stall_timeout:g}, workers={cfg.workers}, "
+                 f"request_timeout_s={engine.timeout:g}, workers={cfg.workers}, "
                  f"parallel_units={cfg.parallel_units}")
     if engine.stall_timeout <= engine.deadline:
         lines.append("UYARI: stall_timeout_s, request_deadline_s'den büyük değil; tek bir uzun "

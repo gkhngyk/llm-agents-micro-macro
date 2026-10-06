@@ -63,7 +63,7 @@ def _decision_keys(calls) -> list:
 def _comparable(rows) -> dict:
     """Rows by decision, without the fields that differ between runs (ts, segment)."""
     return {(r["unit"], r["step"], r["round"], r["agent_id"], r.get("others_mean")):
-            {k: v for k, v in r.items() if k not in ("ts", "segment")} for r in rows}
+            {k: v for k, v in r.items() if k not in ("ts", "segment", "elapsed_s")} for r in rows}
 
 
 def _raw(path: Path) -> list[dict]:
@@ -393,7 +393,7 @@ class Discarded(RoundBase):
         events = self.raw_events("pgg_discarded")
         self.assertEqual([(e["reason"], e["call"]["agent_id"]) for e in events],
                          [("row_not_written", a) for a in range(1, 5)])
-        engine2, api2 = self.resume()
+        engine2, api2 = self.resume(request_deadline_s=60, stall_timeout_s=0.3)
         engine2.run(resume=True)
         summary = self.summary_now()
         self.assertEqual(summary["n_discarded"], 4)
@@ -662,14 +662,31 @@ PILOT_V2_DIR = Path(json.loads(PILOT_CONFIG.read_text(encoding="utf-8"))["runs_d
 @unittest.skipUnless((PILOT_V2_DIR / "pilot_v2_20261005.jsonl").is_file(),
                      "pilot_v2_20261005 run directory not on this machine")
 class PilotV2ReadOnly(unittest.TestCase):
-    def test_resume_dry_run_reads_the_old_directory_and_writes_nothing(self):
-        before = _tree(PILOT_V2_DIR)
+    def dry_run(self, *extra):
         argv = ["--config", str(PILOT_CONFIG), "--run", "pilot_v2_20261005",
-                "--resume", "--dry-run"]
+                "--resume", "--dry-run", *extra]
         with contextlib.redirect_stdout(io.StringIO()) as out:
             code = pgg_game.main(argv)
-        text = out.getvalue()
+        return code, out.getvalue()
+
+    def test_resume_dry_run_reads_the_old_directory_and_writes_nothing(self):
+        before = _tree(PILOT_V2_DIR)
+        # segment 4 ran with 300 / 900 s; configs/pilot.json leaves the new
+        # defaults 900 / 1800 s: reported as a difference, the resume would stop
+        code, text = self.dry_run()
+        self.assertEqual(code, 1, text)
+        self.assertIn("Süre sınırları: request_deadline_s=900, stall_timeout_s=1800", text)
+        self.assertIn("FARKLI (segment 4'e göre): request_deadline_s 300 -> 900, "
+                      "stall_timeout_s 900 -> 1800", text)
+        self.assertIn("SORUN (sürdürme başlamaz):", text)
+        self.assertIn("--allow-timeout-change", text)
+        self.assertNotIn("Config tutarlı", text)
+        # the hidden reasoning cap: 10 accepted DeepSeek answers at 11 904 tokens
+        self.assertIn("max_tokens - 4096 = 11904", text)
+        self.assertIn("kabul edilen kararlarda: deepseek 10, gpt 0, gemini 0", text)
+        code, text = self.dry_run("--allow-timeout-change")
         self.assertEqual(code, 0, text)
+        self.assertIn("--allow-timeout-change verildi", text)
         self.assertEqual(_tree(PILOT_V2_DIR), before)
         self.assertIn("Önceki segmentler: [0, 1, 2, 3, 4]", text)
         self.assertIn("tamam 72; yarım (kaldığı turdan sürer) 0", text)

@@ -12,7 +12,10 @@ Contract (unchanged from the first study):
   * seeds are stable across processes and models (crc32, never hash())
   * every HTTP attempt has a wall-clock deadline (DEFAULT_REQUEST_DEADLINE_S);
     an attempt past it is abandoned, logged as a transport error with
-    error_subkind "deadline" and retried
+    error_subkind "deadline" (with the part of the response received so far
+    and its usage / cost when known) and retried
+  * a response whose reasoning reached max_tokens - REASONING_RESERVE_TOKENS
+    is flagged "reasoning_capped" in the log; it is kept as it is
 
 The API key is read from ../.env (OPENROUTER_API_KEY), shared with the other
 projects in this folder; it is not copied here.
@@ -67,8 +70,23 @@ DEFAULT_TIMEOUT_S = 300.0
 # that keeps sending bytes (or that the provider keeps alive) can stay open
 # far longer (pilot_v2_20261005 segment 3: no record for ~35 min). An attempt
 # past its deadline is abandoned, logged as error_kind "transport" with
-# error_subkind "deadline", and retried like any transport error.
-DEFAULT_REQUEST_DEADLINE_S = 300.0
+# error_subkind "deadline", and retried like any transport error. 900 s:
+# long reasoning completions (max_tokens 16000) must not be cut as hangs.
+DEFAULT_REQUEST_DEADLINE_S = 900.0
+
+# After the deadline, how long to wait at most for the abandoned attempt to
+# end (its body is cut at the next chunk), so that the record holds the whole
+# part of the response that arrived. min(DEADLINE_GRACE_S, deadline).
+DEADLINE_GRACE_S = 5.0
+
+# Most bytes of a response body kept for the log of an attempt past its deadline.
+PARTIAL_BODY_MAX_BYTES = 1_000_000
+
+# pilot_v2_20261005: 10 of DeepSeek's 540 valid answers had exactly
+# 11 904 = 16 000 - 4 096 reasoning tokens with finish_reason "stop": the
+# provider stops the reasoning 4 096 tokens below max_tokens (room for the
+# answer) and the reply looks normal. reasoning_capped() flags such answers.
+REASONING_RESERVE_TOKENS = 4096
 
 # The attempt thread's deadline (time.monotonic()), read by _cut_at_deadline.
 _attempt_local = threading.local()
@@ -79,13 +97,31 @@ class _DeadlineReadTimeout(httpx.ReadTimeout):
 
 
 class _DeadlineStream(httpx.SyncByteStream):
-    """Response body that stops at the attempt's deadline, at the next chunk."""
+    """Response body that stops at the attempt's deadline, at the next chunk.
+
+    Keeps the bytes received (up to PARTIAL_BODY_MAX_BYTES), also the chunk
+    that came after the deadline, so that the log of an attempt past its
+    deadline can show what arrived.
+    """
 
     def __init__(self, inner, deadline: float, request: httpx.Request):
         self._inner, self._deadline, self._request = inner, deadline, request
+        self._received = bytearray()
+        self._n_bytes = 0
+        self._lock = threading.Lock()
+
+    def received(self) -> tuple[bytes, int]:
+        """(bytes kept, bytes received in total)."""
+        with self._lock:
+            return bytes(self._received), self._n_bytes
 
     def __iter__(self):
         for chunk in self._inner:
+            with self._lock:
+                self._n_bytes += len(chunk)
+                room = PARTIAL_BODY_MAX_BYTES - len(self._received)
+                if room > 0:
+                    self._received += chunk[:room]
             if time.monotonic() > self._deadline:
                 raise _DeadlineReadTimeout(
                     "request deadline passed while reading the response", request=self._request)
@@ -108,21 +144,34 @@ def _cut_at_deadline(response: httpx.Response) -> None:
     """
     deadline = getattr(_attempt_local, "deadline", None)
     if deadline is not None:
-        response.stream = _DeadlineStream(response.stream, deadline, response.request)
+        stream = _DeadlineStream(response.stream, deadline, response.request)
+        response.stream = stream
+        holder = getattr(_attempt_local, "holder", None)
+        if holder is not None:      # read by _call_with_deadline when the deadline passes
+            holder.update(stream=stream, status_code=response.status_code)
 
 
-def _new_http_client() -> httpx.Client:
-    """The SDK's default httpx client (limits, timeouts, proxies) plus _cut_at_deadline."""
-    return openai.DefaultHttpxClient(event_hooks={"response": [_cut_at_deadline]})
+def _new_http_client(**kwargs) -> httpx.Client:
+    """The SDK's default httpx client (limits, timeouts, proxies) plus _cut_at_deadline.
+
+    kwargs go to openai.DefaultHttpxClient (tests: transport=httpx.MockTransport).
+    """
+    return openai.DefaultHttpxClient(event_hooks={"response": [_cut_at_deadline]}, **kwargs)
 
 
-_client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.environ["OPENROUTER_API_KEY"],
-    timeout=DEFAULT_TIMEOUT_S,
-    max_retries=0,  # we handle retries ourselves
-    http_client=_new_http_client(),
-)
+def _new_client(http_client: httpx.Client | None = None,
+                base_url: str = "https://openrouter.ai/api/v1") -> OpenAI:
+    """The OpenRouter client of this module (tests build one on a mock transport)."""
+    return OpenAI(
+        base_url=base_url,
+        api_key=os.environ["OPENROUTER_API_KEY"],
+        timeout=DEFAULT_TIMEOUT_S,
+        max_retries=0,  # we handle retries ourselves
+        http_client=http_client if http_client is not None else _new_http_client(),
+    )
+
+
+_client = _new_client()
 
 _http = httpx.Client(
     timeout=DEFAULT_TIMEOUT_S,
@@ -305,6 +354,26 @@ def _is_provider_error(resp) -> bool:
     return sum(tokens) == 0 and isinstance(cost, (int, float)) and cost == 0
 
 
+def reasoning_tokens(usage) -> int | None:
+    """usage.completion_tokens_details.reasoning_tokens (None when absent)."""
+    details = usage.get("completion_tokens_details") if isinstance(usage, dict) else None
+    value = details.get("reasoning_tokens") if isinstance(details, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def reasoning_capped(usage, max_tokens: int) -> bool | None:
+    """True when the reasoning reached max_tokens - REASONING_RESERVE_TOKENS.
+
+    None when the response has no reasoning_tokens. Such a response is only
+    flagged: it is neither dropped nor re-requested (that would select on
+    the length of the reasoning).
+    """
+    n = reasoning_tokens(usage)
+    if n is None:
+        return None
+    return n >= max_tokens - REASONING_RESERVE_TOKENS
+
+
 def reasoning_effort_label(reasoning_effort: str | None) -> str:
     """What the logs record: the effort sent, or "default" when none was sent."""
     return "default" if reasoning_effort is None else reasoning_effort
@@ -319,7 +388,14 @@ class _ProviderErrorResponse(Exception):
 
 
 class RequestDeadlineExceeded(Exception):
-    """An attempt did not end within its wall-clock deadline and was abandoned."""
+    """An attempt did not end within its wall-clock deadline and was abandoned.
+
+    partial: what had arrived (_partial_response), or None.
+    """
+
+    def __init__(self, message: str, partial: dict | None = None):
+        super().__init__(message)
+        self.partial = partial
 
 
 # Threads of abandoned attempts that have not ended yet (see _cut_at_deadline).
@@ -338,6 +414,22 @@ def _is_deadline_error(e: BaseException) -> bool:
     return isinstance(e, _DeadlineReadTimeout) or isinstance(e.__cause__, _DeadlineReadTimeout)
 
 
+def _partial_response(holder: dict, box: dict, ended: bool) -> dict:
+    """What an attempt past its deadline had received.
+
+    body: the response bytes so far (at most PARTIAL_BODY_MAX_BYTES; n_bytes
+    counts all). final: the attempt has ended without a response (its body
+    was cut at the deadline, or it failed), so nothing about it follows;
+    late_response: it ended with a whole response after the deadline, which
+    on_late logs (with its cost) as a "late_response".
+    """
+    stream = holder.get("stream")
+    body, n_bytes = stream.received() if stream is not None else (b"", 0)
+    late = ended and "result" in box
+    return {"body": body, "n_bytes": n_bytes, "status_code": holder.get("status_code"),
+            "attempt_ended": ended, "final": ended and not late, "late_response": late}
+
+
 def _call_with_deadline(fn, deadline_s: float, on_late=None):
     """fn() in its own daemon thread; RequestDeadlineExceeded after deadline_s.
 
@@ -348,19 +440,27 @@ def _call_with_deadline(fn, deadline_s: float, on_late=None):
     to on_late(response, reason), reason "deadline" or "interrupted", in that
     thread. One thread per attempt, no timer object: nothing is left behind
     once the thread has ended.
+
+    At the deadline the caller waits up to min(DEADLINE_GRACE_S, deadline_s)
+    more for the attempt to end (its body is cut at the next chunk); the
+    RequestDeadlineExceeded then carries what arrived (.partial,
+    _partial_response).
     """
     box: dict = {}
+    holder: dict = {}                    # _cut_at_deadline: the response's _DeadlineStream
     done = threading.Event()
     lock = threading.Lock()
 
     def target():
         _attempt_local.deadline = time.monotonic() + deadline_s
+        _attempt_local.holder = holder
         try:
             box["result"] = fn()
         except BaseException as e:      # handed to the caller, or dropped if abandoned
             box["error"] = e
         finally:
             _attempt_local.deadline = None
+            _attempt_local.holder = None
             with lock:
                 done.set()
                 reason = box.get("abandoned")
@@ -386,15 +486,57 @@ def _call_with_deadline(fn, deadline_s: float, on_late=None):
                 with _abandoned_lock:
                     _abandoned.add(thread)
     if not finished:
+        ended = done.wait(min(DEADLINE_GRACE_S, deadline_s))
         raise RequestDeadlineExceeded(
-            f"no response within the request deadline of {deadline_s:g} s; attempt abandoned")
+            f"no response within the request deadline of {deadline_s:g} s; attempt abandoned",
+            partial=_partial_response(holder, box, ended))
     if "error" in box:
         if _is_deadline_error(box["error"]):
             raise RequestDeadlineExceeded(
-                f"request deadline of {deadline_s:g} s passed while reading the response"
-            ) from box["error"]
+                f"request deadline of {deadline_s:g} s passed while reading the response",
+                partial=_partial_response(holder, box, True)) from box["error"]
         raise box["error"]
     return box["result"]
+
+
+def _partial_record(partial: dict | None) -> tuple[dict, dict | None]:
+    """Log fields of an attempt past its deadline, and its usage (None = unknown).
+
+    response_partial: the body received so far, as text. When the attempt
+    has ended and that body is a whole completion (it was cut at its last
+    chunk), its content, finish_reason, model, provider and usage are taken
+    from it. cost_unknown: no usage arrived (a late response logs its own).
+    """
+    partial = partial or {}
+    body = partial.get("body") or b""
+    rec = {"response_partial": body.decode("utf-8", errors="replace"),
+           "response_partial_n_bytes": partial.get("n_bytes", 0),
+           "response_partial_truncated": partial.get("n_bytes", 0) > len(body),
+           "response_status_code": partial.get("status_code"),
+           "attempt_ended": partial.get("attempt_ended", False),
+           "late_response": partial.get("late_response", False)}
+    usage = None
+    data = None
+    if partial.get("final") and body.strip():
+        try:
+            data = json.loads(body)
+        except ValueError:
+            data = None
+    rec["response_complete"] = isinstance(data, dict)
+    if isinstance(data, dict):
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
+        try:
+            choice = data["choices"][0]
+            rec["response_raw"] = choice["message"]["content"]
+            rec["finish_reason"] = choice.get("finish_reason")
+        except (KeyError, IndexError, TypeError):
+            pass
+        rec["model_snapshot"] = data.get("model")
+        rec["provider"] = data.get("provider") if isinstance(data.get("provider"), str) else None
+    if usage is not None:
+        rec["usage"] = usage
+    rec["cost_unknown"] = usage is None and not rec["late_response"]
+    return rec, usage
 
 
 def _error_kind(e: Exception) -> str:
@@ -430,6 +572,8 @@ def _call_llm_counted(
     request_deadline_s: float | None = None,
     on_late_response=None,
     call_info: dict | None = None,
+    on_deadline=None,
+    attempt_counts: dict | None = None,
 ) -> tuple[dict, int, int]:
     """call_llm that also returns the parse failures and provider errors it retried.
 
@@ -468,6 +612,20 @@ def _call_llm_counted(
     call_info: a dict that identifies the decision this call is for (e.g.
     pgg_game's segment / step / round / agent); written as "call" into every
     record of the call, so that a reader can match records to result rows.
+
+    An attempt past its deadline is logged with what had arrived
+    (_partial_record: response_partial, and usage when the body was whole)
+    and "cost_unknown"; on_deadline(info) then runs with info = {"usage"
+    (None = unknown), "cost_unknown", "late_response", "n_bytes"}. Such a
+    response is never used as a decision.
+
+    attempt_counts: when a dict, "n_transport" (transport errors other than
+    the deadline) and "n_deadline" (attempts past their deadline) are added
+    to it as they happen, also when the call finally fails or a hook raises.
+
+    The success record carries elapsed_s (seconds of the successful
+    attempt), max_tokens and reasoning_capped (reasoning_capped(); null
+    without reasoning_tokens); meta gets elapsed_s and reasoning_capped too.
     """
     deadline_s = DEFAULT_REQUEST_DEADLINE_S if request_deadline_s is None else request_deadline_s
     if not deadline_s > 0:
@@ -561,30 +719,44 @@ def _call_llm_counted(
             }
             if isinstance(e, openai.APIStatusError):
                 record["status_code"] = e.status_code
+            deadline_usage = None
             if isinstance(e, RequestDeadlineExceeded):
                 record.update(error_subkind="deadline", request_deadline_s=deadline_s,
                               elapsed_s=round(time.monotonic() - started, 3),
                               abandoned_attempts_alive=abandoned_attempts_alive())
+                fields, deadline_usage = _partial_record(e.partial)
+                record.update(fields)
             if resp is not None:
                 record["usage"] = _usage_dict(getattr(resp, "usage", None))
                 record["model_snapshot"] = getattr(resp, "model", None)
                 record["provider"], record["provider_quantization"] = _provider_info(resp)
+            if attempt_counts is not None and kind == "transport":
+                name = "n_deadline" if isinstance(e, RequestDeadlineExceeded) else "n_transport"
+                attempt_counts[name] = attempt_counts.get(name, 0) + 1
             _append_log(record, log_path)
             if resp is not None and on_response is not None:
                 on_response(_response_info(resp))
+            if isinstance(e, RequestDeadlineExceeded) and on_deadline is not None:
+                on_deadline({"usage": deadline_usage, "cost_unknown": record["cost_unknown"],
+                             "late_response": record["late_response"],
+                             "n_bytes": record["response_partial_n_bytes"]})
             time.sleep(1.5 * (attempt + 1))
             continue
+        elapsed = round(time.monotonic() - started, 3)
+        usage = _usage_dict(getattr(resp, "usage", None))
+        capped = reasoning_capped(usage, max_tokens)
         provider_name, quantization = _provider_info(resp)
         _append_log({
             "ts": time.time(), "model": model, "session_id": session_id,
             "temperature": temperature_label(temperature), "messages": messages,
             "response_raw": raw, "response_parsed": parsed,
-            "usage": _usage_dict(getattr(resp, "usage", None)),
+            "usage": usage,
             "model_snapshot": getattr(resp, "model", None),
             "attempt": attempt, "degraded": degraded,
             "finish_reason": _finish_reason(resp),
             "reasoning_effort": effort_label,
-            "provider": provider_name, "provider_quantization": quantization, **tag,
+            "provider": provider_name, "provider_quantization": quantization,
+            "elapsed_s": elapsed, "max_tokens": max_tokens, "reasoning_capped": capped, **tag,
         }, log_path)
         if on_response is not None:
             on_response(_response_info(resp))
@@ -592,8 +764,10 @@ def _call_llm_counted(
             meta.update({
                 "model_snapshot": getattr(resp, "model", None),
                 "finish_reason": _finish_reason(resp),
-                "usage": _usage_dict(getattr(resp, "usage", None)),
+                "usage": usage,
                 "reasoning": _reasoning_text(resp),
+                "elapsed_s": elapsed,
+                "reasoning_capped": capped,
             })
         return parsed, n_parse_fail, n_provider_error
     final = {
@@ -632,6 +806,7 @@ def call_llm(
     request_deadline_s: float | None = None,
     on_late_response=None,
     call_info: dict | None = None,
+    on_deadline=None,
 ) -> dict:
     """Call OpenRouter with structured JSON output. Retries on transient errors.
 
@@ -649,7 +824,8 @@ def call_llm(
 
     request_deadline_s bounds every attempt in wall-clock time (default
     DEFAULT_REQUEST_DEADLINE_S); past it the attempt is abandoned and logged
-    with error_kind "transport", error_subkind "deadline" (_call_llm_counted).
+    with error_kind "transport", error_subkind "deadline" and what had
+    arrived; on_deadline(info) then runs (_call_llm_counted).
     """
     parsed, _, _ = _call_llm_counted(
         model, messages, schema=schema, session_id=session_id,
@@ -657,7 +833,7 @@ def call_llm(
         reasoning_effort=reasoning_effort, meta=meta,
         before_call=before_call, on_response=on_response,
         provider=provider, timeout=timeout, request_deadline_s=request_deadline_s,
-        on_late_response=on_late_response, call_info=call_info)
+        on_late_response=on_late_response, call_info=call_info, on_deadline=on_deadline)
     return parsed
 
 
@@ -682,6 +858,7 @@ def call_llm_valid(
     request_deadline_s: float | None = None,
     on_late_response=None,
     call_info: dict | None = None,
+    on_deadline=None,
 ) -> tuple[dict, int] | tuple[dict, int, int]:
     """call_llm, re-requesting payloads for which is_valid(parsed) is False.
 
@@ -693,10 +870,12 @@ def call_llm_valid(
 
     counts: when a dict, it is kept up to date with "n_invalid",
     "n_parse_fail" and "n_provider_error" (provider-error responses retried;
-    a third separate count), also when the call finally fails.
+    a third separate count), "n_transport" (connection errors) and
+    "n_deadline" (attempts past their deadline), also when the call finally
+    fails or a hook stops it.
 
     reasoning_effort, meta, provider, timeout, request_deadline_s, call_info
-    and the before_call / on_response / on_late_response hooks are passed through to
+    and the before_call / on_response / on_late_response / on_deadline hooks are passed through to
     the underlying call; meta ends up holding the metadata of the accepted
     (last) response.
     """
@@ -705,7 +884,8 @@ def call_llm_valid(
     n_parse_fail = 0
     n_provider_error = 0
     if counts is not None:
-        counts.update(n_invalid=0, n_parse_fail=0, n_provider_error=0)
+        counts.update(n_invalid=0, n_parse_fail=0, n_provider_error=0, n_transport=0,
+                      n_deadline=0)
     for n_invalid in range(max_invalid + 1):
         try:
             call, n_pf, n_pe = _call_llm_counted(
@@ -714,7 +894,8 @@ def call_llm_valid(
                 reasoning_effort=reasoning_effort, meta=meta,
                 before_call=before_call, on_response=on_response,
                 provider=provider, timeout=timeout, request_deadline_s=request_deadline_s,
-                on_late_response=on_late_response, call_info=call_info)
+                on_late_response=on_late_response, call_info=call_info,
+                on_deadline=on_deadline, attempt_counts=counts)
         except RuntimeError as e:
             if counts is not None:
                 counts.update(

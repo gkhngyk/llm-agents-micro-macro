@@ -136,7 +136,8 @@ class RequestDeadline(LoggingTestBase):
             llm_client.call_llm_valid("m", MESSAGES, schema=SCHEMA, session_id="s",
                                       is_valid=lambda c: True, counts=counts,
                                       request_deadline_s=0.05)
-        self.assertEqual(counts, {"n_invalid": 0, "n_parse_fail": 0, "n_provider_error": 0})
+        self.assertEqual(counts, {"n_invalid": 0, "n_parse_fail": 0, "n_provider_error": 0,
+                                  "n_transport": 0, "n_deadline": 4})
         # released: every abandoned thread ends; an error after the deadline logs nothing
         n = len(self.records())
         hang.release()
@@ -153,7 +154,7 @@ class RequestDeadline(LoggingTestBase):
         self.assertNotIn("error_subkind", self.records()[-1])
 
     def test_default_and_invalid_deadline(self):
-        self.assertEqual(llm_client.DEFAULT_REQUEST_DEADLINE_S, 300.0)
+        self.assertEqual(llm_client.DEFAULT_REQUEST_DEADLINE_S, 900.0)
         with self.assertRaises(ValueError):
             self.call(request_deadline_s=0)
         self.create.assert_not_called()
@@ -352,7 +353,8 @@ class StallWatchdog(ResumeBase):
         self.assertEqual(summary["units"]["n_remaining"], 1)
         api.release()
         engine._wait_pools()
-        engine2, _ = self.resume(parallel_units=3, workers=2)
+        engine2, _ = self.resume(parallel_units=3, workers=2, request_deadline_s=60,
+                                 stall_timeout_s=0.3)
         engine2.run(resume=True)
         self.assertEqual(self.summary_now()["units"]["n_remaining"], 0)
 
@@ -363,13 +365,13 @@ class StallWatchdog(ResumeBase):
                     self.rcfg(**{name: bad}).validate()
         self.use(CostAPI())
         engine = Engine(self.rcfg())
-        self.assertEqual((engine.deadline, engine.stall_timeout), (300.0, 900.0))
+        self.assertEqual((engine.deadline, engine.stall_timeout), (900.0, 1800.0))
         engine.run()
         summary = self.summary_now()
         self.assertEqual((summary["request_deadline_s"], summary["stall_timeout_s"]),
-                         (300.0, 900.0))
+                         (900.0, 1800.0))
         start = self.raw_events("pgg_run_start")[0]
-        self.assertEqual((start["request_deadline_s"], start["stall_timeout_s"]), (300.0, 900.0))
+        self.assertEqual((start["request_deadline_s"], start["stall_timeout_s"]), (900.0, 1800.0))
         self.assertEqual(start["code_version"], summary["segments"][-1]["code_version"])
         self.assertEqual(pgg_game.OfflineLLM.DEFAULT_REQUEST_DEADLINE_S,
                          llm_client.DEFAULT_REQUEST_DEADLINE_S)
@@ -445,13 +447,29 @@ class OldConfigResume(ResumeBase):
         self.assertEqual((new["request_deadline_s"], new["stall_timeout_s"]), (120, 600))
         self.assertIn("files_sha256", new["code_version"])
         self.assertEqual((self.run_dir / "r1_summary.seg0.json").read_bytes(), old_summary)
-        # and once more with other values: still no config difference
+        self.assertIsNone(new["timeout_change"])
+        self.assertEqual(summary["timeout_changes"], [])
+        # once more with other values: segment 1 recorded 120 / 600, so this stops
+        before = _tree(self.run_dir)
         engine, api = self.resume(request_deadline_s=30, stall_timeout_s=90)
+        with self.assertRaisesRegex(ValueError, "differ from segment 1.*--allow-timeout-change"):
+            engine.run(resume=True)
+        self.assertEqual(api.calls, [])
+        self.assertEqual(_tree(self.run_dir), before)
+        # allowed: it runs, and the change is in the summary
+        engine, api = self.resume(request_deadline_s=30, stall_timeout_s=90,
+                                  allow_timeout_change=True)
         engine.run(resume=True)
         self.assertEqual(api.calls, [])
+        summary = self.summary_now()
         self.assertEqual([(s.get("request_deadline_s"), s.get("stall_timeout_s"))
-                          for s in self.summary_now()["segments"]],
+                          for s in summary["segments"]],
                          [(None, None), (120, 600), (30, 90)])
+        change = {"from_segment": 1, "earlier": {"request_deadline_s": 120, "stall_timeout_s": 600},
+                  "now": {"request_deadline_s": 30, "stall_timeout_s": 90}, "allowed": True}
+        self.assertEqual(summary["segments"][-1]["timeout_change"], change)
+        self.assertEqual(summary["timeout_changes"], [change])
+        self.assertEqual(self.raw_events("pgg_run_resume")[-1]["timeout_change"], change)
 
     def test_cli_resume_dry_run_with_new_options(self):
         self.interrupted_run(at=14, models=dict(GEMINI), budget_usd=None, invalid_rate_cap=None)
