@@ -25,7 +25,24 @@ Arms
             much would you contribute?". Condition N only. isolated_frame
             "one_shot": one round, "There is no history and no other round";
             "repeated": a round (neither first nor last) of the 10-round game,
-            given the others' mean of the previous round.
+            given the others' mean of the previous round; "fixed_round"
+            (abstract_v3): the same at round isolated_round_no ("This is
+            round 5 of 10.").
+
+Frames (task #61; pgg_frames.py, frames/SCHEMA.md). Every prompt text comes
+from a frame file; numbers come from GameParams through placeholders. A
+config without "frames" uses frames/abstract_v2.json (the wording of pilot v2,
+character for character) for every model, and unit labels, session ids, seeds
+and the run order are those of the code before frames. With "frames"
+({label: [models]}, files in "frame_files" or frames/<label>.json) a cell is
+card x model x frame and the label is part of every id and seed key. Rows
+carry frame, frame_id and frame_sha256; --resume refuses a frame file whose
+sha256 changed. "comprehension": every agent answers the frame's
+rule-comprehension questions in a separate call before round 1 (rows: round
+1, step "comprehension"), and once before every isolated schedule; a wrong
+answer is a valid row, only a response outside the schema is re-requested.
+"expected_cost_gate_usd": a real run (also --resume) does not start when the
+dry-run estimate of the design (design_estimate) is above it.
 
 Design choices
   * Isolated schedule = ONE CALL PER VALUE (5 calls per cell and
@@ -44,8 +61,8 @@ Design choices
     goes into the system message; `style` is only a label for the output.
     Cards come from a JSON file (--cards) or the API. Homogeneous group =
     the same card for all 4 agents.
-  * No numeric disposition score appears anywhere: prompts are built here
-    from the rules only, and card texts that look like a score ("7/10",
+  * No numeric disposition score appears anywhere: prompts are built from
+    the rules and the frame file only, and card texts that look like a score ("7/10",
     "fairness 7", "score: 3") are rejected (heuristic guard, check_card_text).
   * Players are referred to by a fixed number within a game. With punishment
     a player is told only the TOTAL number of points received, not who
@@ -311,6 +328,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pgg_cost
+import pgg_frames
 
 PROJECT_DIR = Path(__file__).parent
 RUNS_DIR_ENV = "PGG_RUNS_DIR"
@@ -321,7 +339,7 @@ ARMS = ("group", "isolated")
 # not verified (maliyet_analizi.md §7 question 2).
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
 ISOLATED_POINTS = (0, 5, 10, 15, 20)
-ISOLATED_FRAMES = ("one_shot", "repeated")
+ISOLATED_FRAMES = pgg_frames.ISOLATED_FRAMES     # one_shot, repeated, fixed_round
 # provider.quantizations values of OpenRouter's provider routing (OpenAPI
 # schema "Quantization", https://openrouter.ai/openapi.json).
 QUANTIZATIONS = ("int4", "int8", "fp4", "mxfp4", "nvfp4", "fp6", "fp8", "mxfp8",
@@ -334,7 +352,7 @@ DEFAULT_STALL_TIMEOUT_S = 1800.0
 # difference needs allow_timeout_change / --allow-timeout-change).
 TIMEOUT_SETTINGS = ("request_deadline_s", "stall_timeout_s")
 # Files whose sha256 goes into code_version().
-CODE_FILES = ("pgg_game.py", "llm_client.py", "pgg_cost.py")
+CODE_FILES = ("pgg_game.py", "llm_client.py", "pgg_cost.py", "pgg_frames.py")
 # Version stamp of a code directory outside git (A5, write_code_version).
 CODE_VERSION_FILE = "CODE_VERSION.json"
 # A real run and --resume refuse code whose version is unknown or dirty
@@ -768,18 +786,22 @@ def apply_punishment(params: GameParams, earnings: list[float], points: list[lis
     return final, cost_paid, received
 
 
-def is_valid_contribution(payload, params: GameParams) -> bool:
-    """Only an integer 0..endowment is a decision (no bool, float or string)."""
+def is_valid_contribution(payload, params: GameParams, key: str = "contribution") -> bool:
+    """Only an integer 0..endowment is a decision (no bool, float or string).
+
+    key: the decision's JSON key (the frame's response.decision_key).
+    """
     if not isinstance(payload, dict):
         return False
-    return _is_int_in(payload.get("contribution"), 0, params.endowment)
+    return _is_int_in(payload.get(key), 0, params.endowment)
 
 
-def is_valid_punishment(payload, params: GameParams, targets: list[int], budget: int) -> bool:
+def is_valid_punishment(payload, params: GameParams, targets: list[int], budget: int,
+                        key: str = "punishments") -> bool:
     """Exactly one integer 0..max_punish per target, total cost within budget."""
     if not isinstance(payload, dict):
         return False
-    pun = payload.get("punishments")
+    pun = payload.get(key)
     if not isinstance(pun, dict) or set(pun) != {str(t) for t in targets}:
         return False
     if not all(_is_int_in(v, 0, params.max_punish) for v in pun.values()):
@@ -870,58 +892,29 @@ def validate_cards(cards: list[Card]) -> list[Card]:
 # Prompts
 # --------------------------------------------------------------------------
 
-def _num(x: float) -> str:
-    """12.0 -> "12", 24.4 -> "24.4"."""
-    return f"{round(x, 4):.4f}".rstrip("0").rstrip(".")
+_num = pgg_frames.fmt_num
+Frame = pgg_frames.Frame
+FrameError = pgg_frames.FrameError
+DEFAULT_FRAME = pgg_frames.DEFAULT_FRAME
 
 
-def _player(j: int) -> str:
-    return f"Player {j + 1}"
+@functools.lru_cache(maxsize=1)
+def default_frame() -> Frame:
+    """frames/abstract_v2.json: the texts of this engine up to c0b91f5 (pilot v2)."""
+    return pgg_frames.load_frame(pgg_frames.frame_path(DEFAULT_FRAME))
 
 
-def _label(j: int, me: int) -> str:
-    return _player(j) + (" (you)" if j == me else "")
+# The prompt texts live in frame files (pgg_frames, frames/SCHEMA.md); these
+# functions render them, with the default frame unless prompt_frame is given.
+
+def system_message(card: Card, prompt_frame: Frame | None = None) -> dict:
+    return (prompt_frame or default_frame()).system_message(card)
 
 
-def system_message(card: Card) -> dict:
-    return {"role": "system", "content": (
-        "You are a participant in a decision-making experiment. "
-        "The following describes you:\n" + card.text)}
-
-
-def rules_text(params: GameParams, condition: str, *, single_round: bool = False) -> str:
-    n, e = params.group_size, params.endowment
-    lines = [
-        "RULES",
-        f"- A group has {n} players: you and {n - 1} others. Players cannot communicate.",
-    ]
-    if single_round:
-        lines.append("- The game is played in rounds; this question is about one round.")
-    else:
-        lines.append(f"- The same {n} players stay together for all {params.rounds} rounds.")
-    lines += [
-        f"- In every round each player receives {e} points.",
-        f"- Each player then decides how many of these points (a whole number from 0 to {e}) "
-        "to contribute to a group project. Points that are not contributed stay with the player.",
-        f"- Every point contributed to the project yields {_num(params.mpcr)} points "
-        f"for each of the {n} players. Your earnings from the project in a round are therefore:",
-        f"  {_num(params.mpcr)} x (sum of all {n} players' contributions)",
-        "- Your total earnings in a round are the points you kept plus your earnings "
-        "from the project:",
-        f"  {e} - (your contribution) + {_num(params.mpcr)} x (sum of all {n} players' contributions)",
-    ]
-    if condition == "P":
-        lines += [
-            f"- After the contributions of a round are revealed, each player may assign "
-            f"punishment points (0 to {params.max_punish}) to each other player. Each point "
-            f"assigned costs the assigning player {_num(params.punish_cost)} point(s) and "
-            f"reduces the earnings of the receiving player by {_num(params.punish_impact)} points. "
-            "A player is told only the total number of punishment points received, "
-            "not who assigned them.",
-        ]
-    if not single_round:
-        lines.append("- After each round you are told every player's contribution and your own earnings.")
-    return "\n".join(lines)
+def rules_text(params: GameParams, condition: str, *, single_round: bool = False,
+               prompt_frame: Frame | None = None) -> str:
+    return (prompt_frame or default_frame()).rules_text(params, condition,
+                                                        single_round=single_round)
 
 
 @dataclass
@@ -935,88 +928,38 @@ class RoundRecord:
     final_earnings: list[float] | None = None
 
 
-def _contributions_line(rec_contributions: list[int], me: int) -> str:
-    listing = "; ".join(f"{_label(j, me)}: {c}" for j, c in enumerate(rec_contributions))
-    return f"Contributions: {listing}. Group total: {sum(rec_contributions)}."
+def history_text(params: GameParams, condition: str, history: list[RoundRecord], me: int,
+                 prompt_frame: Frame | None = None) -> str:
+    return (prompt_frame or default_frame()).history_text(params, condition, history, me)
 
 
-def history_text(params: GameParams, condition: str, history: list[RoundRecord], me: int) -> str:
-    if not history:
-        return "HISTORY\nThis is the first round; there is no history yet."
-    lines = ["HISTORY OF PREVIOUS ROUNDS"]
-    for rec in history:
-        lines.append(f"Round {rec.round}")
-        lines.append("  " + _contributions_line(rec.contributions, me))
-        lines.append(f"  Your earnings from the project: "
-                     f"{_num(project_share(params, rec.contributions))}. "
-                     f"Your total earnings this round: {_num(rec.round_earnings[me])}.")
-        if condition == "P":
-            given = ", ".join(f"{_label(j, me)}: {p}" for j, p in enumerate(rec.punishment[me]) if p)
-            lines.append(f"  Punishment points you assigned: {given or 'none'} "
-                         f"(cost to you: {_num(rec.cost_paid[me])}).")
-            lines.append(f"  Punishment points you received: {rec.received[me]} "
-                         f"(points lost: {_num(rec.received[me] * params.punish_impact)}).")
-            lines.append(f"  Your earnings after punishment: {_num(rec.final_earnings[me])}.")
-    return "\n".join(lines)
+def contribution_messages(params, condition, card, history, me, round_no,
+                          prompt_frame: Frame | None = None) -> list[dict]:
+    return (prompt_frame or default_frame()).contribution_messages(
+        params, condition, card, history, me, round_no)
 
 
-def contribution_messages(params, condition, card, history, me, round_no) -> list[dict]:
-    user = "\n\n".join([
-        rules_text(params, condition),
-        history_text(params, condition, history, me),
-        f"ROUND {round_no} of {params.rounds}. You are {_player(me)}. "
-        "All players decide at the same time, without seeing each other's choice for this round.\n"
-        f"How many of your {params.endowment} points do you contribute to the group project? "
-        f"(a whole number from 0 to {params.endowment})",
-    ])
-    return [system_message(card), {"role": "user", "content": user}]
+def punishment_messages(params, card, history, me, round_no, contributions, earnings,
+                        prompt_frame: Frame | None = None) -> list[dict]:
+    return (prompt_frame or default_frame()).punishment_messages(
+        params, card, history, me, round_no, contributions, earnings,
+        punishment_budget(earnings))
 
 
-def punishment_messages(params, card, history, me, round_no, contributions, earnings) -> list[dict]:
-    budget = punishment_budget(earnings)
-    user = "\n\n".join([
-        rules_text(params, "P"),
-        history_text(params, "P", history, me),
-        f"ROUND {round_no} of {params.rounds}, punishment step. You are {_player(me)}.\n"
-        f"This round: {_contributions_line(contributions, me)} "
-        f"Your earnings from the project this round: {_num(project_share(params, contributions))}. "
-        f"Your total earnings this round (before punishment): {_num(earnings)}.\n"
-        f"You may now assign punishment points (0 to {params.max_punish}) to each other player. "
-        f"A point costs you {_num(params.punish_cost)} and reduces the receiving player's earnings "
-        f"by {_num(params.punish_impact)}. Your total cost may not exceed your total earnings "
-        f"this round, so you can assign at most {budget // params.punish_cost} points in total. "
-        "All players decide at the same time.",
-    ])
-    return [system_message(card), {"role": "user", "content": user}]
-
-
-def isolated_messages(params, card, others_mean: int, frame: str = "one_shot") -> list[dict]:
+def isolated_messages(params, card, others_mean: int, frame: str = "one_shot",
+                      round_no: int | None = None,
+                      prompt_frame: Frame | None = None) -> list[dict]:
     """One value of the conditional schedule.
 
-    frame "one_shot": a single round with no history and no other round (the
-    wording of the first engine). frame "repeated": a round of the
-    params.rounds-round game, given the others' mean of the previous round.
+    frame (the isolated wording; the prompt frame must offer it) "one_shot": a
+    single round with no history and no other round (the wording of the first
+    engine). "repeated": a round of the params.rounds-round game, neither the
+    first nor the last, given the others' mean of the previous round.
+    "fixed_round": the same, but at round round_no ("This is round 5 of 10.",
+    abstract_v3).
     """
-    n, e = params.group_size, params.endowment
-    if frame == "one_shot":
-        rules = rules_text(params, "N", single_round=True)
-        question = (
-            f"Consider one round. Suppose the other {n - 1} players of your group each contribute, "
-            f"on average, {others_mean} points. There is no history and no other round.\n"
-            f"How many of your {e} points do you contribute to the group project? "
-            f"(a whole number from 0 to {e})")
-    elif frame == "repeated":
-        rules = rules_text(params, "N")
-        question = (
-            f"Consider a round of this {params.rounds}-round game that is neither the first nor "
-            f"the last round. In the previous round the other {n - 1} players of your group "
-            f"contributed, on average, {others_mean} points each.\n"
-            f"How many of your {e} points do you contribute to the group project in this round? "
-            f"(a whole number from 0 to {e})")
-    else:
-        raise ValueError(f"isolated_frame must be one of {ISOLATED_FRAMES}, got {frame!r}")
-    user = "\n\n".join([rules, "QUESTION\n" + question])
-    return [system_message(card), {"role": "user", "content": user}]
+    return (prompt_frame or default_frame()).isolated_messages(
+        params, card, others_mean, frame, round_no)
 
 
 def punishment_budget(earnings: float) -> int:
@@ -1024,26 +967,30 @@ def punishment_budget(earnings: float) -> int:
     return int(earnings // 1)
 
 
-def contribution_schema(params: GameParams, rationale: bool) -> dict:
-    props = {"contribution": {"type": "integer", "minimum": 0, "maximum": params.endowment}}
+def contribution_schema(params: GameParams, rationale: bool,
+                        prompt_frame: Frame | None = None) -> dict:
+    f = prompt_frame or default_frame()
+    props = {f.decision_key: {"type": "integer", "minimum": 0, "maximum": params.endowment}}
     if rationale:
         props["rationale"] = {"type": "string",
-                              "description": "One or two sentences on why you chose this."}
-    return {"type": "object", "required": ["contribution"], "properties": props}
+                              "description": f.response("rationale_description")}
+    return {"type": "object", "required": [f.decision_key], "properties": props}
 
 
-def punishment_schema(params: GameParams, targets: list[int], rationale: bool) -> dict:
+def punishment_schema(params: GameParams, targets: list[int], rationale: bool,
+                      prompt_frame: Frame | None = None) -> dict:
+    f = prompt_frame or default_frame()
     per_target = {"type": "integer", "minimum": 0, "maximum": params.max_punish}
-    props = {"punishments": {
+    props = {f.punishment_key: {
         "type": "object",
-        "description": "Punishment points per other player, keyed by player number.",
+        "description": f.response("punishment_description"),
         "required": [str(t) for t in targets],
         "properties": {str(t): per_target for t in targets},
     }}
     if rationale:
         props["rationale"] = {"type": "string",
-                              "description": "One or two sentences on why you chose this."}
-    return {"type": "object", "required": ["punishments"], "properties": props}
+                              "description": f.response("rationale_description")}
+    return {"type": "object", "required": [f.punishment_key], "properties": props}
 
 
 # --------------------------------------------------------------------------
@@ -1225,6 +1172,46 @@ class RunConfig:
     # §8.2 item 5, which stopped the run). None = not pinned.
     providers: dict | None = None
     isolated_frame: str = "one_shot"           # ISOLATED_FRAMES
+    # Frames (pgg_frames, frames/SCHEMA.md). None = the default frame
+    # (abstract_v2) for every model, and unit labels, session ids and seeds
+    # without a frame part, exactly as before frames existed (pilot v2).
+    # Otherwise {frame label: [model keys]}: cell = card x model x frame, and
+    # the frame label is part of every unit label, session id, group id,
+    # seed and order key. A frame's file is frame_files[label] (a path, e.g.
+    # a story in the workspace), else frames/<label>.json.
+    frames: dict | None = None
+    frame_files: dict | None = None
+    # isolated_frame "fixed_round": the round the isolated question names
+    isolated_round_no: int = 5
+    # rule-comprehension questions (frame "comprehension"): every agent once
+    # before round 1 of a group game, and once before every isolated schedule
+    comprehension: bool = False
+    # a real run does not start when the dry-run estimate (design_estimate,
+    # cost_usd) is above this; None = no gate
+    expected_cost_gate_usd: float | None = None
+    _frame_cache: dict | None = field(default=None, init=False, repr=False, compare=False)
+
+    def frame_models(self) -> dict[str, list[str]]:
+        """{frame label: model keys}; the default frame for every model when frames is None."""
+        if self.frames is None:
+            return {DEFAULT_FRAME: list(self.models)}
+        return {label: list(keys) for label, keys in self.frames.items()}
+
+    def frames_of(self, model_key: str) -> list[str]:
+        return [label for label, keys in self.frame_models().items() if model_key in keys]
+
+    def load_frames(self) -> dict[str, Frame]:
+        """{frame label: Frame}, read and validated once (FrameError if a file is invalid)."""
+        if self._frame_cache is None:
+            files = self.frame_files or {}
+            out = {}
+            for label in self.frame_models():
+                if label == DEFAULT_FRAME and label not in files:
+                    out[label] = default_frame()
+                else:
+                    out[label] = pgg_frames.load_frame(pgg_frames.frame_path(label, files.get(label)))
+            self._frame_cache = out
+        return self._frame_cache
 
     def effort_for(self, model_key: str) -> str | None:
         if isinstance(self.reasoning_effort, dict):
@@ -1264,6 +1251,7 @@ class RunConfig:
         if self.isolated_frame not in ISOLATED_FRAMES:
             raise ValueError(f"isolated_frame must be one of {ISOLATED_FRAMES}, "
                              f"got {self.isolated_frame!r}")
+        self._validate_frames()
         for name in ("request_timeout_s", "request_deadline_s", "stall_timeout_s"):
             value = getattr(self, name)
             if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
@@ -1316,20 +1304,78 @@ class RunConfig:
         if self.invalid_rate_cap is not None and not 0 < self.invalid_rate_cap <= 1:
             raise ValueError("invalid_rate_cap must be in (0, 1]")
 
-    def planned_calls_per_model(self) -> int:
-        """Accepted decisions per model of this design (re-requests not included)."""
+    def _validate_frames(self) -> None:
+        """frames / frame_files / comprehension / isolated_round_no / expected_cost_gate_usd."""
+        if self.frames is not None:
+            if not isinstance(self.frames, dict) or not self.frames:
+                raise ValueError("frames must be a non-empty {frame label: [model keys]} object")
+            for label, keys in self.frames.items():
+                if not isinstance(label, str) or not re.fullmatch(r"[A-Za-z0-9_.]+", label):
+                    raise ValueError(f"frame label must be [A-Za-z0-9_.]+, got {label!r}")
+                if (not isinstance(keys, (list, tuple)) or not keys
+                        or len(set(keys)) != len(keys)):
+                    raise ValueError(f"frames[{label}] must be a non-empty list of distinct models")
+                extra = set(keys) - set(self.models)
+                if extra:
+                    raise ValueError(f"frames[{label}]: {sorted(extra)} not among the run's "
+                                     f"models {sorted(self.models)}")
+            unused = [k for k in self.models if not self.frames_of(k)]
+            if unused:
+                raise ValueError(f"models in no frame: {unused}")
+        if self.frame_files is not None:
+            if self.frames is None:
+                raise ValueError("frame_files needs frames ({frame label: [models]})")
+            if not isinstance(self.frame_files, dict):
+                raise ValueError("frame_files must be a {frame label: path} object")
+            extra = set(self.frame_files) - set(self.frames)
+            if extra:
+                raise ValueError(f"frame_files for frames not in frames: {sorted(extra)}")
+            open_ = placeholders_in(self.frame_files, "frame_files")
+            if open_:
+                raise ValueError(f"not chosen yet (placeholder): {', '.join(open_)}")
+        if not isinstance(self.comprehension, bool):
+            raise ValueError("comprehension must be true or false")
+        if self.expected_cost_gate_usd is not None and (
+                isinstance(self.expected_cost_gate_usd, bool)
+                or not isinstance(self.expected_cost_gate_usd, (int, float))
+                or not self.expected_cost_gate_usd > 0):
+            raise ValueError("expected_cost_gate_usd must be positive")
+        if self.isolated_frame == "fixed_round" and "isolated" in self.arms and not _is_int_in(
+                self.isolated_round_no, 2, self.params.rounds):
+            raise ValueError(f"isolated_round_no must be an integer in 2..{self.params.rounds} "
+                             f"(the previous round's mean is given), got {self.isolated_round_no!r}")
+        frames = self.load_frames()            # FrameError (a ValueError) if a file is invalid
+        for label, f in frames.items():
+            if "isolated" in self.arms and self.isolated_frame not in f.isolated_frames:
+                raise ValueError(f"frame {label!r} ({f.path}) has no isolated question "
+                                 f"{self.isolated_frame!r}; it offers {list(f.isolated_frames)}")
+            if self.comprehension:
+                if not f.has_comprehension:
+                    raise ValueError(f"comprehension is on, but frame {label!r} ({f.path}) has "
+                                     "no comprehension questions")
+                f.comprehension_key(self.params)     # ValueError if not whole numbers
+
+    def planned_calls_per_model(self, model_key: str | None = None) -> int:
+        """Accepted decisions per model of this design (re-requests not included).
+
+        A model runs len(cards) cells per frame it is in (model_key None: the
+        most of any model).
+        """
+        if model_key is None:
+            return max(self.planned_calls_per_model(k) for k in self.models)
         counts = pgg_cost.call_counts(
-            n_cells=len(self.cards), conditions=self.conditions,
+            n_cells=len(self.cards) * len(self.frames_of(model_key)),
+            conditions=self.conditions,
             groups_per_cell=self.groups_per_cell, isolated_reps=self.isolated_reps,
             n_points=len(self.isolated_points), group_size=self.params.group_size,
-            rounds=self.params.rounds, arms=self.arms)
+            rounds=self.params.rounds, arms=self.arms, comprehension=self.comprehension)
         return sum(counts.values())
 
-    def invalid_limit(self) -> int | None:
+    def invalid_limit(self, model_key: str | None = None) -> int | None:
         """Most invalid + parse-failed responses a model may have (None = no cap)."""
         if self.invalid_rate_cap is None:
             return None
-        return math.floor(self.invalid_rate_cap * self.planned_calls_per_model() + 1e-9)
+        return math.floor(self.invalid_rate_cap * self.planned_calls_per_model(model_key) + 1e-9)
 
 
 def _count_lines(path: Path) -> int | None:
@@ -1340,14 +1386,20 @@ def _count_lines(path: Path) -> int | None:
         return sum(1 for _ in f)
 
 
-def session_id_for(run, model_key, card_id, style, condition, arm, idx: int) -> str:
-    """Deterministic session id: (run, model, card, style, condition, arm, group/repetition)."""
-    return f"pgg-{run}-{model_key}-{card_id}-{style}-{condition}-{arm}-{idx:03d}"
+def session_id_for(run, model_key, card_id, style, condition, arm, idx: int,
+                   frame: str | None = None) -> str:
+    """Deterministic session id: (run, model, card, style, condition, arm, group/repetition[, frame]).
+
+    frame: the frame label, only when the config names frames (else as before).
+    """
+    return (f"pgg-{run}-{model_key}-{card_id}-{style}-{condition}-{arm}-{idx:03d}"
+            + (f"-{frame}" if frame is not None else ""))
 
 
-def unit_label(model_key, card: Card, condition, arm, idx: int) -> str:
-    """Label of a unit in unit_order, e.g. "gpt|boston_value|value|N|group|0"."""
-    return f"{model_key}|{card.card_id}|{card.style}|{condition}|{arm}|{idx}"
+def unit_label(model_key, card: Card, condition, arm, idx: int, frame: str | None = None) -> str:
+    """Label of a unit in unit_order, e.g. "gpt|boston_value|value|N|group|0" (+ "|<frame>")."""
+    return (f"{model_key}|{card.card_id}|{card.style}|{condition}|{arm}|{idx}"
+            + (f"|{frame}" if frame is not None else ""))
 
 
 @dataclass(frozen=True)
@@ -1362,6 +1414,7 @@ class UnitSpec:
     session_id: str
     expected: frozenset         # row keys (_row_key) of the complete unit
     calls_by_kind: tuple        # ((pgg_cost call kind, accepted decisions), ...)
+    frame: str = DEFAULT_FRAME  # frame label (RunConfig.frames)
 
 
 def _row_key(row: dict) -> tuple:
@@ -1590,7 +1643,16 @@ class Engine:
         self.stalled = False                       # the stall watchdog stopped the run
         self._out = None
         self._lock = threading.Lock()
-        self.invalid_limit = cfg.invalid_limit()
+        # a model's cap counts its own cells (a model may be in more frames)
+        self.invalid_limits = {k: cfg.invalid_limit(k) for k in cfg.models}
+        limits = set(self.invalid_limits.values())
+        # summary "invalid_limit_per_model": one number when it is the same
+        # for every model (always without frames), else per model key
+        self.invalid_limit = limits.pop() if len(limits) == 1 else dict(self.invalid_limits)
+        self.frames = cfg.load_frames()            # frame label -> Frame
+        self.comprehension_keys = ({label: f.comprehension_key(cfg.params)
+                                    for label, f in self.frames.items()}
+                                   if cfg.comprehension else {})
         self.stop_reason: str | None = None        # set once; stops every unit
         self.aborted: RunAborted | None = None
         self.stopped_models: dict[str, str] = {}   # model key -> reason
@@ -1774,7 +1836,8 @@ class Engine:
             prior = self.prior_stats[model_key]          # earlier segments (resume)
             n_invalid = s["n_invalid"] + prior["n_invalid"]
             n_parse_fail = s["n_parse_fail"] + prior["n_parse_fail"]
-            hit = (self.invalid_limit is not None and n_invalid + n_parse_fail > self.invalid_limit
+            limit = self.invalid_limits[model_key]
+            hit = (limit is not None and n_invalid + n_parse_fail > limit
                    and model_key not in self.stopped_models)
             if hit:
                 self.stopped_models[model_key] = "invalid_rate_cap"
@@ -1783,7 +1846,7 @@ class Engine:
                 "ts": time.time(), "event": "pgg_model_stopped", "run": self.cfg.run,
                 "model": self.cfg.models[model_key], "reason": "invalid_rate_cap",
                 "n_invalid": n_invalid, "n_parse_fail": n_parse_fail,
-                "limit": self.invalid_limit})
+                "limit": self.invalid_limits[model_key]})
 
     def _pool(self, max_workers: int) -> ThreadPoolExecutor:
         pool = ThreadPoolExecutor(max_workers=max_workers)
@@ -1868,8 +1931,10 @@ class Engine:
         return ans
 
     def _row(self, *, condition, arm, model_key, card, session_id, group_id, agent_id,
-             round_no, step, ans: Answer, seed: int, unit: str, **fields) -> dict:
+             round_no, step, ans: Answer, seed: int, unit: str, frame: str = DEFAULT_FRAME,
+             **fields) -> dict:
         rationale = ans.parsed.get("rationale")
+        f = self.frames[frame]
         return {
             "run": self.cfg.run, "segment": self.segment, "unit": unit, "condition": condition, "arm": arm, "step": step,
             "model": self.cfg.models[model_key], "model_key": model_key,
@@ -1877,6 +1942,7 @@ class Engine:
             "session_id": session_id, "group_id": group_id, "agent_id": agent_id,
             "round": round_no, "card_id": card.card_id, "style": card.style,
             **card_length(card),
+            "frame": frame, "frame_id": f.name, "frame_sha256": f.sha256,
             **fields,
             "n_invalid": ans.n_invalid, "n_parse_fail": ans.n_parse_fail,
             "n_provider_error": ans.n_provider_error,
@@ -1894,23 +1960,77 @@ class Engine:
             "seed": seed, "ts": time.time(),
         }
 
+    # -- frames ------------------------------------------------------------
+
+    def _frame_label(self, model_key: str, frame: str | None) -> str:
+        """The frame of a unit: the given label, else the model's only frame."""
+        if frame is not None:
+            if model_key not in self.cfg.frame_models().get(frame, []):
+                raise ValueError(f"model {model_key!r} is not in frame {frame!r}")
+            return frame
+        labels = self.cfg.frames_of(model_key)
+        if len(labels) != 1:
+            raise ValueError(f"model {model_key!r} is in frames {labels}: name the frame")
+        return labels[0]
+
+    def _frame_tag(self, frame: str) -> str | None:
+        """The frame in unit labels, session ids and group ids (None without frames)."""
+        return frame if self.cfg.frames is not None else None
+
+    def _frame_parts(self, frame: str) -> tuple:
+        """The frame in seed and order keys (nothing without frames: seeds as before)."""
+        return (frame,) if self.cfg.frames is not None else ()
+
+    def _comprehension_fields(self, frame: str, ans: Answer) -> dict:
+        """Answers, answer key and correctness of a rule-comprehension response.
+
+        A wrong answer is a valid response (only the schema is validated); it
+        is recorded, never re-requested.
+        """
+        key = self.comprehension_keys[frame]
+        out = {}
+        for qid, want in key.items():
+            got = ans.parsed.get(qid)
+            out[f"comp_{qid}_answer"] = got
+            out[f"comp_{qid}_key"] = want
+            out[f"comp_{qid}_correct"] = got == want
+        out["comp_n_correct"] = sum(out[f"comp_{qid}_correct"] for qid in key)
+        out["comp_n_questions"] = len(key)
+        return out
+
+    def _ask_comprehension(self, model_key, frame: str, card: Card, condition: str,
+                           single_round: bool, session_id: str, ctx: dict) -> Answer:
+        f = self.frames[frame]
+        return self._ask(model_key,
+                         f.comprehension_messages(self.cfg.params, card, condition,
+                                                  single_round=single_round),
+                         f.comprehension_schema(self.cfg.rationale), f.is_valid_comprehension,
+                         session_id, {**ctx, "step": "comprehension"})
+
     # -- group arm ---------------------------------------------------------
 
     def play_group(self, model_key: str, cards: list[Card], condition: str, idx: int,
-                   history: list[RoundRecord] | None = None) -> None:
+                   history: list[RoundRecord] | None = None, frame: str | None = None) -> None:
         """One group game (rounds x agents); cards[i] is agent i+1's card.
 
         history: rounds 1..k already played (resume, rebuilt from their rows);
-        the game goes on with round k+1.
+        the game goes on with round k+1. frame: the frame label (default: the
+        model's only frame). With comprehension on, every agent first answers
+        the rule-comprehension questions in a separate call; their rows are
+        written with round 1 (round 1, step "comprehension").
         """
         p = self.cfg.params
         if len(cards) != p.group_size:
             raise ValueError(f"need {p.group_size} cards, got {len(cards)}")
+        frame = self._frame_label(model_key, frame)
+        f, tag, fp = self.frames[frame], self._frame_tag(frame), self._frame_parts(frame)
+        key = f.decision_key
         lead = cards[0]
         session_id = session_id_for(self.cfg.run, model_key, lead.card_id, lead.style,
-                                    condition, "group", idx)
-        group_id = f"{lead.card_id}-{lead.style}-{condition}-g{idx:02d}"
-        unit = unit_label(model_key, lead, condition, "group", idx)
+                                    condition, "group", idx, tag)
+        group_id = (f"{lead.card_id}-{lead.style}-{condition}-g{idx:02d}"
+                    + (f"-{tag}" if tag else ""))
+        unit = unit_label(model_key, lead, condition, "group", idx, tag)
         history = list(history or [])
         if [rec.round for rec in history] != list(range(1, len(history) + 1)):
             raise ValueError(f"history of {unit} is not rounds 1..{len(history)}")
@@ -1918,47 +2038,65 @@ class Engine:
             ctx = {"round": r, "group_id": group_id, "condition": condition}
             pending = _Pending(self, model_key, session_id)
 
+            def comprehend(i):
+                return pending.add(self._ask_comprehension(
+                    model_key, frame, cards[i], condition, False, session_id,
+                    {**ctx, "agent_id": i + 1}))
+
             def contribute(i):
                 return pending.add(self._ask(
-                    model_key, contribution_messages(p, condition, cards[i], history, i, r),
-                    contribution_schema(p, self.cfg.rationale),
-                    lambda c: is_valid_contribution(c, p), session_id,
+                    model_key, contribution_messages(p, condition, cards[i], history, i, r,
+                                                     prompt_frame=f),
+                    contribution_schema(p, self.cfg.rationale, prompt_frame=f),
+                    lambda c: is_valid_contribution(c, p, key), session_id,
                     {**ctx, "agent_id": i + 1, "step": "contribute"}))
 
             try:
+                comp_answers = (self._map(comprehend, range(p.group_size))
+                                if r == 1 and self.cfg.comprehension else None)
                 answers = self._map(contribute, range(p.group_size))
-                contributions = [a.parsed["contribution"] for a in answers]
+                contributions = [a.parsed[key] for a in answers]
                 earnings = project_payoffs(p, contributions)
                 rec = RoundRecord(r, contributions, earnings, final_earnings=earnings)
                 punish_answers = None
 
                 if condition == "P":
+                    pkey = f.punishment_key
+
                     def punish(i):
                         targets = [j + 1 for j in range(p.group_size) if j != i]
                         budget = punishment_budget(earnings[i])
                         return pending.add(self._ask(
                             model_key,
                             punishment_messages(p, cards[i], history, i, r, contributions,
-                                                earnings[i]),
-                            punishment_schema(p, targets, self.cfg.rationale),
-                            lambda c: is_valid_punishment(c, p, targets, budget), session_id,
-                            {**ctx, "agent_id": i + 1, "step": "punish"}))
+                                                earnings[i], prompt_frame=f),
+                            punishment_schema(p, targets, self.cfg.rationale, prompt_frame=f),
+                            lambda c: is_valid_punishment(c, p, targets, budget, pkey),
+                            session_id, {**ctx, "agent_id": i + 1, "step": "punish"}))
 
                     punish_answers = self._map(punish, range(p.group_size))
                     rec.punishment = [
-                        [punish_answers[i].parsed["punishments"][str(j + 1)] if j != i else 0
+                        [punish_answers[i].parsed[pkey][str(j + 1)] if j != i else 0
                          for j in range(p.group_size)] for i in range(p.group_size)]
                     rec.final_earnings, rec.cost_paid, rec.received = apply_punishment(
                         p, earnings, rec.punishment)
 
+                for i, ans in enumerate(comp_answers or []):
+                    pending.done(ans, self._write(self._row(
+                        condition=condition, arm="group", model_key=model_key, card=cards[i],
+                        session_id=session_id, group_id=group_id, agent_id=i + 1, round_no=r,
+                        step="comprehension", ans=ans, unit=unit, frame=frame,
+                        seed=self.seed_for(model_key, *fp, cards[i].card_id, cards[i].style,
+                                           condition, "group", idx, i + 1, r, "comprehension"),
+                        **self._comprehension_fields(frame, ans))))
                 for i in range(p.group_size):
                     pending.done(answers[i], self._write(self._row(
                         condition=condition, arm="group", model_key=model_key, card=cards[i],
                         session_id=session_id, group_id=group_id, agent_id=i + 1, round_no=r,
-                        step="contribute", ans=answers[i], unit=unit,
-                        seed=self.seed_for(model_key, cards[i].card_id, cards[i].style, condition,
-                                           "group", idx, i + 1, r, "contribute"),
-                        contribution=answers[i].parsed["contribution"],
+                        step="contribute", ans=answers[i], unit=unit, frame=frame,
+                        seed=self.seed_for(model_key, *fp, cards[i].card_id, cards[i].style,
+                                           condition, "group", idx, i + 1, r, "contribute"),
+                        contribution=answers[i].parsed[key],
                         group_total=sum(contributions),
                         payoff_before_punishment=earnings[i], payoff=rec.final_earnings[i])))
                 if punish_answers:
@@ -1966,8 +2104,8 @@ class Engine:
                         pending.done(punish_answers[i], self._write(self._row(
                             condition=condition, arm="group", model_key=model_key, card=cards[i],
                             session_id=session_id, group_id=group_id, agent_id=i + 1, round_no=r,
-                            step="punish", ans=punish_answers[i], unit=unit,
-                            seed=self.seed_for(model_key, cards[i].card_id, cards[i].style,
+                            step="punish", ans=punish_answers[i], unit=unit, frame=frame,
+                            seed=self.seed_for(model_key, *fp, cards[i].card_id, cards[i].style,
                                                condition, "group", idx, i + 1, r, "punish"),
                             punishments={str(j + 1): rec.punishment[i][j]
                                          for j in range(p.group_size) if j != i},
@@ -1980,36 +2118,63 @@ class Engine:
 
     # -- isolated arm ------------------------------------------------------
 
-    def play_isolated(self, model_key: str, card: Card, rep: int) -> None:
-        """The conditional schedule for one card: one call per conditioning value."""
+    def play_isolated(self, model_key: str, card: Card, rep: int, frame: str | None = None) -> None:
+        """The conditional schedule for one card: one call per conditioning value.
+
+        With comprehension on, the rule-comprehension call comes first, once
+        per schedule (its row: round null, step "comprehension").
+        """
         p = self.cfg.params
         condition = "N"
+        frame = self._frame_label(model_key, frame)
+        f, tag, fp = self.frames[frame], self._frame_tag(frame), self._frame_parts(frame)
+        key = f.decision_key
+        iso = self.cfg.isolated_frame
+        round_no = self.cfg.isolated_round_no if iso == "fixed_round" else None
         session_id = session_id_for(self.cfg.run, model_key, card.card_id, card.style,
-                                    condition, "isolated", rep)
-        group_id = f"{card.card_id}-{card.style}-{condition}-iso{rep:02d}"
-        unit = unit_label(model_key, card, condition, "isolated", rep)
+                                    condition, "isolated", rep, tag)
+        group_id = (f"{card.card_id}-{card.style}-{condition}-iso{rep:02d}"
+                    + (f"-{tag}" if tag else ""))
+        unit = unit_label(model_key, card, condition, "isolated", rep, tag)
 
         pending = _Pending(self, model_key, session_id)
+        base_ctx = {"round": None, "group_id": group_id, "condition": condition, "agent_id": 1}
 
         def ask_point(x):
-            ctx = {"round": None, "group_id": group_id, "condition": condition,
-                   "agent_id": 1, "step": "isolated", "others_mean": x}
+            ctx = {**base_ctx, "step": "isolated", "others_mean": x}
             return pending.add(self._ask(
-                model_key, isolated_messages(p, card, x, self.cfg.isolated_frame),
-                contribution_schema(p, self.cfg.rationale),
-                lambda c: is_valid_contribution(c, p), session_id, ctx))
+                model_key, isolated_messages(p, card, x, iso, round_no, prompt_frame=f),
+                contribution_schema(p, self.cfg.rationale, prompt_frame=f),
+                lambda c: is_valid_contribution(c, p, key), session_id, ctx))
 
         points = list(self.cfg.isolated_points)
+        extra = {"isolated_frame": iso}
+        if round_no is not None:
+            extra["isolated_round_no"] = round_no
         try:
-            for x, ans in zip(points, self._map(ask_point, points)):
+            comp = None
+            if self.cfg.comprehension:
+                single = f.data["isolated"][iso]["rules"] == "single_round"
+                comp = pending.add(self._ask_comprehension(
+                    model_key, frame, card, condition, single, session_id,
+                    {**base_ctx, "others_mean": None}))
+            answers = self._map(ask_point, points)
+            if comp is not None:
+                pending.done(comp, self._write(self._row(
+                    condition=condition, arm="isolated", model_key=model_key, card=card,
+                    session_id=session_id, group_id=group_id, agent_id=1, round_no=None,
+                    step="comprehension", ans=comp, unit=unit, frame=frame,
+                    seed=self.seed_for(model_key, *fp, card.card_id, card.style, condition,
+                                       "isolated", rep, 1, "comprehension"),
+                    **self._comprehension_fields(frame, comp), **extra)))
+            for x, ans in zip(points, answers):
                 pending.done(ans, self._write(self._row(
                     condition=condition, arm="isolated", model_key=model_key, card=card,
                     session_id=session_id, group_id=group_id, agent_id=1, round_no=None,
-                    step="isolated", ans=ans, unit=unit,
-                    seed=self.seed_for(model_key, card.card_id, card.style, condition,
+                    step="isolated", ans=ans, unit=unit, frame=frame,
+                    seed=self.seed_for(model_key, *fp, card.card_id, card.style, condition,
                                        "isolated", rep, 1, "isolated", x),
-                    contribution=ans.parsed["contribution"], others_mean=x,
-                    isolated_frame=self.cfg.isolated_frame)))
+                    contribution=ans.parsed[key], others_mean=x, **extra)))
         finally:
             pending.close()
 
@@ -2020,8 +2185,10 @@ class Engine:
         return (self.llm.stable_seed(self.cfg.seed_namespace, self.cfg.run, "order", *parts),
                 tuple(map(str, parts)))
 
-    def _spec(self, model_key: str, card: Card, condition: str, arm: str, idx: int) -> UnitSpec:
+    def _spec(self, model_key: str, card: Card, condition: str, arm: str, idx: int,
+              frame: str = DEFAULT_FRAME) -> UnitSpec:
         cfg, p = self.cfg, self.cfg.params
+        tag = self._frame_tag(frame)
         if arm == "group":
             steps = ("contribute", "punish") if condition == "P" else ("contribute",)
             expected = frozenset((step, r, a, None) for step in steps
@@ -2029,16 +2196,23 @@ class Engine:
                                  for a in range(1, p.group_size + 1))
             n = p.rounds * p.group_size
             kinds = ((f"contribute_{condition}", n),) + ((("punish_P", n),) if condition == "P" else ())
+            if cfg.comprehension:          # with round 1
+                expected |= {("comprehension", 1, a, None) for a in range(1, p.group_size + 1)}
+                kinds += (("comprehension", p.group_size),)
         else:
             expected = frozenset(("isolated", None, 1, x) for x in cfg.isolated_points)
             kinds = (("isolated", len(cfg.isolated_points)),)
+            if cfg.comprehension:
+                expected |= {("comprehension", None, 1, None)}
+                kinds += (("comprehension", 1),)
         return UnitSpec(
-            unit_label(model_key, card, condition, arm, idx), model_key, card, condition, arm, idx,
-            session_id_for(cfg.run, model_key, card.card_id, card.style, condition, arm, idx),
-            expected, kinds)
+            unit_label(model_key, card, condition, arm, idx, tag), model_key, card, condition,
+            arm, idx,
+            session_id_for(cfg.run, model_key, card.card_id, card.style, condition, arm, idx, tag),
+            expected, kinds, frame)
 
-    def _cell_specs(self, model_key: str, card: Card) -> list[UnitSpec]:
-        """Units of one cell (card x model).
+    def _cell_specs(self, model_key: str, card: Card, frame: str = DEFAULT_FRAME) -> list[UnitSpec]:
+        """Units of one cell (card x model x frame).
 
         Group games and isolated schedules alternate, so that a run stopped
         early has both arms.
@@ -2046,10 +2220,10 @@ class Engine:
         cfg = self.cfg
         groups, schedules = [], []
         if "group" in cfg.arms:
-            groups = [self._spec(model_key, card, condition, "group", idx)
+            groups = [self._spec(model_key, card, condition, "group", idx, frame)
                       for condition in cfg.conditions for idx in range(cfg.groups_per_cell)]
         if "isolated" in cfg.arms:
-            schedules = [self._spec(model_key, card, "N", "isolated", rep)
+            schedules = [self._spec(model_key, card, "N", "isolated", rep, frame)
                          for rep in range(cfg.isolated_reps)]
         out = []
         for k in range(max(len(groups), len(schedules))):
@@ -2059,23 +2233,27 @@ class Engine:
     def unit_specs(self) -> list[UnitSpec]:
         """Every group game / schedule of the design, in run order.
 
-        Shuffled round-robin over the cells (card x model), so that a run
-        stopped early still has data from every card: pass k runs the k-th
+        Shuffled round-robin over the cells (card x model x frame), so that a
+        run stopped early still has data from every card: pass k runs the k-th
         unit of every cell. Within a pass the cards are in a stable_seed
-        order (new per pass) and the models rotate over them (Latin square),
-        so every block of len(cards) consecutive units has every card once
-        and the pass has every cell once. Never hash().
+        order (new per pass) and the (model, frame) pairs rotate over them
+        (Latin square), so every block of len(cards) consecutive units has
+        every card once and the pass has every cell once. Without frames the
+        pairs are the models and the keys are those of the code before frames.
+        Never hash().
         """
         cfg = self.cfg
-        models = sorted(cfg.models, key=lambda m: self._order_key("model", m))
-        cells = {(m, c.card_id, c.style): self._cell_specs(m, c)
-                 for m in cfg.models for c in cfg.cards}
+        pairs = sorted(((m, label) for label, keys in cfg.frame_models().items() for m in keys),
+                       key=lambda ml: self._order_key("model", ml[0], *self._frame_parts(ml[1])))
+        cells = {(m, label, c.card_id, c.style): self._cell_specs(m, c, label)
+                 for m, label in pairs for c in cfg.cards}
         out = []
         for k in range(max(len(u) for u in cells.values())):
             cards = sorted(cfg.cards, key=lambda c: self._order_key("card", k, c.card_id, c.style))
-            for j in range(len(models)):
+            for j in range(len(pairs)):
                 for i, card in enumerate(cards):
-                    cell = cells[(models[(i + j) % len(models)], card.card_id, card.style)]
+                    m, label = pairs[(i + j) % len(pairs)]
+                    cell = cells[(m, label, card.card_id, card.style)]
                     if k < len(cell):
                         out.append(cell[k])
         return out
@@ -2084,8 +2262,9 @@ class Engine:
         if spec.arm == "group":
             return lambda: self.play_group(spec.model_key, [spec.card] * self.cfg.params.group_size,
                                            spec.condition, spec.idx,
-                                           history=self._histories.get(spec.label))
-        return lambda: self.play_isolated(spec.model_key, spec.card, spec.idx)
+                                           history=self._histories.get(spec.label),
+                                           frame=spec.frame)
+        return lambda: self.play_isolated(spec.model_key, spec.card, spec.idx, frame=spec.frame)
 
     def units(self, specs: list[UnitSpec] | None = None) -> list[tuple[str, str, object]]:
         """(model key, label, callable) per group game / schedule, in run order (unit_specs)."""
@@ -2152,7 +2331,28 @@ class Engine:
             "cards": [{"card_id": c.card_id, "style": c.style,
                        "text_sha256": hashlib.sha256(c.text.encode("utf-8")).hexdigest(),
                        **card_length(c)} for c in cfg.cards],
+            # only when set: a config without frames / gate has the record of
+            # the code before frames, so its runs (pilot v2) resume
+            **({"frame_setup": self.frame_setup()} if cfg.frames is not None else {}),
+            **({"expected_cost_gate_usd": cfg.expected_cost_gate_usd}
+               if cfg.expected_cost_gate_usd is not None else {}),
         })
+
+    def frames_summary(self) -> dict:
+        """{frame label: {"frame_id", "sha256", "path", "models"}} of this run."""
+        return {label: {**self.frames[label].describe(), "models": list(keys)}
+                for label, keys in self.cfg.frame_models().items()}
+
+    def frame_setup(self) -> dict:
+        """What every segment of a run with frames must share (config "frame_setup").
+
+        The frame files are compared by sha256 (not by path: a file may move).
+        """
+        return {"frames": {label: {"frame_id": f["frame_id"], "sha256": f["sha256"],
+                                   "models": f["models"]}
+                           for label, f in self.frames_summary().items()},
+                "comprehension": self.cfg.comprehension,
+                "isolated_round_no": self.cfg.isolated_round_no}
 
     def _legacy_config(self) -> dict:
         """Top-level fields of a summary written before "config" existed."""
@@ -2163,6 +2363,23 @@ class Engine:
             "reasoning_effort": self._effort_summary(), "budget_usd": self.cfg.budget_usd,
             "invalid_rate_cap": self.cfg.invalid_rate_cap,
             "planned_calls_per_model": self.cfg.planned_calls_per_model()})
+
+    def design_estimate(self) -> dict:
+        """Dry-run estimate of the whole design (design_estimate; scaled only with frames)."""
+        cfg = self.cfg
+        return design_estimate(
+            models=cfg.models, frame_models=cfg.frame_models(), frames=self.frames,
+            n_cells=len(cfg.cards), params=cfg.params, conditions=cfg.conditions, arms=cfg.arms,
+            groups_per_cell=cfg.groups_per_cell, isolated_reps=cfg.isolated_reps,
+            n_points=len(cfg.isolated_points), comprehension=cfg.comprehension,
+            isolated_frame=cfg.isolated_frame, isolated_round_no=cfg.isolated_round_no,
+            rationale=cfg.rationale, cards=cfg.cards, scale=cfg.frames is not None)
+
+    def cost_gate_problem(self) -> str | None:
+        """Why expected_cost_gate_usd stops this run (None: no gate or below it)."""
+        if self.cfg.expected_cost_gate_usd is None:
+            return None
+        return gate_problem(self.design_estimate(), self.cfg.expected_cost_gate_usd)
 
     def _raw_log_path(self) -> Path | None:
         path = self.cfg.raw_log_path() or self.llm.LOG_PATH
@@ -2255,6 +2472,8 @@ class Engine:
         truncated, truncated_lines = None, []
         row_calls: set = set()                 # _call_of_row of every parsed row
         n_length_checked = 0
+        n_frame_checked = 0                    # rows with frame fields (code since #61)
+        frame_problems: set = set()
         offset = 0
         for i, line in enumerate(lines, 1):
             start, offset = offset, offset + len(line) + 1
@@ -2283,6 +2502,14 @@ class Engine:
             if row.get("unit", spec.label) != spec.label:
                 problems.append(f"{path.name} line {i}: unit {row.get('unit')!r} does not match "
                                 f"its session ({spec.label})")
+            if "frame_sha256" in row or "frame" in row:
+                n_frame_checked += 1
+                f = self.frames[spec.frame]
+                if row.get("frame") != spec.frame or row.get("frame_sha256") != f.sha256:
+                    frame_problems.add(
+                        f"frame {spec.frame!r}: rows have frame {row.get('frame')!r} with sha256 "
+                        f"{row.get('frame_sha256')}, the frame file {f.path} now has {f.sha256} "
+                        "(a frame file must not change within a run)")
             if "card_n_chars" in row:
                 n_length_checked += 1
                 got = {k: row.get(k) for k in ("card_n_words", "card_n_chars")}
@@ -2295,6 +2522,7 @@ class Engine:
             row_calls.add(_call_of_row(row))
             (blocks.setdefault(spec.label, {}).setdefault(seg, {})
              .setdefault(row.get("round"), []).append(row))
+        problems += sorted(frame_problems)
         by_label = {s.label: s for s in specs}
         complete: dict[str, int] = {}
         progress: dict[str, dict] = {}      # partial unit -> accepted rounds and their rows
@@ -2323,6 +2551,7 @@ class Engine:
                 "complete": complete, "progress": progress, "superseded": superseded,
                 "accepted_rounds": accepted_rounds, "row_calls": row_calls,
                 "units_with_rows": set(blocks), "n_length_checked": n_length_checked,
+                "n_frame_checked": n_frame_checked,
                 "ends_with_newline": ends_with_newline, "truncated_last_line": truncated,
                 "truncated_lines": truncated_lines, "problems": list(dict.fromkeys(problems))}
 
@@ -2509,8 +2738,9 @@ class Engine:
             elif rec.get("retrying") and rec.get("error_kind") == "parse":
                 s["n_parse_fail"] += 1
         for session_id, text in system_text.items():
-            card = sessions[session_id].card
-            if text != system_message(card)["content"]:
+            spec = sessions[session_id]
+            card = spec.card
+            if text != self.frames[spec.frame].system_message(card)["content"]:
                 problems.append(f"card {card.card_id}/{card.style}: the text differs from the "
                                 "one in the raw log of the earlier segments")
         return {"per_segment": per_segment, "events": events, "started": started,
@@ -2622,6 +2852,8 @@ class Engine:
             checked.append(f"card texts in the raw log ({log['n_sessions_checked']} sessions)")
         if rows["n_length_checked"]:
             checked.append(f"card lengths of the rows ({rows['n_length_checked']} rows)")
+        if rows["n_frame_checked"]:
+            checked.append(f"frame sha256 of the rows ({rows['n_frame_checked']} rows)")
 
         # segments
         known = {0} | set(rows["rows_per_segment"])
@@ -2773,8 +3005,8 @@ class Engine:
         self.prior_extra_cost = plan.prior_extra_cost
         self._histories = dict(plan.histories)
         for key, s in self.prior_stats.items():
-            if (self.invalid_limit is not None
-                    and s["n_invalid"] + s["n_parse_fail"] > self.invalid_limit):
+            limit = self.invalid_limits[key]
+            if limit is not None and s["n_invalid"] + s["n_parse_fail"] > limit:
                 self.stopped_models[key] = "invalid_rate_cap"
 
     def _backup_summary(self, summary_path: Path) -> Path | None:
@@ -2877,6 +3109,10 @@ class Engine:
             "reasoning_effort": self._effort_summary(),
             "providers": self._providers_summary(),
             "isolated_frame": self.cfg.isolated_frame,
+            "isolated_round_no": (self.cfg.isolated_round_no
+                                  if self.cfg.isolated_frame == "fixed_round" else None),
+            "frames": self.frames_summary(),
+            "expected_cost_gate_usd": self.cfg.expected_cost_gate_usd,
             "parallel_units": self.cfg.parallel_units, "workers": self.cfg.workers,
             "total_cost_usd": self.total_cost, "segment_cost_usd": self.segment_cost,
             "duration_s": duration,
@@ -2917,11 +3153,39 @@ class Engine:
             "unit_order": list(self.unit_order),
             "config": self.config_record(),
         }
+        if self.cfg.comprehension:
+            out["comprehension"] = self.comprehension_summary(results_path)
         if self.prior_extra_cost:
             out["prior_cost_not_in_raw_log_usd"] = self.prior_extra_cost
         if rows and rows["problems"]:
             out["row_problems"] = rows["problems"]
         return out
+
+    def comprehension_summary(self, path: Path | None) -> dict:
+        """Share of correct rule-comprehension answers per model x frame (valid rows only)."""
+        counts: dict = {}
+        if path is not None and Path(path).is_file():
+            for row in self.valid_rows(path):
+                if row.get("step") != "comprehension":
+                    continue
+                c = counts.setdefault(row["model_key"], {}).setdefault(
+                    row.get("frame", DEFAULT_FRAME), {"n": 0, "n_all_correct": 0})
+                c["n"] += 1
+                c["n_all_correct"] += row.get("comp_n_correct") == row.get("comp_n_questions")
+                for qid in self.comprehension_keys.get(row.get("frame"), {}):
+                    k = f"n_{qid}_correct"
+                    c[k] = c.get(k, 0) + bool(row.get(f"comp_{qid}_correct"))
+        out = {}
+        for model_key, by_frame in counts.items():
+            for frame, c in by_frame.items():
+                rates = {k[2:-8] + "_correct_rate": v / c["n"] for k, v in c.items()
+                         if k.startswith("n_") and k.endswith("_correct") and c["n"]}
+                out.setdefault(model_key, {})[frame] = {**c, **rates}
+        return {"answer_keys": self.comprehension_keys, "per_model_frame": out,
+                "rule": ("a wrong answer is valid (recorded, not re-requested, the game goes on); "
+                         "only a response outside the schema (not an integer per question) is "
+                         "invalid and re-requested; group: every agent once before round 1, "
+                         "isolated: once per schedule")}
 
     def _write_summary(self, started, path, summary_path, log_path, event: str) -> dict:
         summary = self.summary(started, path)
@@ -2952,6 +3216,7 @@ class Engine:
                  "code_version": self.code_version,
                  "code_change": self.plan.code_change if self.plan else None,
                  "provider_policy": dict(PROVIDER_POLICY), "lock": self.lock,
+                 "frames": self.frames_summary(),
                  "unit_order": self.unit_order, "config": self.config_record()}
         if self.plan:
             p = self.plan
@@ -3019,6 +3284,12 @@ class Engine:
         problem = code_version_problem(self.code_version)
         if problem is not None and _REQUIRE_VERIFIED_CODE:
             # A5: before the lock, any write and any call
+            raise ValueError(f"run {cfg.run!r} not {'resumed' if resume else 'started'}, "
+                             f"no call made: {problem}")
+        # C5: the dry-run estimate of the design against expected_cost_gate_usd,
+        # before the lock, any write and any call (a resumed run has the same design)
+        problem = self.cost_gate_problem()
+        if problem is not None:
             raise ValueError(f"run {cfg.run!r} not {'resumed' if resume else 'started'}, "
                              f"no call made: {problem}")
         out_dir = cfg.output_dir()
@@ -3168,6 +3439,219 @@ def dry_run_report(*, models: dict[str, str], n_cells: int, params: GameParams,
     return report
 
 
+# Copy of the text llm_client.augment_with_schema appends to the last message
+# (dry runs must not import llm_client); a test checks that both agree.
+SCHEMA_PROMPT_SUFFIX = "\n\nRespond with ONLY a JSON object matching this schema:\n"
+# Isolated wording of the calibration run (pilot v2, configs/pilot.json).
+CALIBRATION_ISOLATED_FRAME = "repeated"
+# Cards of the calibration run: the reference card length of prompt_scales
+# when a config's cards are not chosen yet.
+CALIBRATION_CARDS = (PROJECT_DIR / "cards" / "pilot_cards_v2.json", ("Boston", "Riyadh"))
+
+
+def _prompt_chars(messages: list[dict], schema: dict) -> int:
+    """Characters of a request's prompt as sent: messages plus the schema request."""
+    return (sum(len(m["content"]) for m in messages) + len(SCHEMA_PROMPT_SUFFIX)
+            + len(json.dumps(schema, ensure_ascii=False)))
+
+
+def mean_prompt_chars(frame: Frame, kind: str, params: GameParams, cards: list[Card], *,
+                      isolated_frame: str | None = None, isolated_round_no: int = 5,
+                      rationale: bool = True) -> float | None:
+    """Mean prompt characters of one call kind in a frame (None: the frame has no such call).
+
+    Group kinds: mean over rounds 1..rounds of player 1's prompt, with a fixed
+    synthetic history (everybody contributes half the endowment, nobody
+    punishes); isolated: mean over the default conditioning values;
+    comprehension: the group arm's call. Means over the cards.
+    """
+    n = params.group_size
+    history = []
+    for r in range(1, params.rounds):
+        c = [params.endowment // 2] * n
+        rec = RoundRecord(r, c, project_payoffs(params, c), final_earnings=project_payoffs(params, c))
+        if kind in ("contribute_P", "punish_P"):
+            rec.punishment = [[0] * n for _ in range(n)]
+            rec.final_earnings, rec.cost_paid, rec.received = apply_punishment(
+                params, rec.round_earnings, rec.punishment)
+        history.append(rec)
+    sizes = []
+    for card in cards:
+        if kind in ("contribute_N", "contribute_P"):
+            cond = kind[-1]
+            schema = contribution_schema(params, rationale, prompt_frame=frame)
+            sizes += [_prompt_chars(contribution_messages(params, cond, card, history[:r - 1], 0, r,
+                                                          prompt_frame=frame), schema)
+                      for r in range(1, params.rounds + 1)]
+        elif kind == "punish_P":
+            targets = list(range(2, n + 1))
+            schema = punishment_schema(params, targets, rationale, prompt_frame=frame)
+            c = [params.endowment // 2] * n
+            e = project_payoffs(params, c)[0]
+            sizes += [_prompt_chars(punishment_messages(params, card, history[:r - 1], 0, r, c, e,
+                                                        prompt_frame=frame), schema)
+                      for r in range(1, params.rounds + 1)]
+        elif kind == "isolated":
+            if isolated_frame not in frame.isolated_frames:
+                return None
+            schema = contribution_schema(params, rationale, prompt_frame=frame)
+            sizes += [_prompt_chars(isolated_messages(params, card, x, isolated_frame,
+                                                      isolated_round_no, prompt_frame=frame),
+                                    schema) for x in ISOLATED_POINTS]
+        elif kind == "comprehension":
+            if not frame.has_comprehension:
+                return None
+            sizes.append(_prompt_chars(frame.comprehension_messages(params, card, "N"),
+                                       frame.comprehension_schema(rationale)))
+        else:
+            raise ValueError(f"unknown call kind {kind!r}")
+    return sum(sizes) / len(sizes)
+
+
+def prompt_scales(frame: Frame, params: GameParams, cards: list[Card], *,
+                  isolated_frame: str | None, isolated_round_no: int = 5,
+                  rationale: bool = True) -> dict:
+    """{call kind: prompt characters of the frame / of the calibration's} (tahmin).
+
+    The cost calibration measured abstract_v2 prompts of pilot v2 (isolated
+    wording "repeated"); its prompt tokens are scaled by these character
+    ratios for another frame or wording. comprehension is priced from
+    contribute_N, so its ratio is to abstract_v2's contribute_N prompt. A
+    kind the frame does not have is left out (not scaled). isolated_frame
+    None or not offered by the frame: the frame's first isolated wording.
+    """
+    ref = default_frame()
+    if isolated_frame not in frame.isolated_frames:
+        isolated_frame = frame.isolated_frames[0]
+    kw = {"isolated_round_no": isolated_round_no, "rationale": rationale}
+    out = {}
+    for kind in pgg_cost.CALL_KINDS:
+        mine = mean_prompt_chars(frame, kind, params, cards, isolated_frame=isolated_frame, **kw)
+        if mine is None:
+            continue
+        ref_kind = "contribute_N" if kind == "comprehension" else kind
+        base = mean_prompt_chars(ref, ref_kind, params, cards,
+                                 isolated_frame=CALIBRATION_ISOLATED_FRAME, **kw)
+        out[kind] = mine / base
+    return out
+
+
+def design_estimate(*, models: dict[str, str], frame_models: dict[str, list[str]],
+                    frames: dict, n_cells: int, params: GameParams, conditions, arms,
+                    groups_per_cell: int, isolated_reps: int, n_points: int,
+                    comprehension: bool = False, isolated_frame: str | None = None,
+                    isolated_round_no: int = 5, rationale: bool = True,
+                    cards: list[Card] | None = None, scale: bool = True) -> dict:
+    """Calls and estimated cost per frame x model of a design (pgg_cost, tahmin).
+
+    frames: {label: Frame, or None when its file is not chosen yet (not
+    scaled)}. scale False: no prompt scaling (configs without frames: the
+    same numbers as before frames). Returns {"rows": [{"frame", "model",
+    "slug", "calls", "calls_by_kind", "prompt_scale", "frame_known",
+    **pgg_cost.model_cost}], "counts", "total_calls", "total_cost_usd",
+    "total_p95_upper_usd", "unpriced"}.
+    """
+    counts = pgg_cost.call_counts(
+        n_cells=n_cells, conditions=conditions, groups_per_cell=groups_per_cell,
+        isolated_reps=isolated_reps, n_points=n_points, group_size=params.group_size,
+        rounds=params.rounds, arms=arms, comprehension=comprehension)
+    if cards is None:
+        cards = load_cards(CALIBRATION_CARDS[0], CALIBRATION_CARDS[1])
+    rows = []
+    for label, keys in frame_models.items():
+        f = frames.get(label)
+        scales = (prompt_scales(f, params, cards, isolated_frame=isolated_frame,
+                                isolated_round_no=isolated_round_no, rationale=rationale)
+                  if scale and f is not None else None)
+        for key in keys:
+            slug = models[key]
+            try:
+                cost = pgg_cost.model_cost(slug, counts, scales)
+            except KeyError:
+                cost = {"cost_usd": None, "p95_upper_usd": None}
+            rows.append({"frame": label, "model": key, "slug": slug,
+                         "calls": sum(counts.values()),
+                         "calls_by_kind": {k: v for k, v in counts.items() if v},
+                         "prompt_scale": scales, "frame_known": f is not None, **cost})
+    priced = [r for r in rows if r["cost_usd"] is not None]
+    return {"rows": rows, "counts": counts, "total_calls": sum(r["calls"] for r in rows),
+            "total_cost_usd": sum(r["cost_usd"] for r in priced),
+            "total_p95_upper_usd": sum(r["p95_upper_usd"] for r in priced),
+            "unpriced": [f"{r['model']}/{r['frame']}" for r in rows if r["cost_usd"] is None]}
+
+
+def gate_problem(est: dict, gate: float | None) -> str | None:
+    """Why the expected-cost gate stops a real run (None: it may start)."""
+    if gate is None:
+        return None
+    if est["unpriced"]:
+        return (f"the expected cost cannot be checked against expected_cost_gate_usd={gate:g}: "
+                f"no calibration for {est['unpriced']}")
+    if est["total_cost_usd"] > gate:
+        per = "; ".join(f"{r['frame']}/{r['model']} ~{r['cost_usd']:.4f}" for r in est["rows"])
+        return (f"the dry-run estimate ~{est['total_cost_usd']:.4f} USD (tahmin) is above "
+                f"expected_cost_gate_usd={gate:g} USD ({per}); the run is not started, "
+                "change the design or the gate in the pre-registration")
+    return None
+
+
+def format_design_report(est: dict, *, description: str = "", gate: float | None = None,
+                         budget: float | None = None, max_tokens: int | None = None) -> str:
+    """Dry-run report per frame x model (configs with frames); every cost (tahmin)."""
+    lines = ["KURU ÇALIŞTIRMA — API çağrısı yapılmadı.", description,
+             "Hücre = kart x model x çerçeve; her satır bir çerçeve x model.", ""]
+    notes, ceiling = [], 0.0
+    for r in est["rows"]:
+        kinds = ", ".join(f"{k}={v}" for k, v in r["calls_by_kind"].items())
+        if r["cost_usd"] is None:
+            cost = "maliyet tahmini yok (kalibrasyon yok)"
+        else:
+            cost = (f"~{r['cost_usd']:.4f} USD (tahmin" + (", ALT SINIR" if r["lower_bound"] else "")
+                    + f"); p95 üst sınır ~{r['p95_upper_usd']:.4f} USD")
+            if max_tokens:
+                ceiling += pgg_cost.ceiling({r["model"]: r["slug"]}, est["counts"], max_tokens,
+                                            r["prompt_scale"])["total"]
+        if not r["frame_known"]:
+            scale = "istem ölçeği yok: çerçeve dosyası seçilmedi, abstract_v2 uzunluğu varsayıldı"
+        else:
+            scale = "istem ölçeği (karakter oranı, tahmin): " + ", ".join(
+                f"{k} x{v:.2f}" for k, v in (r["prompt_scale"] or {}).items()
+                if k in r["calls_by_kind"])
+        lines.append(f"{r['frame']:<12} {r['model']:<9} {r['slug']:<30} {r['calls']:>6} çağrı "
+                     f"({kinds})  {cost}")
+        lines.append(f"{'':<12} {scale}")
+    lines.append(f"{'TOPLAM':<12} {'':<9} {'':<30} {est['total_calls']:>6} çağrı  "
+                 f"~{est['total_cost_usd']:.4f} USD (tahmin"
+                 + (f"; {', '.join(est['unpriced'])} HARİÇ — eksik toplam" if est["unpriced"] else "")
+                 + f"); p95 üst sınır ~{est['total_p95_upper_usd']:.4f} USD")
+    if max_tokens:
+        lines.append(f"Tavan (her çağrı max_tokens={max_tokens} çıktıyı doldurursa; beklenen değil): "
+                     f"~{ceiling:.2f} USD (tahmin)")
+    if gate is not None:
+        problem = gate_problem(est, gate)
+        lines.append(f"Beklenti kapısı expected_cost_gate_usd={gate:g} USD: "
+                     + ("GEÇER (beklenti kapının altında)" if problem is None else
+                        f"AŞILIYOR — gerçek koşu BAŞLAMAZ: {problem}"))
+    if budget is not None and not is_placeholder(budget):
+        lines.append(f"Sert tavan budget_usd={budget:g} USD (birikmiş usage.cost; dolunca yeni "
+                     "çağrı gönderilmez)")
+    lines.append("")
+    lines.append("İşaretler:")
+    for r in est["rows"]:
+        if r.get("lower_bound"):
+            notes.append(f"  {r['model']}: pilot verisi yok, akıl yürütme 0 varsayıldı: beklenen "
+                         "değer ALT SINIR (p95 üst sınırı akıl yürütmeyi içerir)")
+        if r.get("extrapolated_kinds"):
+            notes.append(f"  {r['model']}: {', '.join(r['extrapolated_kinds'])} pilot v2'de yoktu; "
+                         "contribute_N ölçümünden oranla (tahmin)")
+    lines += list(dict.fromkeys(notes))
+    lines.append("  istem ölçeği: kalibrasyon abstract_v2 istemleriyle (izole: repeated) ölçüldü; "
+                 "başka çerçevede istem token'ı karakter oranıyla ölçeklendi (tahmin). "
+                 "comprehension: contribute_N token'ları, istem kendi uzunluğuna ölçekli (tahmin).")
+    lines.append(pgg_cost.SOURCE_NOTE)
+    return "\n".join(lines)
+
+
 def example_estimate_report(models: dict[str, str], max_tokens: int | None = None) -> str:
     """Cost of these models at the pilot v2 volume, for a config whose design is
     still a placeholder: an example, not this config's count."""
@@ -3217,7 +3701,8 @@ def open_choices(s: dict) -> list[str]:
 
 
 # Settings the call counts of a dry run depend on (besides "params").
-COUNT_SETTINGS = ("conditions", "arms", "groups_per_cell", "isolated_reps", "isolated_points")
+COUNT_SETTINGS = ("conditions", "arms", "groups_per_cell", "isolated_reps", "isolated_points",
+                  "frames", "comprehension")
 
 
 def count_blockers(s: dict) -> list[str]:
@@ -3250,6 +3735,57 @@ def _csv(value: str) -> list[str]:
     return [v for v in value.split(",") if v]
 
 
+def _parse_frames(value: str) -> dict:
+    """--frames "abstract_v3=deepseek,mistral,gpt;story=deepseek,mistral" -> {label: [models]}."""
+    out = {}
+    for item in (x for x in value.split(";") if x.strip()):
+        if "=" not in item:
+            raise argparse.ArgumentTypeError(f"--frames item {item!r} is not label=model,model")
+        label, models = item.split("=", 1)
+        out[label.strip()] = [m.strip() for m in _csv(models)]
+    return out
+
+
+def resolve_frames(frames, models: dict[str, str]) -> dict | None:
+    """Config "frames" ({label: [model keys or slugs]}) -> {label: [model keys]}."""
+    if frames is None:
+        return None
+    if not isinstance(frames, dict):
+        raise ValueError("frames must be a {frame label: [models]} object")
+    by_slug = {slug: key for key, slug in models.items()}
+    out = {}
+    for label, names in frames.items():
+        if not isinstance(names, (list, tuple)):
+            raise ValueError(f"frames[{label}] must be a list of models")
+        keys = []
+        for name in names:
+            key = name if name in models else by_slug.get(name)
+            if key is None:
+                raise ValueError(f"frames[{label}]: {name!r} is not one of the run's models "
+                                 f"{sorted(models)}")
+            keys.append(key)
+        out[label] = keys
+    return out
+
+
+def dry_run_frames(frame_models: dict, frame_files) -> dict:
+    """{label: Frame} for a dry run; None for a file that is still a placeholder.
+
+    FrameError (a ValueError) when a chosen file is missing or invalid.
+    """
+    files = frame_files if isinstance(frame_files, dict) else {}
+    out = {}
+    for label in frame_models:
+        path = files.get(label)
+        if is_placeholder(path):
+            out[label] = None
+        elif label == DEFAULT_FRAME and path is None:
+            out[label] = default_frame()
+        else:
+            out[label] = pgg_frames.load_frame(pgg_frames.frame_path(label, path))
+    return out
+
+
 def _parse_effort(value: str):
     if "=" not in value:
         return value
@@ -3279,7 +3815,14 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--isolated-reps", type=int)
     ap.add_argument("--points", help="isolated conditioning values (default 0,5,10,15,20)")
     ap.add_argument("--isolated-frame", choices=ISOLATED_FRAMES,
-                    help="isolated arm wording: one_shot (default) or repeated")
+                    help="isolated arm wording: one_shot (default), repeated or fixed_round "
+                         "(the prompt frame must offer it)")
+    ap.add_argument("--isolated-round-no", type=int,
+                    help="isolated_frame fixed_round: the round it names (default 5)")
+    ap.add_argument("--frames", type=_parse_frames,
+                    help="frames per model, e.g. \"abstract_v3=deepseek,mistral,gpt;"
+                         "story=deepseek,mistral\" (default: abstract_v2 for every model); a "
+                         "frame's file is config frame_files[label], else frames/<label>.json")
     ap.add_argument("--group-size", type=int)
     ap.add_argument("--rounds", type=int)
     ap.add_argument("--endowment", type=int)
@@ -3338,7 +3881,8 @@ def settings_from_args(args) -> dict:
         "arms": _csv(args.arms) if args.arms else None,
         "groups_per_cell": args.groups_per_cell, "isolated_reps": args.isolated_reps,
         "isolated_points": [int(x) for x in _csv(args.points)] if args.points else None,
-        "isolated_frame": args.isolated_frame,
+        "isolated_frame": args.isolated_frame, "isolated_round_no": args.isolated_round_no,
+        "frames": args.frames,
         "reasoning_effort": _parse_effort(args.reasoning_effort) if args.reasoning_effort else None,
         "max_tokens": args.max_tokens, "max_invalid": args.max_invalid,
         "request_timeout_s": args.request_timeout_s,
@@ -3377,6 +3921,10 @@ def run_config(run: str, s: dict, models: dict[str, str], output: dict) -> RunCo
         allow_timeout_change=bool(s.get("allow_timeout_change", False)),
         providers=resolve_providers(s.get("providers"), models),
         isolated_frame=s.get("isolated_frame", "one_shot"),
+        frames=resolve_frames(s.get("frames"), models), frame_files=s.get("frame_files"),
+        isolated_round_no=s.get("isolated_round_no", 5),
+        comprehension=s.get("comprehension", False),
+        expected_cost_gate_usd=s.get("expected_cost_gate_usd"),
         **output)
 
 
@@ -3453,12 +4001,13 @@ def resume_report(engine: Engine, plan: ResumePlan) -> str:
                  f"kontrol: {plan.cost_check})"
                  + (f"; bütçe {budget} USD, kalan {budget - plan.prior_cost_usd:.6f} USD"
                     if budget is not None else ""))
-    limit = cfg.invalid_limit()
+    limits = engine.invalid_limits
+    limit = engine.invalid_limit                # one number, or per model with frames
     lines.append("Önceki sayımlar (model başına): " + "; ".join(
         f"{k}: yanıt {s['n_responses']}, kabul {s['n_accepted']}, geçersiz {s['n_invalid']}, "
         f"parse {s['n_parse_fail']}, sağlayıcı hatası {s['n_provider_error']}"
         + (" — geçersiz tavanı aşılmış, koşulmaz"
-           if limit is not None and s["n_invalid"] + s["n_parse_fail"] > limit else "")
+           if limits[k] is not None and s["n_invalid"] + s["n_parse_fail"] > limits[k] else "")
         for k, s in plan.prior_stats.items()) + (f" (geçersiz sınırı {limit})" if limit else ""))
     reserve = engine.llm.REASONING_RESERVE_TOKENS
     lines.append(
@@ -3475,23 +4024,36 @@ def resume_report(engine: Engine, plan: ResumePlan) -> str:
     lines.append(
         "Sağlayıcı uyuşmazlığı (karar sayılmadı, yeniden istendi, maliyeti bütçede): " + ", ".join(
             f"{k} {s['n_provider_mismatch']}" for k, s in plan.prior_stats.items()))
-    calls: dict[str, dict[str, int]] = {k: {} for k in cfg.models}
+    calls: dict[tuple, dict[str, int]] = {(k, label): {} for label, keys in
+                                          cfg.frame_models().items() for k in keys}
     rounds = cfg.params.rounds
     for spec in remaining:
         kept = points.get(spec.label, {}).get("rounds_kept", 0) if spec.arm == "group" else 0
+        by_kind = calls[(spec.model_key, spec.frame)]
         for kind, n in spec.calls_by_kind:
-            n_left = n * (rounds - kept) // rounds       # group kinds are per round
-            calls[spec.model_key][kind] = calls[spec.model_key].get(kind, 0) + n_left
+            if kind == "comprehension":                  # asked before round 1 only
+                n_left = n if kept == 0 else 0
+            else:
+                n_left = n * (rounds - kept) // rounds   # group kinds are per round
+            by_kind[kind] = by_kind.get(kind, 0) + n_left
+    # without frames: per model, no prompt scaling (as before frames)
+    scales = ({label: prompt_scales(f, cfg.params, cfg.cards, isolated_frame=cfg.isolated_frame,
+                                    isolated_round_no=cfg.isolated_round_no,
+                                    rationale=cfg.rationale)
+               for label, f in engine.frames.items()} if cfg.frames is not None else {})
     total_calls, total_cost, priced = 0, 0.0, True
-    parts = []
-    for key, by_kind in calls.items():
+    per_key: dict[str, int] = {}
+    for (key, label), by_kind in calls.items():
         n = sum(by_kind.values())
         total_calls += n
+        name = key if cfg.frames is None else f"{key}/{label}"
+        per_key[name] = per_key.get(name, 0) + n
         try:
-            total_cost += pgg_cost.model_cost(cfg.models[key], by_kind)["cost_usd"]
+            total_cost += pgg_cost.model_cost(cfg.models[key], by_kind,
+                                              scales.get(label))["cost_usd"]
         except KeyError:
             priced = False
-        parts.append(f"{key} {n}")
+    parts = [f"{name} {n}" for name, n in per_key.items()]
     lines.append(f"Kalan tahmini çağrı (kabul edilen karar; yeniden istekler hariç): "
                  f"{', '.join(parts)}; toplam {total_calls}")
     if priced:
@@ -3584,19 +4146,63 @@ def main(argv=None) -> int:
                   + ", ".join(f"{k}={v}" for k, v in models.items()))
             print("\n" + example_estimate_report(models, s.get("max_tokens")))
         else:
+            cards = None
             if s.get("cards") and not is_placeholder(s["cards"]):
-                n_cells = len(load_cards(s["cards"], cities))
+                cards = load_cards(s["cards"], cities)
+                n_cells = len(cards)
             else:
                 n_cells = s.get("cells", 6)
-            print(dry_run_report(
-                models=models, n_cells=n_cells, params=params, conditions=conditions, arms=arms,
-                groups_per_cell=groups_per_cell, isolated_reps=isolated_reps,
-                n_points=len(points), max_tokens=s.get("max_tokens")))
+            gate = s.get("expected_cost_gate_usd")
+            gate = None if is_placeholder(gate) else gate
+            if s.get("frames") is not None:
+                try:
+                    frame_models = resolve_frames(s["frames"], models)
+                    frames = dry_run_frames(frame_models, s.get("frame_files"))
+                except ValueError as e:
+                    print(f"HATA: çerçeve: {e}", file=sys.stderr)
+                    return 1
+                iso = s.get("isolated_frame")
+                rationale = s.get("rationale", True)
+                est = design_estimate(
+                    models=models, frame_models=frame_models, frames=frames, n_cells=n_cells,
+                    params=params, conditions=conditions, arms=arms,
+                    groups_per_cell=groups_per_cell, isolated_reps=isolated_reps,
+                    n_points=len(points), comprehension=s.get("comprehension", False),
+                    isolated_frame=None if is_placeholder(iso) else iso,
+                    isolated_round_no=s.get("isolated_round_no", 5),
+                    rationale=True if is_placeholder(rationale) else rationale, cards=cards)
+                print(format_design_report(
+                    est, gate=gate, budget=s.get("budget_usd"), max_tokens=s.get("max_tokens"),
+                    description=(
+                        f"Tasarım: {n_cells} kart x stil hücresi, çerçeveler "
+                        + "; ".join(f"{k}: {', '.join(v)}" for k, v in frame_models.items())
+                        + f", koşul {'+'.join(conditions)}, kollar {'+'.join(arms)}, hücre "
+                        f"başına {groups_per_cell} homojen grup ({params.group_size} ajan x "
+                        f"{params.rounds} tur), izole çizelge {isolated_reps} tekrar x "
+                        f"{len(points)} değer, kural anlama "
+                        + ("açık (ajan başına grup öncesi 1, izole çizelge başına 1 çağrı)"
+                           if s.get("comprehension") else "kapalı") + ".")))
+            else:
+                print(dry_run_report(
+                    models=models, n_cells=n_cells, params=params, conditions=conditions,
+                    arms=arms, groups_per_cell=groups_per_cell, isolated_reps=isolated_reps,
+                    n_points=len(points), max_tokens=s.get("max_tokens")))
+                if gate is not None:
+                    est = design_estimate(
+                        models=models, frame_models={DEFAULT_FRAME: list(models)}, frames={},
+                        n_cells=n_cells, params=params, conditions=conditions, arms=arms,
+                        groups_per_cell=groups_per_cell, isolated_reps=isolated_reps,
+                        n_points=len(points), scale=False)
+                    problem = gate_problem(est, gate)
+                    print(f"Beklenti kapısı expected_cost_gate_usd={gate:g} USD: "
+                          + ("GEÇER" if problem is None else
+                             f"AŞILIYOR — gerçek koşu BAŞLAMAZ: {problem}"))
         guards = {k: s[k] for k in ("max_tokens", "request_timeout_s", "request_deadline_s",
-                                    "stall_timeout_s", "budget_usd",
+                                    "stall_timeout_s", "budget_usd", "expected_cost_gate_usd",
                                     "invalid_rate_cap", "stop_on_length", "check_snapshot",
                                     "seed_namespace", "parallel_units", "workers",
-                                    "isolated_frame") if s.get(k) is not None}
+                                    "isolated_frame", "isolated_round_no", "comprehension")
+                  if s.get(k) is not None}
         print(f"Ayarlar: reasoning_effort={s.get('reasoning_effort') or 'gönderilmez'}, "
               + ", ".join(f"{k}={v}" for k, v in guards.items()))
         print(code_version_line(code_version()))

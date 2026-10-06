@@ -29,6 +29,34 @@ tested. Design choices are in the module docstring; the main ones:
 - Card and style text are **parameters** (`--cards cards.json`, a list of
   `{card_id, style, text}`), never in the code; the same card goes to all four
   agents of a homogeneous group. No numeric disposition score is in any prompt.
+- **Prompt texts are frame files** (`frames/*.json`, format in
+  `frames/SCHEMA.md`, module `pgg_frames.py`), never in the code. Numbers come
+  from the game parameters through placeholders (`{n}`, `{endowment}`,
+  `{mpcr}`, `{multiplier}`, `{rounds}`, `{round_no}`, `{others_mean}`, ...);
+  an unknown or missing placeholder, or a number written in the text, is a
+  validation error and the run does not start. `frames/abstract_v2.json` is
+  the wording of pilot v2, character for character (default when a config
+  names no frame; ids and seeds then stay as before). `frames/abstract_v3.json`
+  (mini-pilot): the card alone as system message, isolated question
+  `fixed_round` ("This is round 5 of 10.", `isolated_round_no`), two
+  rule-comprehension questions. Config `"frames": {"abstract_v3": [models],
+  "story": [models]}` + `"frame_files": {"story": "/abs/path.json"}`: cell =
+  card x model x frame, the frame label is in unit labels, session ids, seeds
+  and the run order. Every row has `frame`, `frame_id`, `frame_sha256`;
+  `--resume` refuses a changed frame file.
+- **Rule comprehension** (`"comprehension": true`): each agent answers the
+  frame's questions in a separate call before round 1 of a group game, and
+  once before every isolated schedule. Integer answers; only a response
+  outside the schema is invalid (re-requested), a wrong answer is recorded
+  (`comp_q1_correct`, `comp_q2_correct`, ...) and the game goes on. The
+  summary gives the share correct per model x frame.
+- **Expected-cost gate** (`"expected_cost_gate_usd"`, mini-pilot 4.5): a real
+  run (also `--resume`) does not start when the dry-run estimate of the design
+  is above it; the estimate is reported. `budget_usd` (mini-pilot 6) stays the
+  hard cap on accumulated `usage.cost`. With frames the dry run prints one
+  line per frame x model, prompt tokens scaled by the frame's character ratio
+  to abstract_v2 (tahmin), comprehension calls included; Mistral's expected
+  cost is labelled a lower bound (ALT SINIR: no reasoning assumed).
 - Every call goes through `llm_client.call_llm_valid(return_parse_fail=True)`;
   invalid payloads are re-requested and counted (`n_invalid`, `n_parse_fail`),
   never defaulted. Beyond the retry limit the run stops with an error.
@@ -54,7 +82,8 @@ tested. Design choices are in the module docstring; the main ones:
 - **Choices left to the user** are placeholders (`"<SEÇİLECEK: ...>"`) in the
   config: one provider per model (`providers`, OpenRouter provider routing,
   no fallback, `require_parameters: true`) and the
-  isolated arm's wording (`isolated_frame`: `one_shot` or `repeated`). A real
+  isolated arm's wording (`isolated_frame`: `one_shot`, `repeated` or
+  `fixed_round`; the frame must offer it). A real
   run does not start while one is left; `--dry-run` lists them.
 - Provider errors (`finish_reason` "error", or 0 tokens at 0 cost) are
   retried and counted as `n_provider_error`, not as parse failures and not in

@@ -64,7 +64,7 @@ class CostAPI(FakeAPI):
 
     def __call__(self, **kwargs):
         self.calls.append(kwargs)
-        content = self.default_reply(*self.parse(kwargs))
+        content = self.rekey(kwargs, self.parse(kwargs)[0], self.default_reply(*self.parse(kwargs)))
         if self.content_fn:
             content = self.content_fn(kwargs, content)
         finish = self.finish_fn(kwargs) if self.finish_fn else "stop"

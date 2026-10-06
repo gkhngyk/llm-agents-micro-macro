@@ -301,7 +301,7 @@ class CopiedCode(CodeVersionBase):
                          set(pgg_game.CODE_FILES) | {"tests/test_x.py"})   # tracked .py only
         cv = pgg_game._read_code_version(dst)
         self.assertEqual((cv["source"], cv["git_commit"], cv["git_dirty"], cv["n_files_verified"]),
-                         ("stamp", self.sha, False, 4))
+                         ("stamp", self.sha, False, len(pgg_game.CODE_FILES) + 1))
         self.assertIsNone(pgg_game.code_version_problem(cv))
         # written again with the same content: kept as it is
         before = path.read_bytes()
@@ -363,7 +363,8 @@ class CopiedCode(CodeVersionBase):
                 contextlib.redirect_stdout(io.StringIO()) as out:
             code = pgg_game.main(["--write-code-version", str(dst), "--code-commit", self.sha])
         self.assertEqual(code, 0)
-        self.assertIn(f"commit {self.sha}, 4 .py dosyası", out.getvalue())
+        self.assertIn(f"commit {self.sha}, {len(pgg_game.CODE_FILES) + 1} .py dosyası",
+                      out.getvalue())
         self.assertTrue((dst / pgg_game.CODE_VERSION_FILE).is_file())
         with mock.patch.object(pgg_game, "PROJECT_DIR", self.repo), \
                 contextlib.redirect_stderr(io.StringIO()) as err:

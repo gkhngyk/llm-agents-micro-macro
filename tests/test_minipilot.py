@@ -33,8 +33,11 @@ MINIPILOT_PROVIDERS = {
 # Settings prereg_minipilot.md decides; the config leaves them open.
 PREREG_SETTINGS = ("run", "cards", "cities", "conditions", "arms", "groups_per_cell",
                    "isolated_reps", "isolated_points", "isolated_frame", "rationale",
-                   "seed_namespace", "max_invalid", "budget_usd", "invalid_rate_cap",
-                   "stop_on_length", "check_snapshot", "workers", "parallel_units")
+                   "seed_namespace", "max_invalid", "invalid_rate_cap",
+                   "stop_on_length", "check_snapshot", "workers", "parallel_units", "frames")
+# budget_usd (6) and expected_cost_gate_usd (4.5) are fixed by goal C5 (task #61);
+# the story file is chosen with the story draft
+NESTED_PREREG = ("frame_files.story",)
 
 
 def _raw():
@@ -69,6 +72,9 @@ class MiniPilotConfig(unittest.TestCase):
         self.assertIs(raw["prereg_approved"], False)
         self.assertEqual(raw["max_tokens"], 16000)
         self.assertEqual((raw["request_deadline_s"], raw["stall_timeout_s"]), (900, 1800))
+        self.assertEqual((raw["budget_usd"], raw["expected_cost_gate_usd"]), (6, 4.5))
+        self.assertIs(raw["comprehension"], True)
+        self.assertEqual(raw["isolated_round_no"], 5)
         self.assertNotIn("temperature", raw)
         self.assertNotIn("reasoning_effort", raw)
         self.assertEqual(raw["runs_dir"], json.loads(PILOT_CONFIG.read_text())["runs_dir"])
@@ -78,7 +84,8 @@ class MiniPilotConfig(unittest.TestCase):
         for key in PREREG_SETTINGS:
             self.assertTrue(pgg_game.is_placeholder(raw[key]), key)
             self.assertTrue(raw[key].startswith("<TBD_PREREG"), key)
-        self.assertEqual(sorted(pgg_game.open_choices(raw)), sorted(PREREG_SETTINGS))
+        self.assertEqual(sorted(pgg_game.open_choices(raw)),
+                         sorted(PREREG_SETTINGS + NESTED_PREREG))
         self.assertIsNotNone(pgg_game.prereg_problem(raw))
 
     def test_prereg_lock_rule(self):
@@ -137,11 +144,12 @@ class MiniPilotRuns(GuardTestBase):
             "prereg_approved": True, "run": "mini_mock", "cards": str(cards),
             "cities": ["X", "Y"], "conditions": ["N"], "arms": ["group", "isolated"],
             "groups_per_cell": 1, "isolated_reps": 1, "isolated_points": [0, 10, 20],
-            "isolated_frame": "repeated", "rationale": True, "seed_namespace": "pgg-test",
+            "isolated_frame": "fixed_round", "rationale": True, "seed_namespace": "pgg-test",
+            "frames": {"abstract_v3": ["deepseek", "mistral", "gpt"]}, "frame_files": None,
             "max_invalid": 3, "budget_usd": 1.0, "invalid_rate_cap": 0.5,
             "stop_on_length": True, "check_snapshot": True, "workers": 1,
             "parallel_units": 1, "runs_dir": str(self.tmp / "runs"),
-            "params": {"rounds": 2},
+            "params": {"rounds": 2}, "isolated_round_no": 2,
         })
         raw.update(overrides)
         path = self.tmp / "minipilot_filled.json"
@@ -159,10 +167,11 @@ class MiniPilotRuns(GuardTestBase):
         self.use(CostAPI(cost=0.0001, provider_fn=lambda k: names[k["model"]]))
         code, out, err = self.main("--config", str(self.filled_config()))
         self.assertEqual(code, 0, err)
-        # per model: 2 cards x 1 group x 4 agents x 2 rounds + 2 cards x 3 values
-        self.assertEqual(len(self.api.calls), 3 * 22)
+        # per model: 2 cards x 1 group x 4 agents x 2 rounds + 2 cards x 3 values,
+        # plus rule comprehension: 2 cards x 4 agents + 2 schedules
+        self.assertEqual(len(self.api.calls), 3 * 32)
         mistral = [k for k in self.api.calls if k["model"] == MISTRAL]
-        self.assertEqual(len(mistral), 22)
+        self.assertEqual(len(mistral), 32)
         for kwargs in self.api.calls:
             slug, _, _, quant = next(v for v in MINIPILOT_PROVIDERS.values()
                                      if v[1] == kwargs["model"])
@@ -181,14 +190,15 @@ class MiniPilotRuns(GuardTestBase):
                           "require_parameters": True})
         run_dir = self.tmp / "runs" / "mini_mock"
         rows = [json.loads(x) for x in (run_dir / "mini_mock.jsonl").read_text().splitlines()]
-        self.assertEqual(len(rows), 66)
+        self.assertEqual(len(rows), 96)
+        self.assertEqual({r["frame"] for r in rows}, {"abstract_v3"})
         self.assertEqual({r["model"] for r in rows}, set(llm_client.MODELS.values()))
         self.assertEqual({(r["temperature"], r["reasoning_effort"]) for r in rows},
                          {("default", "default")})
         self.assertEqual({r["provider"] for r in rows if r["model"] == MISTRAL}, {"Mistral"})
         records = [json.loads(x) for x in (run_dir / "raw_calls.jsonl").read_text().splitlines()]
         calls = [r for r in records if r.get("model") == MISTRAL and "response_raw" in r]
-        self.assertEqual(len(calls), 22)
+        self.assertEqual(len(calls), 32)
         self.assertEqual({(r["temperature"], r["reasoning_effort"]) for r in calls},
                          {("default", "default")})
 
@@ -239,10 +249,12 @@ class MiniPilotRuns(GuardTestBase):
         code, out, err = self.main(
             "--dry-run", "--config", str(MINIPILOT_CONFIG), "--cards", str(PILOT_CARDS_V2),
             "--cities", "Boston,Riyadh", "--conditions", "N", "--arms", "group,isolated",
-            "--groups-per-cell", "2", "--isolated-reps", "2", "--points", "0,5,10,15,20")
+            "--groups-per-cell", "2", "--isolated-reps", "2", "--points", "0,5,10,15,20",
+            "--frames", "abstract_v3=deepseek,mistral,gpt", "--isolated-frame", "fixed_round")
         self.assertEqual(code, 0, err)
-        self.assertEqual(out.count("540 çağrı (contribute_N=480, isolated=60)"), 3)
-        self.assertIn("1620 çağrı", out)
+        # + rule comprehension: 6 cells x 2 groups x 4 agents + 6 x 2 schedules
+        self.assertEqual(out.count("600 çağrı (contribute_N=480, isolated=60, comprehension=60)"), 3)
+        self.assertIn("1800 çağrı", out)
         self.assertNotIn("maliyet tahmini yok", out)
         self.assertNotIn("HARİÇ", out)
         self.assertIn("mistral: pilot verisi yok", out)
@@ -251,9 +263,10 @@ class MiniPilotRuns(GuardTestBase):
         # a placeholder cards file does not block when --cells is given
         code, out, _ = self.main(
             "--dry-run", "--config", str(MINIPILOT_CONFIG), "--cells", "2", "--conditions", "N",
-            "--arms", "group", "--groups-per-cell", "1", "--isolated-reps", "1", "--points", "0")
+            "--arms", "group", "--groups-per-cell", "1", "--isolated-reps", "1", "--points", "0",
+            "--frames", "abstract_v3=deepseek,mistral,gpt")
         self.assertEqual(code, 0)
-        self.assertEqual(out.count("80 çağrı"), 3)              # 2 cells x 1 group x 4 x 10
+        self.assertEqual(out.count("88 çağrı"), 3)              # 2 cells x 1 group x 4 x (10 + 1)
         self.create.assert_not_called()
 
     def test_dry_run_subprocess_needs_no_key(self):

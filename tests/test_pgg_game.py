@@ -58,7 +58,9 @@ class FakeAPI:
         user = kwargs["messages"][-1]["content"]
         agent = re.search(r"You are Player (\d)", user)
         rnd = re.search(r"ROUND (\d+) of", user)
-        if '"punishments"' in user:
+        if '"q1": {"type": "integer"' in user:          # rule comprehension (any frame)
+            kind = "comprehension"
+        elif '"punishments"' in user or '"marks"' in user:
             kind = "punish"
         elif "QUESTION" in user:
             kind = "isolated"
@@ -68,7 +70,15 @@ class FakeAPI:
         return (kind, int(agent.group(1)) if agent else None,
                 int(rnd.group(1)) if rnd else None, int(others.group(1)) if others else None)
 
+    @staticmethod
+    def decision_key(kwargs):
+        """The decision's JSON key in the request's schema (frame response.decision_key)."""
+        m = re.search(r'"required": \["([a-z_]+)"\]', kwargs["messages"][-1]["content"])
+        return m.group(1) if m else "contribution"
+
     def default_reply(self, kind, agent, rnd, others):
+        if kind == "comprehension":                   # the abstract_v3 answer key
+            return _payload({"q1": 28, "q2": -6, "rationale": "because"})
         if kind == "contribute":
             return _payload({"contribution": (agent * 3 + rnd) % 21, "rationale": "because"})
         if kind == "isolated":
@@ -82,7 +92,24 @@ class FakeAPI:
         kind, agent, rnd, others = self.parse(kwargs)
         queue = self.script.get((kind, agent, rnd))
         content = queue.pop(0) if queue else self.default_reply(kind, agent, rnd, others)
-        return _response(content)
+        return _response(self.rekey(kwargs, kind, content))
+
+    def rekey(self, kwargs, kind, content):
+        """A default reply under the frame's own keys (story frames rename them)."""
+        if kind not in ("contribute", "isolated", "punish"):
+            return content
+        try:
+            obj = json.loads(content)
+        except ValueError:
+            return content
+        if not isinstance(obj, dict):
+            return content
+        key = self.decision_key(kwargs)
+        if kind != "punish" and "contribution" in obj and key != "contribution":
+            obj[key] = obj.pop("contribution")
+        if kind == "punish" and "punishments" in obj and '"marks"' in kwargs["messages"][-1]["content"]:
+            obj["marks"] = obj.pop("punishments")
+        return _payload(obj)
 
     def kinds(self):
         return [self.parse(c)[0] for c in self.calls]

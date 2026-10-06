@@ -1,0 +1,66 @@
+{
+  "_notes": "TEST FIXTURE, NOT A STORY. Stands in for the story frame of goal C2 in the mock tests (tests/test_frames.py): it follows frames/SCHEMA.md and carries the marker phrases the mock API recognises ('ROUND {round_no} of', 'You are {me}', 'QUESTION', 'on average, {others_mean} points'). Its words mean nothing; the real story drafts are written by a separate task.",
+  "schema": 1,
+  "name": "story_fixture",
+  "description": "Placeholder frame for mock tests of the story arm; no story content.",
+  "system": "[fixture system] {card}",
+  "player_label": "Player {player_no}",
+  "you_suffix": " (you)",
+  "rules": [
+    {"text": "[fixture rules]"},
+    {"text": "- {n} people, {n_others} besides you, no talking."},
+    {"text": "- One sitting only.", "when": ["single_round"]},
+    {"text": "- The same {n} people for {rounds} sittings.", "when": ["multi_round"]},
+    {"text": "- Each sitting: {endowment} units each; units put in are multiplied by {multiplier} and split evenly, so each unit put in gives {mpcr} to every person; kept units stay."},
+    {"text": "- [fixture step P] up to {max_punish} marks per person; a mark costs the giver {punish_cost} and the receiver {punish_impact}.", "when": ["P"]},
+    {"text": "- After each sitting you see what everybody put in.", "when": ["multi_round"]}
+  ],
+  "history": {
+    "empty": "[fixture history] none yet.",
+    "header": "[fixture history]",
+    "list_item": "{label}: {value}",
+    "list_separator": "; ",
+    "contributions": "Put in: {contributions_list}. Together: {group_total}.",
+    "round": [
+      "Sitting {round}",
+      "  {contributions}",
+      "  Shared part: {project_share}. Your sitting total: {round_earnings}."
+    ],
+    "round_P": [
+      "  Marks you gave: {punish_given} (cost {cost_paid}).",
+      "  Marks you got: {received} (lost {points_lost}).",
+      "  After marks: {final_earnings}."
+    ],
+    "punish_given_separator": ", ",
+    "punish_given_none": "none"
+  },
+  "contribute": "ROUND {round_no} of {rounds}. You are {me}. [fixture] How many of your {endowment} units do you put in? (0 to {endowment})",
+  "punish": "ROUND {round_no} of {rounds}, [fixture step P]. You are {me}.\n{contributions} Shared part: {project_share}. Your total: {earnings}. At most {max_points} marks in total.",
+  "isolated": {
+    "fixed_round": {
+      "rules": "multi_round",
+      "question": "QUESTION\n[fixture] Sitting {round_no} of {rounds}. Last sitting the others put in, on average, {others_mean} points each. How many of your {endowment} units do you put in? (0 to {endowment})"
+    }
+  },
+  "comprehension": {
+    "prompt": "[fixture check]\n1. {q1}\n2. {q2}",
+    "questions": [
+      {
+        "id": "q1",
+        "text": "You put in {own}; the others put in {other_1}, {other_2}, {other_3}. Your sitting total?",
+        "answer": {"kind": "round_earnings", "own": 8, "others": [4, 12, 16]}
+      },
+      {
+        "id": "q2",
+        "text": "You put in {delta} more, the others the same. Change of your sitting total?",
+        "answer": {"kind": "own_change", "delta": 10}
+      }
+    ]
+  },
+  "response": {
+    "decision_key": "units_in",
+    "rationale_description": "One or two sentences on why.",
+    "punishment_key": "marks",
+    "punishment_description": "Marks per other person, keyed by number."
+  }
+}

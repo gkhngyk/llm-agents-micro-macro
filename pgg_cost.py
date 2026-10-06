@@ -12,19 +12,27 @@ llm_client: importing it needs the API key and reads ../.env, and a dry run
 must touch neither.
 
 Estimate per model:
-  base         = sum over kinds of calls x (mean prompt x input price
-                 + mean completion x output price)
+  base         = sum over kinds of calls x (mean prompt x prompt scale x input
+                 price + mean completion x output price)
   paid_invalid = base x paid_invalid_cost_ratio (calls paid but not a valid
                  row in pilot v2: provider errors, superseded units, ...)
   cost_usd     = base + paid_invalid
   p95_upper    = the same with the p95 token counts of every kind
 Completion tokens include reasoning tokens (billed at the output price).
+Prompt scale (task #61): the calibration measured the prompts of the
+abstract_v2 frame; for another frame pgg_game passes, per kind, the ratio of
+the frame's prompt characters to abstract_v2's (1 = not scaled). Scaled kinds
+are listed and labelled (tahmin). Models whose calibration is "estimate": true
+(Mistral) assume no reasoning tokens on game prompts: their expected cost is a
+LOWER BOUND (alt sınır); the p95 upper bound includes reasoning.
 
 Call kinds:
   contribute_N  contribution step, no-punishment condition
   contribute_P  contribution step, punishment condition
   punish_P      punishment step (punishment condition only)
   isolated      one point of the isolated conditional schedule
+  comprehension one rule-comprehension call (two questions; not in pilot v2:
+                contribute_N tokens with the prompt scaled to its length)
 """
 
 from __future__ import annotations
@@ -32,7 +40,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-CALL_KINDS = ("contribute_N", "contribute_P", "punish_P", "isolated")
+CALL_KINDS = ("contribute_N", "contribute_P", "punish_P", "isolated", "comprehension")
 
 CALIBRATION_PATH = Path(__file__).resolve().parent / "configs" / "cost_calibration_pilot_v2.json"
 
@@ -73,6 +81,10 @@ PRICES_USD_PER_M = {
 EXTRAPOLATED_KINDS = {
     "contribute_P": ("contribute_N", 1390 / 1120, 1.0),
     "punish_P":     ("contribute_N", 1590 / 1120, 80 / 60),
+    # rule comprehension (task #61): the prompt is scaled by the frame's
+    # character ratio to contribute_N (pgg_game.prompt_scales); completion as
+    # contribute_N (tahmin, not measured)
+    "comprehension": ("contribute_N", 1.0, 1.0),
 }
 
 
@@ -121,19 +133,23 @@ def paid_invalid_ratio(slug: str) -> float:
     return _model(slug)["paid"]["paid_invalid_cost_ratio"]
 
 
-def cost_per_call(model: str, kind: str, stat: str = "mean") -> float:
+def cost_per_call(model: str, kind: str, stat: str = "mean", prompt_scale: float = 1.0) -> float:
     """USD for one valid call of this kind to this model (tahmin), paid-invalid share excluded."""
     price_in, price_out, _ = price(model)
     prompt, completion, _ = kind_tokens(model, kind, stat)
-    return (prompt * price_in + completion * price_out) / 1e6
+    return (prompt * prompt_scale * price_in + completion * price_out) / 1e6
 
 
-def model_cost(slug: str, counts: dict[str, int]) -> dict:
-    """Estimate of one model for calls by kind; see the module docstring."""
+def model_cost(slug: str, counts: dict[str, int], prompt_scale: dict | None = None) -> dict:
+    """Estimate of one model for calls by kind; see the module docstring.
+
+    prompt_scale: {kind: factor} on the calibrated prompt tokens (another frame).
+    """
     ratio = paid_invalid_ratio(slug)
     kinds = [k for k in CALL_KINDS if counts.get(k)]
-    base = sum(counts[k] * cost_per_call(slug, k) for k in kinds)
-    upper = sum(counts[k] * cost_per_call(slug, k, "p95") for k in kinds)
+    scale = {k: (prompt_scale or {}).get(k, 1.0) for k in kinds}
+    base = sum(counts[k] * cost_per_call(slug, k, prompt_scale=scale[k]) for k in kinds)
+    upper = sum(counts[k] * cost_per_call(slug, k, "p95", scale[k]) for k in kinds)
     return {
         "base_cost_usd": base,
         "paid_invalid_usd": base * ratio,
@@ -141,7 +157,10 @@ def model_cost(slug: str, counts: dict[str, int]) -> dict:
         "p95_upper_usd": upper * (1 + ratio),
         "paid_invalid_cost_ratio": ratio,
         "estimate": bool(_model(slug)["estimate"]),
+        # no pilot data: reasoning assumed 0, the expected cost is a lower bound
+        "lower_bound": bool(_model(slug)["estimate"]),
         "extrapolated_kinds": [k for k in kinds if kind_tokens(slug, k)[2]],
+        "scaled_kinds": {k: v for k, v in scale.items() if v != 1.0},
         "price_usd_per_m": price(slug)[:2],
         "price_source": price(slug)[2],
     }
@@ -157,14 +176,18 @@ def call_counts(
     group_size: int = 4,
     rounds: int = 10,
     arms=("group", "isolated"),
+    comprehension: bool = False,
 ) -> dict[str, int]:
     """Calls per model, by kind, for a homogeneous-group design.
 
     n_cells = number of (card, style) cells. Each cell plays groups_per_cell
     groups per condition; the isolated arm asks n_points values per cell and
     repetition (one call per value) and exists for the N condition only.
+    comprehension: one call per agent of every group game and one per
+    isolated schedule.
     """
-    counts = dict.fromkeys(CALL_KINDS, 0)
+    # "comprehension" only when asked (the counts of a design without it are as before)
+    counts = {k: 0 for k in CALL_KINDS if k != "comprehension"}
     if "group" in arms:
         per_condition = n_cells * groups_per_cell * group_size * rounds
         for condition in conditions:
@@ -173,6 +196,10 @@ def call_counts(
                 counts["punish_P"] = per_condition
     if "isolated" in arms:
         counts["isolated"] = n_cells * isolated_reps * n_points
+    if comprehension:
+        counts["comprehension"] = (
+            (n_cells * groups_per_cell * group_size * len(conditions) if "group" in arms else 0)
+            + (n_cells * isolated_reps if "isolated" in arms else 0))
     return counts
 
 
@@ -207,18 +234,21 @@ def estimate(models: dict[str, str], counts: dict[str, int]) -> dict:
     }
 
 
-def ceiling(models: dict[str, str], counts: dict[str, int], max_tokens: int) -> dict:
+def ceiling(models: dict[str, str], counts: dict[str, int], max_tokens: int,
+            prompt_scale: dict | None = None) -> dict:
     """Upper bound per model if every call used all max_tokens (no re-requests).
 
-    Mean prompt tokens of the calibration, listed prices (no caching discount).
-    Returns {key: cost_usd} plus "total".
+    Mean prompt tokens of the calibration (times prompt_scale), listed prices
+    (no caching discount). Returns {key: cost_usd} plus "total".
     """
+    prompt_scale = prompt_scale or {}
     out = {}
     for key, slug in models.items():
         if slug not in PRICES_USD_PER_M:
             raise KeyError(f"no price for model {slug!r}; add it to PRICES_USD_PER_M")
         price_in, price_out = PRICES_USD_PER_M[slug]
-        out[key] = sum(counts[kind] * (kind_tokens(slug, kind)[0] * price_in
+        out[key] = sum(counts[kind] * (kind_tokens(slug, kind)[0]
+                                       * prompt_scale.get(kind, 1.0) * price_in
                                        + max_tokens * price_out)
                        for kind in CALL_KINDS if counts.get(kind)) / 1e6
     out["total"] = sum(out.values())
@@ -245,14 +275,17 @@ def format_report(est: dict, *, description: str = "") -> str:
         if m["cost_usd"] is None:
             cost = "maliyet tahmini yok (kalibrasyon yok)"
         else:
-            cost = (f"~{m['cost_usd']:.4f} USD (tahmin; geçerli {m['base_cost_usd']:.4f} + "
+            cost = (f"~{m['cost_usd']:.4f} USD (tahmin"
+                    + (", ALT SINIR" if m.get("lower_bound") else "")
+                    + f"; geçerli {m['base_cost_usd']:.4f} + "
                     f"ödenmiş-geçersiz {m['paid_invalid_usd']:.4f}); "
                     f"p95 üst sınır ~{m['p95_upper_usd']:.4f} USD")
             price_in, price_out = m["price_usd_per_m"]
             notes.append(f"  {key}: fiyat {price_in:g} / {price_out:g} USD/1M — {m['price_source']}")
             if m["estimate"]:
                 notes.append(f"  {key}: pilot verisi yok, token ve ödenmiş-geçersiz payı "
-                             "\"estimate\": true varsayımlar (kalibrasyon dosyası, assumptions)")
+                             "\"estimate\": true varsayımlar (kalibrasyon dosyası, assumptions); "
+                             "akıl yürütme 0 varsayıldı: beklenen değer ALT SINIR")
             if m["extrapolated_kinds"]:
                 notes.append(f"  {key}: {', '.join(m['extrapolated_kinds'])} pilot v2'de yoktu; "
                              "contribute_N ölçümünden oranla (tahmin)")

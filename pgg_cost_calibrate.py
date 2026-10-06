@@ -84,16 +84,26 @@ def read_jsonl(path: Path) -> list[dict]:
 
 def call_kind(row: dict) -> str:
     """pgg_cost call kind of a results row."""
+    if row.get("step") == "comprehension":         # rule comprehension (task #61)
+        return "comprehension"
     if row["arm"] == "isolated":
         return "isolated"
     return f"{row['step']}_{row['condition']}"
 
 
 def unit_key(row: dict) -> str:
-    """Unit label of a row; built from session_id when the row has no "unit"."""
-    arm, idx = row["session_id"].rsplit("-", 2)[-2:]
+    """Unit label of a row; built from session_id when the row has no "unit".
+
+    A run with frames (task #61) ends its session ids with "-<frame>" and its
+    unit labels with "|<frame>"; rows of other runs have no such suffix.
+    """
+    session_id, suffix = row["session_id"], ""
+    frame = row.get("frame")
+    if frame and session_id.endswith(f"-{frame}"):
+        session_id, suffix = session_id[:-len(frame) - 1], f"|{frame}"
+    arm, idx = session_id.rsplit("-", 2)[-2:]
     key = (f"{row['model_key']}|{row['card_id']}|{row['style']}|{row['condition']}"
-           f"|{arm}|{int(idx)}")
+           f"|{arm}|{int(idx)}{suffix}")
     if "unit" in row and row["unit"] != key:
         raise ValueError(f"unit {row['unit']!r} does not match session_id {row['session_id']!r}")
     return key
