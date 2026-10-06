@@ -61,11 +61,19 @@ tested. Design choices are in the module docstring; the main ones:
   the invalid cap. Units run in a shuffled round-robin over card x model
   (stable_seed), so a stopped run has data from every card.
 - `--resume` goes on with an interrupted run in its directory as a new
-  segment: complete units are skipped, partial ones run again with the same
-  seeds, earlier rows stay untouched (listed in `superseded_units`), budget
+  segment: complete units are skipped, a partial group game goes on from its
+  first round not complete (history rebuilt from the rows, same prompts and
+  seeds as without the cut), a partly written round is superseded and played
+  again, earlier rows stay untouched (rows that do not count are listed in
+  `superseded_rows`; `Engine.valid_rows()` returns the ones that do), budget
   and invalid cap count the earlier segments, and a config difference stops
-  before any call. SIGINT / SIGTERM write the summary with stop_reason
-  "interrupted". Details in the `pgg_game.py` docstring.
+  before any call. Accepted answers that never became a row are logged as
+  `pgg_discarded` (`"discarded": true`) and counted (`n_discarded`). A
+  cut-off last line of the results file is recorded in `<run>.partial.jsonl`
+  and ignored by every later resume. A lock file (`<run>.lock`, PID) keeps a
+  second process off the run; a stale one is taken over and logged.
+  SIGINT / SIGTERM write the summary with stop_reason "interrupted". Details
+  in the `pgg_game.py` docstring.
 - **Hangs:** every HTTP attempt has a wall-clock deadline
   (`--request-deadline`, default 300 s; the 300 s client timeout only bounds
   each read). Past it the attempt is abandoned, logged as `error_kind`

@@ -137,18 +137,31 @@ the same directory as a new segment (0 = the first run, then 1, 2, ...). The
 results file is opened for appending only; no earlier byte is changed.
   * Unit = one group game or one isolated schedule, labelled as in unit_order
     ("gpt|boston_value|value|N|group|0"). Rows are matched to units by their
-    session_id (deterministic). A unit is COMPLETE when one segment holds all
-    its rows: every (step, round, agent) of the group game (rounds x agents,
-    contribute, plus punish under P) or every conditioning value of the
-    schedule. Rows are written only for whole rounds / schedules, so this
-    rule needs no extra record; rows of the first run, which have no
-    "segment" field, are segment 0.
-  * Complete units are skipped. Every other unit is run again from its start
-    with the same seeds and session ids. Its earlier rows stay in the file;
-    they are listed as {"unit", "segment", "n_rows"} in "superseded_units"
-    (summary and the "pgg_run_resume" raw-log event). Analysis rule: a row
-    counts only if its (unit, segment) is complete; every new row carries
-    "unit" and "segment".
+    session_id (deterministic); rows of the first run, which have no
+    "segment" field, are segment 0. A ROUND of a group game is complete in a
+    segment when that segment holds all its rows (every agent, contribute,
+    plus punish under P); an isolated schedule is one block (every
+    conditioning value).
+  * Valid rows of a unit (_unit_chain): the segments are read in order; a
+    segment's rows of the unit start at some round j and replace the rounds
+    >= j accepted from earlier segments (this code always starts at the
+    first round not yet accepted; the code before A1 re-ran a unit from round
+    1, so its re-runs replace the earlier rows). From j on, complete rounds
+    are accepted in order; the first incomplete round and everything after it
+    in that segment are superseded. A unit is COMPLETE when every round is
+    accepted. Analysis rule: a row counts only if it is accepted
+    (Engine.valid_rows); the summary lists every other row in
+    "superseded_rows" as {"unit", "segment", "rounds", "n_rows"}.
+  * Complete units are skipped. A group game with accepted rounds goes on
+    from its first round not accepted (round-level resume): its history
+    (contributions, and punishments under P) is rebuilt from the accepted
+    rows, the earnings are recomputed with the game rules and compared with
+    the stored ones, so the prompts equal those of an uninterrupted run.
+    Seeds are stable_seed(..., agent, round, step), so a resumed round has
+    the seeds it would have had. "resume_points" (summary, raw-log event)
+    names every unit that goes on and its round. An isolated schedule with
+    rows but not complete is run again whole (its values have no history and
+    its rows are written together, so at most its 5 calls are repeated).
   * Budget and invalid-rate cap go on from the earlier segments: their cost
     and counts are rebuilt from the run's raw log (every billed response is
     logged there, also when no summary was written), else taken from the
@@ -163,8 +176,32 @@ results file is opened for appending only; no earlier byte is changed.
   * The previous summary is kept as <run>_summary.seg<k>.json (k = the last
     segment it describes) before the new one replaces it; the new summary has
     the totals, a "segments" list and the complete / remaining unit counts.
+  * Discarded responses: an accepted (valid) decision that never became a row
+    (its round was given up by a stop, a signal or an abort; it arrived
+    after that; or its row could not be written) is logged as a
+    "pgg_discarded" event with "discarded": true, its "call" (segment, step,
+    round, agent_id, others_mean) and a reason. Every raw-log record of a
+    call carries the same "call". On resume the run's raw log is compared
+    with the rows: an accepted response without a row that has no such event
+    yet (e.g. the process was killed) gets one now (reason
+    "found_on_resume"; records of the earlier code are matched by their
+    prompt). n_discarded is counted per model and segment; the responses
+    stay in the cost and the budget.
+  * A last line cut off while being written (no newline, not JSON) stays in
+    the results file; before new rows are appended after a newline, it is
+    recorded in <run>.partial.jsonl (line number, byte offset, length,
+    sha256, text). Every later scan ignores exactly the recorded lines (any
+    other broken line is an error) and the summary reports them
+    ("truncated_lines"). A raw log that ends without a newline gets one
+    before the segment's first record.
   * --resume --dry-run prints the plan (units complete / partial / left,
     calls left, cost so far) without writing anything and without llm_client.
+Run lock. run() (new or resumed) first creates <output dir>/<run>.lock with
+O_EXCL, holding the PID, host and start time; it is removed when the run ends
+(also after a signal, a stop or an error). A lock whose PID is alive on this
+host (os.kill(pid, 0)) stops the run with RunLocked before anything is
+written; a lock of a dead PID is stale: it is taken over, logged
+("pgg_stale_lock_taken_over") and reported in the summary ("lock").
 SIGINT and SIGTERM stop the run with stop_reason "interrupted": the summary is
 written at once, then once more after the calls in flight have ended.
 
@@ -194,6 +231,7 @@ import math
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -311,7 +349,7 @@ class OfflineLLM:
         return "default" if reasoning_effort is None else reasoning_effort
 
     @staticmethod
-    def _append_log(record):
+    def _append_log(record, path=None):
         raise RuntimeError("offline: a dry run writes no log")
 
 
@@ -332,6 +370,111 @@ class ModelStopped(Exception):
 # must not retry it as a failed attempt.
 class RunInterrupted(BaseException):
     """SIGINT or SIGTERM arrived (raised in the main thread)."""
+
+
+class RunLocked(Exception):
+    """Another live process holds the run's lock; nothing was called or written."""
+
+
+# --------------------------------------------------------------------------
+# Run lock
+# --------------------------------------------------------------------------
+
+# A lock file that cannot be read is taken as being written by its creator
+# for this long (between O_EXCL and the write), and as stale after it.
+LOCK_UNREADABLE_GRACE_S = 5.0
+
+
+def _pid_alive(pid) -> bool:
+    """os.kill(pid, 0): True if a process with this PID exists (also another user's)."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def read_run_lock(path) -> dict | None:
+    """The lock file's content plus "state": "alive", "stale" or "unknown"; None if absent.
+
+    "unknown": the lock is from another host (its PID cannot be checked here)
+    or it cannot be read yet (just created); a run does not start on it.
+    """
+    path = Path(path)
+    try:
+        data = path.read_bytes()
+        mtime = path.stat().st_mtime
+    except FileNotFoundError:
+        return None
+    try:
+        info = json.loads(data)
+        if not isinstance(info, dict):
+            raise ValueError("not an object")
+    except ValueError:
+        young = time.time() - mtime < LOCK_UNREADABLE_GRACE_S
+        return {"unreadable": True, "n_bytes": len(data), "state": "unknown" if young else "stale"}
+    if info.get("host") not in (None, socket.gethostname()):
+        return {**info, "state": "unknown"}
+    return {**info, "state": "alive" if _pid_alive(info.get("pid")) else "stale"}
+
+
+def acquire_run_lock(path) -> dict:
+    """Create the lock file (O_EXCL) or take over a stale one; RunLocked if it is held.
+
+    Returns {"path", "pid", "host", "started_at", "started_at_utc",
+    "stale_lock"}; stale_lock is the content of a lock taken over (its PID
+    was dead), else None. Two processes that find the same stale lock at the
+    same instant are not excluded from each other (a known, narrow race).
+    """
+    path = Path(path)
+    stale = None
+    for _ in range(5):
+        now = time.time()
+        info = {"pid": os.getpid(), "host": socket.gethostname(), "started_at": now,
+                "started_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))}
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            held = read_run_lock(path)
+            if held is None:
+                continue                       # removed meanwhile: try again
+            if held["state"] != "stale":
+                who = (f"PID {held.get('pid')} on {held.get('host')}, started "
+                       f"{held.get('started_at_utc')}" if not held.get("unreadable")
+                       else "a lock file that is being written")
+                raise RunLocked(
+                    f"run directory is locked by {who} ({held['state']}): {path}. Another "
+                    "process is running or resuming this run; nothing was called or written. "
+                    "If that process is certainly gone, delete the lock file.")
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            stale = {k: v for k, v in held.items() if k != "state"}
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(info) + "\n")
+        return {"path": str(path), **info, "stale_lock": stale}
+    raise RunLocked(f"could not take the lock {path}")
+
+
+def release_run_lock(lock: dict | None) -> None:
+    """Remove the lock file if it is still this lock (same PID and start time)."""
+    if not lock:
+        return
+    path = Path(lock["path"])
+    held = read_run_lock(path)
+    if held and held.get("pid") == lock["pid"] and held.get("started_at") == lock["started_at"]:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 # --------------------------------------------------------------------------
@@ -959,15 +1102,57 @@ def _row_key(row: dict) -> tuple:
     return (row.get("step"), row.get("round"), row.get("agent_id"), row.get("others_mean"))
 
 
+def _unit_rounds(spec: UnitSpec) -> tuple:
+    """Round ids of a unit in order: 1..rounds of a group game, (None,) for a schedule."""
+    return tuple(sorted({k[1] for k in spec.expected})) if spec.arm == "group" else (None,)
+
+
+def _call_key(segment: int, session_id: str, call: dict) -> tuple:
+    """Identity of one decision call: (segment, session, step, round, agent, others_mean)."""
+    return (segment, session_id, call.get("step"), call.get("round"), call.get("agent_id"),
+            call.get("others_mean"))
+
+
+def _call_of_row(row: dict) -> tuple:
+    return _call_key(row.get("segment", 0), row.get("session_id"),
+                     dict(zip(("step", "round", "agent_id", "others_mean"), _row_key(row))))
+
+
+# Prompts written by this code (contribution_messages, punishment_messages,
+# isolated_messages): what a raw-log record of the code before A1, which has
+# no "call", was asked.
+_ROUND_PROMPT = re.compile(r"ROUND (\d+) of \d+(, punishment step)?\. You are Player (\d+)\.")
+_ISOLATED_PROMPT = re.compile(r"on average, (\d+) points")
+
+
+def _call_from_messages(messages) -> dict | None:
+    """step / round / agent_id / others_mean of a call, read from its prompt (older logs)."""
+    try:
+        user = messages[-1]["content"]
+    except (TypeError, IndexError, KeyError):
+        return None
+    if not isinstance(user, str):
+        return None
+    m = _ROUND_PROMPT.search(user)
+    if m:
+        return {"step": "punish" if m.group(2) else "contribute", "round": int(m.group(1)),
+                "agent_id": int(m.group(3)), "others_mean": None}
+    m = _ISOLATED_PROMPT.search(user)
+    if "QUESTION\n" in user and m:
+        return {"step": "isolated", "round": None, "agent_id": 1, "others_mean": int(m.group(1))}
+    return None
+
+
 def _new_stats() -> dict:
     """Per-model counters of a run or segment."""
     # n_provider_error: provider-error responses (llm_client error_kind
     # "provider"); not in n_parse_fail and not in the invalid-rate cap.
     # providers: provider name of every response -> count ("null" = none).
+    # n_discarded: accepted decisions that never became a row (billed).
     return {"cost_usd": 0.0, "n_responses": 0, "n_accepted": 0,
             "n_invalid": 0, "n_parse_fail": 0, "n_provider_error": 0,
             "n_cost_estimated": 0, "n_length": 0, "finish_reasons": {},
-            "providers": {}, "n_provider_unknown": 0}
+            "providers": {}, "n_provider_unknown": 0, "n_discarded": 0}
 
 
 def _merge_stats(*parts: dict) -> dict:
@@ -1015,7 +1200,8 @@ class ResumePlan:
     prior_segments: list[int]
     n_units: int
     complete: dict                     # unit label -> segment that completed it
-    partial: list[dict]                # superseded: {"unit", "segment", "n_rows"}
+    superseded: list[dict]             # {"unit", "segment", "rounds", "n_rows"}
+    resume_points: list[dict]          # {"unit", "from_round", "rounds_kept", "kept_from_segments"}
     started_without_rows: list[str]    # units with logged calls but no row
     remaining: list[str]               # labels still to run, in run order
     prior_stats: dict                  # model key -> counters of all earlier segments
@@ -1026,10 +1212,16 @@ class ResumePlan:
     n_rows: int
     rows_per_segment: dict
     results_ends_with_newline: bool
-    truncated_last_line: bool
+    truncated_last_line: dict | None   # {"line", "offset", "n_bytes", "sha256", "text"}
+    truncated_lines: list[dict]        # cut-off lines recorded in <run>.partial.jsonl
     previous_summary: dict | None
     config_checked: list[str]          # what the config was compared on
     problems: list[str]                # config differences and anomalies
+    histories: dict = field(default_factory=dict)   # unit label -> [RoundRecord] (resume)
+    # accepted responses of earlier segments without a row and without a
+    # "pgg_discarded" event yet: [(model key, session_id, call)]
+    unmarked_discarded: list = field(default_factory=list)
+    lock: dict | None = None           # read_run_lock of the run's lock file
 
     @property
     def prior_cost_usd(self) -> float:
@@ -1047,6 +1239,49 @@ class Answer:
     n_parse_fail: int
     meta: dict
     n_provider_error: int = 0
+    call: dict | None = None       # call_info of the decision (segment, step, round, ...)
+
+
+class _Pending:
+    """Accepted answers of one round (or schedule) whose rows are not written yet.
+
+    An answer that does not become a row is discarded (Engine._discard): the
+    round was given up (close() before its rows were written: a stop, a
+    signal, an abort of another call), the answer arrived after that (a call
+    still in flight), or its row could not be written.
+    """
+
+    def __init__(self, engine: "Engine", model_key: str, session_id: str):
+        self.engine, self.model_key, self.session_id = engine, model_key, session_id
+        self.lock = threading.Lock()
+        self.items: dict[tuple, dict] = {}
+        self.closed = False
+
+    @staticmethod
+    def _id(call: dict) -> tuple:
+        return _call_key(call.get("segment"), "", call)
+
+    def add(self, ans: Answer) -> Answer:
+        with self.lock:
+            if not self.closed:
+                self.items[self._id(ans.call)] = ans.call
+                return ans
+        self.engine._discard(self.model_key, self.session_id, ans.call, "round_not_completed")
+        return ans
+
+    def done(self, ans: Answer, written: bool) -> None:
+        with self.lock:
+            self.items.pop(self._id(ans.call), None)
+        if not written:
+            self.engine._discard(self.model_key, self.session_id, ans.call, "row_not_written")
+
+    def close(self) -> None:
+        with self.lock:
+            self.closed = True
+            left = list(self.items.values())
+            self.items.clear()
+        for call in left:
+            self.engine._discard(self.model_key, self.session_id, call, "round_not_completed")
 
 
 class Engine:
@@ -1075,6 +1310,9 @@ class Engine:
         self.prior_extra_cost = 0.0
         self.plan: ResumePlan | None = None
         self._specs: list[UnitSpec] = []
+        self._histories: dict[str, list[RoundRecord]] = {}   # resume: rebuilt from rows
+        self.lock: dict | None = None              # acquire_run_lock of run()
+        self._run_log: Path | None = None          # the run's raw log (late discard events)
         # Signals: name of the signal that interrupted the run; thread pools to
         # wait for after the summary; True once the summary is being written.
         self._interrupted: str | None = None
@@ -1087,12 +1325,36 @@ class Engine:
     def seed_for(self, *parts) -> int:
         return self.llm.stable_seed(self.cfg.seed_namespace, self.cfg.run, *parts)
 
-    def _write(self, row: dict) -> None:
+    def _write(self, row: dict) -> bool:
+        """Append one row; False if the file is closed (the run has ended: stall, signal)."""
         with self._lock:
-            if self._out is None:          # file closed: an interrupted run has ended
-                return
+            if self._out is None:
+                return False
             self._out.write(json.dumps(row, ensure_ascii=False) + "\n")
             self._out.flush()
+            return True
+
+    def _log(self, record: dict) -> None:
+        """A record for the run's raw log, also after run() has restored the log path."""
+        if self._run_log is not None:
+            self.llm._append_log(record, self._run_log)
+        else:
+            self.llm._append_log(record)
+
+    def _discard(self, model_key: str, session_id: str, call: dict, reason: str) -> None:
+        """Log an accepted decision that did not become a row ("discarded": true).
+
+        Counted in n_discarded of this segment when the call is of this
+        segment (found_on_resume events are of earlier segments, already
+        counted from the raw log). Its cost was counted when it arrived.
+        """
+        if call.get("segment") == self.segment:
+            with self._lock:
+                self.stats[model_key]["n_discarded"] += 1
+        self._log({"ts": time.time(), "event": "pgg_discarded", "discarded": True,
+                   "run": self.cfg.run, "segment": self.segment,
+                   "model": self.cfg.models[model_key], "session_id": session_id,
+                   "call": call, "reason": reason})
 
     # -- run guards --------------------------------------------------------
 
@@ -1240,6 +1502,9 @@ class Engine:
             self._on_response(model_key, info)
 
         pinned = self.cfg.provider_for(model_key)
+        # written as "call" into every raw-log record of this decision
+        call = {"segment": self.segment, "step": ctx.get("step"), "round": ctx.get("round"),
+                "agent_id": ctx.get("agent_id"), "others_mean": ctx.get("others_mean")}
         try:
             parsed, n_invalid, n_parse_fail = self.llm.call_llm_valid(
                 self.cfg.models[model_key], messages, schema=schema, session_id=session_id,
@@ -1249,7 +1514,8 @@ class Engine:
                 on_response=on_response, timeout=self.timeout, counts=counts,
                 provider=provider_routing(pinned) if pinned else None,
                 request_deadline_s=self.deadline,
-                on_late_response=lambda info: self._on_late_response(model_key, info))
+                on_late_response=lambda info: self._on_late_response(model_key, info),
+                call_info=call)
         except RuntimeError as e:
             self.llm._append_log({
                 "ts": time.time(), "event": "pgg_run_aborted", "run": self.cfg.run,
@@ -1262,7 +1528,7 @@ class Engine:
         meta["provider"] = last.get("provider")
         meta["provider_quantization"] = last.get("provider_quantization")
         ans = Answer(parsed, n_invalid, n_parse_fail, meta,
-                     n_provider_error=counts.get("n_provider_error", 0))
+                     n_provider_error=counts.get("n_provider_error", 0), call=call)
         self._count_invalid(model_key, ans)
         return ans
 
@@ -1291,8 +1557,13 @@ class Engine:
 
     # -- group arm ---------------------------------------------------------
 
-    def play_group(self, model_key: str, cards: list[Card], condition: str, idx: int) -> None:
-        """One group game (rounds x agents); cards[i] is agent i+1's card."""
+    def play_group(self, model_key: str, cards: list[Card], condition: str, idx: int,
+                   history: list[RoundRecord] | None = None) -> None:
+        """One group game (rounds x agents); cards[i] is agent i+1's card.
+
+        history: rounds 1..k already played (resume, rebuilt from their rows);
+        the game goes on with round k+1.
+        """
         p = self.cfg.params
         if len(cards) != p.group_size:
             raise ValueError(f"need {p.group_size} cards, got {len(cards)}")
@@ -1301,63 +1572,71 @@ class Engine:
                                     condition, "group", idx)
         group_id = f"{lead.card_id}-{lead.style}-{condition}-g{idx:02d}"
         unit = unit_label(model_key, lead, condition, "group", idx)
-        history: list[RoundRecord] = []
-        for r in range(1, p.rounds + 1):
+        history = list(history or [])
+        if [rec.round for rec in history] != list(range(1, len(history) + 1)):
+            raise ValueError(f"history of {unit} is not rounds 1..{len(history)}")
+        for r in range(len(history) + 1, p.rounds + 1):
             ctx = {"round": r, "group_id": group_id, "condition": condition}
+            pending = _Pending(self, model_key, session_id)
 
             def contribute(i):
-                return self._ask(
+                return pending.add(self._ask(
                     model_key, contribution_messages(p, condition, cards[i], history, i, r),
                     contribution_schema(p, self.cfg.rationale),
                     lambda c: is_valid_contribution(c, p), session_id,
-                    {**ctx, "agent_id": i + 1, "step": "contribute"})
+                    {**ctx, "agent_id": i + 1, "step": "contribute"}))
 
-            answers = self._map(contribute, range(p.group_size))
-            contributions = [a.parsed["contribution"] for a in answers]
-            earnings = project_payoffs(p, contributions)
-            rec = RoundRecord(r, contributions, earnings, final_earnings=earnings)
-            punish_answers = None
+            try:
+                answers = self._map(contribute, range(p.group_size))
+                contributions = [a.parsed["contribution"] for a in answers]
+                earnings = project_payoffs(p, contributions)
+                rec = RoundRecord(r, contributions, earnings, final_earnings=earnings)
+                punish_answers = None
 
-            if condition == "P":
-                def punish(i):
-                    targets = [j + 1 for j in range(p.group_size) if j != i]
-                    budget = punishment_budget(earnings[i])
-                    return self._ask(
-                        model_key,
-                        punishment_messages(p, cards[i], history, i, r, contributions, earnings[i]),
-                        punishment_schema(p, targets, self.cfg.rationale),
-                        lambda c: is_valid_punishment(c, p, targets, budget), session_id,
-                        {**ctx, "agent_id": i + 1, "step": "punish"})
+                if condition == "P":
+                    def punish(i):
+                        targets = [j + 1 for j in range(p.group_size) if j != i]
+                        budget = punishment_budget(earnings[i])
+                        return pending.add(self._ask(
+                            model_key,
+                            punishment_messages(p, cards[i], history, i, r, contributions,
+                                                earnings[i]),
+                            punishment_schema(p, targets, self.cfg.rationale),
+                            lambda c: is_valid_punishment(c, p, targets, budget), session_id,
+                            {**ctx, "agent_id": i + 1, "step": "punish"}))
 
-                punish_answers = self._map(punish, range(p.group_size))
-                rec.punishment = [
-                    [punish_answers[i].parsed["punishments"][str(j + 1)] if j != i else 0
-                     for j in range(p.group_size)] for i in range(p.group_size)]
-                rec.final_earnings, rec.cost_paid, rec.received = apply_punishment(
-                    p, earnings, rec.punishment)
+                    punish_answers = self._map(punish, range(p.group_size))
+                    rec.punishment = [
+                        [punish_answers[i].parsed["punishments"][str(j + 1)] if j != i else 0
+                         for j in range(p.group_size)] for i in range(p.group_size)]
+                    rec.final_earnings, rec.cost_paid, rec.received = apply_punishment(
+                        p, earnings, rec.punishment)
 
-            for i in range(p.group_size):
-                self._write(self._row(
-                    condition=condition, arm="group", model_key=model_key, card=cards[i],
-                    session_id=session_id, group_id=group_id, agent_id=i + 1, round_no=r,
-                    step="contribute", ans=answers[i], unit=unit,
-                    seed=self.seed_for(model_key, cards[i].card_id, cards[i].style, condition,
-                                       "group", idx, i + 1, r, "contribute"),
-                    contribution=answers[i].parsed["contribution"], group_total=sum(contributions),
-                    payoff_before_punishment=earnings[i], payoff=rec.final_earnings[i]))
-            if punish_answers:
                 for i in range(p.group_size):
-                    self._write(self._row(
+                    pending.done(answers[i], self._write(self._row(
                         condition=condition, arm="group", model_key=model_key, card=cards[i],
                         session_id=session_id, group_id=group_id, agent_id=i + 1, round_no=r,
-                        step="punish", ans=punish_answers[i], unit=unit,
+                        step="contribute", ans=answers[i], unit=unit,
                         seed=self.seed_for(model_key, cards[i].card_id, cards[i].style, condition,
-                                           "group", idx, i + 1, r, "punish"),
-                        punishments={str(j + 1): rec.punishment[i][j]
-                                     for j in range(p.group_size) if j != i},
-                        punishment_cost_paid=rec.cost_paid[i],
-                        punishment_points_received=rec.received[i],
-                        payoff=rec.final_earnings[i]))
+                                           "group", idx, i + 1, r, "contribute"),
+                        contribution=answers[i].parsed["contribution"],
+                        group_total=sum(contributions),
+                        payoff_before_punishment=earnings[i], payoff=rec.final_earnings[i])))
+                if punish_answers:
+                    for i in range(p.group_size):
+                        pending.done(punish_answers[i], self._write(self._row(
+                            condition=condition, arm="group", model_key=model_key, card=cards[i],
+                            session_id=session_id, group_id=group_id, agent_id=i + 1, round_no=r,
+                            step="punish", ans=punish_answers[i], unit=unit,
+                            seed=self.seed_for(model_key, cards[i].card_id, cards[i].style,
+                                               condition, "group", idx, i + 1, r, "punish"),
+                            punishments={str(j + 1): rec.punishment[i][j]
+                                         for j in range(p.group_size) if j != i},
+                            punishment_cost_paid=rec.cost_paid[i],
+                            punishment_points_received=rec.received[i],
+                            payoff=rec.final_earnings[i])))
+            finally:
+                pending.close()            # answers left without a row: discarded
             history.append(rec)
 
     # -- isolated arm ------------------------------------------------------
@@ -1371,24 +1650,29 @@ class Engine:
         group_id = f"{card.card_id}-{card.style}-{condition}-iso{rep:02d}"
         unit = unit_label(model_key, card, condition, "isolated", rep)
 
+        pending = _Pending(self, model_key, session_id)
+
         def ask_point(x):
             ctx = {"round": None, "group_id": group_id, "condition": condition,
                    "agent_id": 1, "step": "isolated", "others_mean": x}
-            return self._ask(
+            return pending.add(self._ask(
                 model_key, isolated_messages(p, card, x, self.cfg.isolated_frame),
                 contribution_schema(p, self.cfg.rationale),
-                lambda c: is_valid_contribution(c, p), session_id, ctx)
+                lambda c: is_valid_contribution(c, p), session_id, ctx))
 
         points = list(self.cfg.isolated_points)
-        for x, ans in zip(points, self._map(ask_point, points)):
-            self._write(self._row(
-                condition=condition, arm="isolated", model_key=model_key, card=card,
-                session_id=session_id, group_id=group_id, agent_id=1, round_no=None,
-                step="isolated", ans=ans, unit=unit,
-                seed=self.seed_for(model_key, card.card_id, card.style, condition,
-                                   "isolated", rep, 1, "isolated", x),
-                contribution=ans.parsed["contribution"], others_mean=x,
-                isolated_frame=self.cfg.isolated_frame))
+        try:
+            for x, ans in zip(points, self._map(ask_point, points)):
+                pending.done(ans, self._write(self._row(
+                    condition=condition, arm="isolated", model_key=model_key, card=card,
+                    session_id=session_id, group_id=group_id, agent_id=1, round_no=None,
+                    step="isolated", ans=ans, unit=unit,
+                    seed=self.seed_for(model_key, card.card_id, card.style, condition,
+                                       "isolated", rep, 1, "isolated", x),
+                    contribution=ans.parsed["contribution"], others_mean=x,
+                    isolated_frame=self.cfg.isolated_frame)))
+        finally:
+            pending.close()
 
     # -- whole run ---------------------------------------------------------
 
@@ -1460,7 +1744,8 @@ class Engine:
     def _unit_fn(self, spec: UnitSpec):
         if spec.arm == "group":
             return lambda: self.play_group(spec.model_key, [spec.card] * self.cfg.params.group_size,
-                                           spec.condition, spec.idx)
+                                           spec.condition, spec.idx,
+                                           history=self._histories.get(spec.label))
         return lambda: self.play_isolated(spec.model_key, spec.card, spec.idx)
 
     def units(self, specs: list[UnitSpec] | None = None) -> list[tuple[str, str, object]]:
@@ -1528,22 +1813,110 @@ class Engine:
         path = self.cfg.raw_log_path() or self.llm.LOG_PATH
         return Path(path) if path is not None else None
 
+    def _partial_path(self) -> Path:
+        """<run>.partial.jsonl: cut-off lines of the results file, one record each."""
+        return self.cfg.output_dir() / f"{self.cfg.run}.partial.jsonl"
+
+    def _recorded_truncated(self) -> dict[tuple, dict]:
+        """(line, sha256) -> record of every cut-off line recorded so far."""
+        path = self._partial_path()
+        if not path.is_file():
+            return {}
+        out = {}
+        for rec in _read_jsonl(path)[0]:
+            if isinstance(rec, dict) and "line" in rec and "sha256" in rec:
+                out.setdefault((rec["line"], rec["sha256"]), rec)
+        return out
+
+    def _unit_chain(self, spec: UnitSpec, segs: dict[int, dict]) -> dict:
+        """Accepted and superseded rows of one unit (module docstring, "Valid rows").
+
+        segs: segment -> round -> rows. Returns {"accepted": {round: segment}
+        in round order, "superseded": [(segment, round, n_rows)], "problems"}.
+        """
+        rounds = _unit_rounds(spec)
+        want = {r: frozenset(k for k in spec.expected if k[1] == r) for r in rounds}
+        accepted: dict = {}
+        superseded: list[tuple] = []
+        problems: list[str] = []
+        for seg in sorted(segs):
+            blocks = segs[seg]
+            keys = {r: [_row_key(x) for x in rows] for r, rows in blocks.items()}
+            if any(r not in want or len(set(k)) != len(k) or not set(k) <= want[r]
+                   for r, k in keys.items()):
+                problems.append(f"unit {spec.label} segment {seg}: rows do not fit the design "
+                                "(duplicate or unexpected step / round / agent / value)")
+                continue
+            if len(accepted) == len(rounds):
+                problems.append(f"unit {spec.label} is complete in segment(s) "
+                                f"{sorted(set(accepted.values()))} and has rows in segment {seg}")
+                continue
+            here = [r for r in rounds if r in blocks]
+            first, k = rounds.index(here[0]), len(accepted)
+            if first > k:
+                problems.append(f"unit {spec.label} segment {seg}: starts at round {here[0]}, "
+                                f"but only {k} earlier round(s) are complete")
+                continue
+            # this segment replays the unit from round rounds[first] (the code
+            # before A1 re-ran a unit from its start): earlier rounds from there
+            # on are replaced
+            for r in rounds[first:k]:
+                s = accepted.pop(r)
+                superseded.append((s, r, len(segs[s][r])))
+            taking = True
+            for r in rounds[first:]:
+                if r not in blocks:
+                    taking = False
+                    continue
+                if taking and set(keys[r]) == want[r]:
+                    accepted[r] = seg
+                    continue
+                if not taking:
+                    problems.append(f"unit {spec.label} segment {seg}: rows of round {r} after "
+                                    "an incomplete or missing round")
+                taking = False
+                superseded.append((seg, r, len(blocks[r])))
+        return {"accepted": accepted, "superseded": superseded, "problems": problems}
+
     def _scan_rows(self, path: Path, specs: list[UnitSpec]) -> dict:
-        """Rows of the results file by (unit, segment): complete and partial units."""
+        """Rows of the results file: accepted rounds per unit, complete and partial units.
+
+        A line that is not JSON is a problem, except the last line when it has
+        no newline (cut off while being written) and the lines recorded in
+        <run>.partial.jsonl (cut-off lines of earlier resumes).
+        """
         by_session = {s.session_id: s for s in specs}
-        by_label = {s.label: s for s in specs}
         order = {s.label: i for i, s in enumerate(specs)}
         lengths = {(c.card_id, c.style): card_length(c) for c in self.cfg.cards}
-        lines, ends_with_newline = _read_jsonl(path)
-        keys: dict[tuple, list] = {}
+        data = Path(path).read_bytes()
+        ends_with_newline = data.endswith(b"\n") or not data
+        lines = data.split(b"\n")
+        if ends_with_newline:
+            lines = lines[:-1]                 # the text after the last newline is empty
+        recorded = self._recorded_truncated()
+        blocks: dict[str, dict] = {}           # label -> segment -> round -> rows
         per_segment: dict[int, int] = {}
         problems: list[str] = []
-        truncated = False
+        truncated, truncated_lines = None, []
+        row_calls: set = set()                 # _call_of_row of every parsed row
         n_length_checked = 0
-        for i, row in enumerate(lines, 1):
+        offset = 0
+        for i, line in enumerate(lines, 1):
+            start, offset = offset, offset + len(line) + 1
+            try:
+                row = json.loads(line)
+            except ValueError:
+                row = None
             if not isinstance(row, dict):
+                sha = hashlib.sha256(line).hexdigest()
                 if i == len(lines) and not ends_with_newline:
-                    truncated = True               # cut off while being written
+                    # cut off while being written
+                    truncated = {"line": i, "offset": start, "n_bytes": len(line), "sha256": sha,
+                                 "text": line.decode("utf-8", errors="replace")}
+                elif (i, sha) in recorded:
+                    truncated_lines.append({k: recorded[(i, sha)].get(k) for k in
+                                            ("line", "offset", "n_bytes", "sha256",
+                                             "found_in_segment")})
                 else:
                     problems.append(f"{path.name} line {i}: not a JSON object")
                 continue
@@ -1564,28 +1937,101 @@ class Engine:
                                     f"{got}, the cards now {want}")
             seg = row.get("segment", 0)                # rows of the first run have no segment
             per_segment[seg] = per_segment.get(seg, 0) + 1
-            keys.setdefault((spec.label, seg), []).append(_row_key(row))
+            row_calls.add(_call_of_row(row))
+            (blocks.setdefault(spec.label, {}).setdefault(seg, {})
+             .setdefault(row.get("round"), []).append(row))
+        by_label = {s.label: s for s in specs}
         complete: dict[str, int] = {}
-        partial: list[dict] = []
-        for label, seg in sorted(keys, key=lambda k: (order[k[0]], k[1])):
-            got = keys[(label, seg)]
-            expected = by_label[label].expected
-            if len(set(got)) != len(got) or not set(got) <= expected:
-                problems.append(f"unit {label} segment {seg}: rows do not fit the design "
-                                "(duplicate or unexpected step / round / agent / value)")
-            elif set(got) == expected:
-                if label in complete:
-                    problems.append(f"unit {label} is complete in segments {complete[label]} "
-                                    f"and {seg}")
-                else:
-                    complete[label] = seg
+        progress: dict[str, dict] = {}      # partial unit -> accepted rounds and their rows
+        superseded: list[dict] = []
+        accepted_rounds: set = set()        # (label, segment, round)
+        for label in sorted(blocks, key=order.get):
+            spec, segs = by_label[label], blocks[label]
+            chain = self._unit_chain(spec, segs)
+            problems += chain["problems"]
+            accepted = chain["accepted"]
+            accepted_rounds |= {(label, s, r) for r, s in accepted.items()}
+            by_seg: dict[int, list] = {}
+            for s, r, n in chain["superseded"]:
+                by_seg.setdefault(s, []).append((r, n))
+            for s in sorted(by_seg):
+                superseded.append({
+                    "unit": label, "segment": s,
+                    "rounds": sorted(r for r, _ in by_seg[s]) if spec.arm == "group" else None,
+                    "n_rows": sum(n for _, n in by_seg[s])})
+            if len(accepted) == len(_unit_rounds(spec)):
+                complete[label] = max(accepted.values())
             else:
-                partial.append({"unit": label, "segment": seg, "n_rows": len(got)})
+                progress[label] = {"rounds": {r: segs[s][r] for r, s in accepted.items()},
+                                   "segments": sorted(set(accepted.values()))}
         return {"n_rows": sum(per_segment.values()), "rows_per_segment": per_segment,
-                "complete": complete, "partial": partial,
-                "units_with_rows": {label for label, _ in keys}, "n_length_checked": n_length_checked,
+                "complete": complete, "progress": progress, "superseded": superseded,
+                "accepted_rounds": accepted_rounds, "row_calls": row_calls,
+                "units_with_rows": set(blocks), "n_length_checked": n_length_checked,
                 "ends_with_newline": ends_with_newline, "truncated_last_line": truncated,
-                "problems": list(dict.fromkeys(problems))}
+                "truncated_lines": truncated_lines, "problems": list(dict.fromkeys(problems))}
+
+    def valid_rows(self, path: Path | None = None) -> list[dict]:
+        """The rows that count (accepted rounds of their unit), in file order."""
+        path = Path(path) if path is not None else self.cfg.output_dir() / f"{self.cfg.run}.jsonl"
+        specs = self.unit_specs()
+        by_session = {s.session_id: s for s in specs}
+        accepted = self._scan_rows(path, specs)["accepted_rounds"]
+        out = []
+        for row in _read_jsonl(path)[0]:
+            spec = by_session.get(row.get("session_id")) if isinstance(row, dict) else None
+            if spec and (spec.label, row.get("segment", 0), row.get("round")) in accepted:
+                out.append(row)
+        return out
+
+    def _history_from_rows(self, spec: UnitSpec, rounds: dict) -> tuple[list, list[str]]:
+        """RoundRecords of the accepted rounds 1..k of a group game, rebuilt from their rows.
+
+        Earnings, punishment cost and points received are recomputed with the
+        game rules (as play_group does); the stored values must agree.
+        """
+        p, n = self.cfg.params, self.cfg.params.group_size
+        history, problems = [], []
+        for r in sorted(rounds):
+            rows = rounds[r]
+            where = f"unit {spec.label} round {r}"
+            con = {x["agent_id"]: x for x in rows if x.get("step") == "contribute"}
+            contributions = [con[a].get("contribution") for a in range(1, n + 1)]
+            if not all(is_valid_contribution({"contribution": c}, p) for c in contributions):
+                problems.append(f"{where}: a stored contribution is not a valid decision")
+                break
+            earnings = project_payoffs(p, contributions)
+            rec = RoundRecord(r, contributions, earnings, final_earnings=earnings)
+            pun = {}
+            if spec.condition == "P":
+                pun = {x["agent_id"]: x for x in rows if x.get("step") == "punish"}
+                try:
+                    rec.punishment = [[pun[i + 1]["punishments"][str(j + 1)] if j != i else 0
+                                       for j in range(n)] for i in range(n)]
+                except (KeyError, TypeError):
+                    problems.append(f"{where}: stored punishments are incomplete")
+                    break
+                if not all(is_valid_punishment({"punishments": pun[i + 1]["punishments"]}, p,
+                                               [j + 1 for j in range(n) if j != i],
+                                               punishment_budget(earnings[i])) for i in range(n)):
+                    problems.append(f"{where}: a stored punishment is not a valid decision")
+                    break
+                rec.final_earnings, rec.cost_paid, rec.received = apply_punishment(
+                    p, earnings, rec.punishment)
+            stored = [(con[a].get(k), want) for a in range(1, n + 1) for k, want in (
+                ("group_total", sum(contributions)),
+                ("payoff_before_punishment", earnings[a - 1]),
+                ("payoff", rec.final_earnings[a - 1]))]
+            stored += [(pun[a].get(k), want) for a in pun for k, want in (
+                ("punishment_cost_paid", rec.cost_paid[a - 1]),
+                ("punishment_points_received", rec.received[a - 1]),
+                ("payoff", rec.final_earnings[a - 1]))]
+            if any(got != want for got, want in stored):
+                problems.append(f"{where}: stored earnings differ from the ones recomputed from "
+                                "the decisions")
+                break
+            history.append(rec)
+        return history, problems
 
     def _scan_raw_log(self, path: Path, specs: list[UnitSpec]) -> dict:
         """Counters per segment and model, rebuilt from the run's raw-log records.
@@ -1596,15 +2042,25 @@ class Engine:
         retried records with error_kind "parse". Segments are delimited by
         the run's pgg_run_start (0) and pgg_run_resume events. The system
         message of each session is compared with the card.
+
+        Also: "accepted", a Counter of _call_key -> accepted responses (the
+        record's "call", else read from its prompt; an invalid_payload event
+        takes back the success record it rejected), and "marked", the
+        _call_keys that already have a "pgg_discarded" event.
         """
         sessions = {s.session_id: s for s in specs}
         per_segment: dict[int, dict] = {}
         events, problems, started = [], [], set()
         system_text: dict[str, str] = {}
+        accepted: dict[tuple, int] = {}
+        marked: set = set()
+        recent: dict[str, list] = {}           # session -> [(call key, parsed)] (older logs)
+        n_unparsed = 0
         seg = 0
-        lines, _ = _read_jsonl(path)
+        lines, ends_with_newline = _read_jsonl(path)
         for rec in lines:
             if not isinstance(rec, dict):
+                n_unparsed += 1
                 continue
             event = rec.get("event")
             if event in ("pgg_run_start", "pgg_run_resume") and rec.get("run") == self.cfg.run:
@@ -1631,6 +2087,19 @@ class Engine:
             if event == "invalid_payload":
                 s["n_invalid"] += 1
                 s["n_accepted"] -= 1            # its success record was counted below
+                if isinstance(rec.get("call"), dict):
+                    ck = _call_key(rec["call"].get("segment", seg), spec.session_id, rec["call"])
+                else:                           # older log: the success record with this payload
+                    ck = next((c for c, parsed in reversed(recent.get(spec.session_id, []))
+                               if parsed == rec.get("response_parsed")), None)
+                    if ck is not None:
+                        recent[spec.session_id].remove((ck, rec.get("response_parsed")))
+                if ck is not None and accepted.get(ck):
+                    accepted[ck] -= 1
+                continue
+            if event == "pgg_discarded":
+                call = rec.get("call") if isinstance(rec.get("call"), dict) else {}
+                marked.add(_call_key(call.get("segment"), spec.session_id, call))
                 continue
             if event is not None:
                 continue
@@ -1644,6 +2113,17 @@ class Engine:
                     "provider_error": rec.get("error_kind") == "provider"})
             if "response_parsed" in rec:
                 s["n_accepted"] += 1
+                call = rec.get("call") if isinstance(rec.get("call"), dict) else None
+                if call is None:
+                    call = _call_from_messages(messages)
+                    if call is not None:
+                        ck = _call_key(seg, spec.session_id, call)
+                        recent.setdefault(spec.session_id, []).append(
+                            (ck, rec.get("response_parsed")))
+                else:
+                    ck = _call_key(call.get("segment", seg), spec.session_id, call)
+                if call is not None:
+                    accepted[ck] = accepted.get(ck, 0) + 1
             elif rec.get("retrying") and rec.get("error_kind") == "parse":
                 s["n_parse_fail"] += 1
         for session_id, text in system_text.items():
@@ -1652,7 +2132,9 @@ class Engine:
                 problems.append(f"card {card.card_id}/{card.style}: the text differs from the "
                                 "one in the raw log of the earlier segments")
         return {"per_segment": per_segment, "events": events, "started": started,
-                "n_sessions_checked": len(system_text), "problems": list(dict.fromkeys(problems))}
+                "n_sessions_checked": len(system_text), "accepted": accepted, "marked": marked,
+                "n_unparsed_lines": n_unparsed, "ends_with_newline": ends_with_newline,
+                "problems": list(dict.fromkeys(problems))}
 
     def resume_plan(self) -> ResumePlan:
         """What a resumed segment of this run has to do. Reads only; writes nothing.
@@ -1682,6 +2164,40 @@ class Engine:
             problems += log["problems"]
             if not log["events"]:
                 log = None                     # not this run's log
+
+        # discarded: accepted responses of earlier segments without a row
+        unmarked: list = []
+        if log is not None:
+            by_session = {s.session_id: s for s in specs}
+            for ck, n in sorted(log["accepted"].items(), key=lambda kv: _short(kv[0])):
+                n_lost = n - (1 if ck in rows["row_calls"] else 0)
+                if n_lost <= 0:
+                    continue
+                seg_k, session_id = ck[0], ck[1]
+                model_key = by_session[session_id].model_key
+                st = log["per_segment"].setdefault(seg_k, {k: _new_stats() for k in cfg.models})
+                st[model_key]["n_discarded"] += n_lost
+                if ck not in log["marked"]:
+                    call = dict(zip(("segment", "step", "round", "agent_id", "others_mean"),
+                                    (seg_k, *ck[2:])))
+                    unmarked += [(model_key, session_id, call)] * n_lost
+
+        # partial group games go on from their first round not accepted
+        by_label = {s.label: s for s in specs}
+        histories: dict = {}
+        resume_points: list[dict] = []
+        for label, prog in rows["progress"].items():
+            spec = by_label[label]
+            if spec.arm != "group":
+                resume_points.append({"unit": label, "from_round": None, "rounds_kept": 0,
+                                      "kept_from_segments": []})
+                continue
+            history, bad = self._history_from_rows(spec, prog["rounds"])
+            problems += bad
+            histories[label] = history
+            resume_points.append({"unit": label, "from_round": len(history) + 1,
+                                  "rounds_kept": len(history),
+                                  "kept_from_segments": prog["segments"]})
 
         # config: the previous summary's "config", else the last start event's;
         # an older summary is compared on the fields it has
@@ -1781,7 +2297,8 @@ class Engine:
                     "stop_reason": entry.get("stop_reason"), "duration_s": entry.get("duration_s")}
             # operational settings and code version, as the segment recorded them
             # (summary entry, else its start / resume event; absent before #46)
-            for k in ("stalled", "request_deadline_s", "stall_timeout_s", "code_version"):
+            for k in ("stalled", "request_deadline_s", "stall_timeout_s", "code_version", "lock",
+                      "resume_points", "n_discarded"):
                 if k in entry:
                     item[k] = entry[k]
                 elif k in started_by_seg.get(seg, {}):
@@ -1790,6 +2307,7 @@ class Engine:
                 by_model = log["per_segment"].get(seg, {})
                 item.update(cost_usd=sum(s["cost_usd"] for s in by_model.values()),
                             n_responses=sum(s["n_responses"] for s in by_model.values()),
+                            n_discarded=sum(s["n_discarded"] for s in by_model.values()),
                             per_model={cfg.models[k]: s for k, s in by_model.items()})
             else:
                 item.update(cost_usd=entry.get("cost_usd"), per_model=entry.get("per_model"))
@@ -1805,7 +2323,7 @@ class Engine:
         started = log["started"] if log is not None else set()
         return ResumePlan(
             segment=segment, prior_segments=sorted(known), n_units=len(specs),
-            complete=rows["complete"], partial=rows["partial"],
+            complete=rows["complete"], superseded=rows["superseded"], resume_points=resume_points,
             started_without_rows=[s.label for s in specs
                                   if s.label in started and s.label not in rows["units_with_rows"]],
             remaining=[s.label for s in specs if s.label not in rows["complete"]],
@@ -1813,8 +2331,14 @@ class Engine:
             cost_check=cost_check, segments=segments, n_rows=rows["n_rows"],
             rows_per_segment=rows["rows_per_segment"],
             results_ends_with_newline=rows["ends_with_newline"],
-            truncated_last_line=rows["truncated_last_line"], previous_summary=previous,
-            config_checked=checked, problems=list(dict.fromkeys(problems)))
+            truncated_last_line=rows["truncated_last_line"],
+            truncated_lines=rows["truncated_lines"], previous_summary=previous,
+            config_checked=checked, problems=list(dict.fromkeys(problems)),
+            histories=histories, unmarked_discarded=unmarked,
+            lock=read_run_lock(self._lock_path()))
+
+    def _lock_path(self) -> Path:
+        return self.cfg.output_dir() / f"{self.cfg.run}.lock"
 
     def _backup_path(self, previous: dict) -> Path:
         """<run>_summary.seg<k>.json, k = the last segment the summary describes."""
@@ -1825,6 +2349,7 @@ class Engine:
         self.segment = plan.segment
         self.prior_stats = {k: _merge_stats(s) for k, s in plan.prior_stats.items()}
         self.prior_extra_cost = plan.prior_extra_cost
+        self._histories = dict(plan.histories)
         for key, s in self.prior_stats.items():
             if (self.invalid_limit is not None
                     and s["n_invalid"] + s["n_parse_fail"] > self.invalid_limit):
@@ -1885,16 +2410,20 @@ class Engine:
         per_model = {self.cfg.models[k]: _merge_stats(self.prior_stats[k], s)
                      for k, s in self.stats.items()}
         duration = time.time() - started
-        units, superseded, rows = None, [], None
+        units, superseded, rows, truncated = None, [], None, []
         if results_path is not None and self._specs and Path(results_path).is_file():
             rows = self._scan_rows(Path(results_path), self._specs)
             done = rows["complete"]
-            superseded = [p for p in rows["partial"] if p["segment"] < self.segment]
+            superseded = rows["superseded"]
+            truncated = rows["truncated_lines"] + ([{
+                k: v for k, v in rows["truncated_last_line"].items() if k != "text"}]
+                if rows["truncated_last_line"] else [])
             units = {"n_units": len(self._specs), "n_complete": len(done),
                      "n_complete_this_segment": sum(1 for s in done.values() if s == self.segment),
-                     "n_partial_this_segment": sum(1 for p in rows["partial"]
-                                                   if p["segment"] == self.segment),
+                     "n_partial": len(rows["progress"]),
                      "n_remaining": len(self._specs) - len(done)}
+        resume_points = self.plan.resume_points if self.plan else []
+        lock = ({k: v for k, v in self.lock.items()} if self.lock else None)
         current = {
             "segment": self.segment, "summary_written": True, "stop_reason": self.stop_reason,
             "duration_s": duration, "cost_usd": self.segment_cost,
@@ -1902,9 +2431,10 @@ class Engine:
             "per_model": {self.cfg.models[k]: dict(s) for k, s in self.stats.items()},
             "n_rows": rows["rows_per_segment"].get(self.segment, 0) if rows else None,
             "n_units_completed": units["n_complete_this_segment"] if units else None,
+            "n_discarded": sum(s["n_discarded"] for s in self.stats.values()),
             "stalled": self.stalled,
             "request_deadline_s": self.deadline, "stall_timeout_s": self.stall_timeout,
-            "code_version": self.code_version,
+            "code_version": self.code_version, "lock": lock, "resume_points": resume_points,
         }
         out = {
             "run": self.cfg.run, "seed_namespace": self.cfg.seed_namespace,
@@ -1924,11 +2454,22 @@ class Engine:
             "duration_s": duration,
             "n_provider_error": sum(s["n_provider_error"] for s in per_model.values()),
             "n_provider_unknown": sum(s["n_provider_unknown"] for s in per_model.values()),
+            "n_discarded": sum(s["n_discarded"] for s in per_model.values()),
             "per_model": per_model,
             "units": units,
-            "superseded_units": superseded,
-            "row_validity_rule": ("a row counts only if its (unit, segment) holds the complete "
-                                  "unit; rows without a segment are segment 0"),
+            "resume_points": resume_points,
+            "superseded_rows": superseded,
+            "n_superseded_rows": sum(e["n_rows"] for e in superseded),
+            "truncated_lines": truncated,
+            "n_truncated_lines": len(truncated),
+            "lock": lock,
+            "row_validity_rule": (
+                "a row counts only if its round is accepted (pgg_game.Engine.valid_rows): "
+                "segments in order; a segment's rows of a unit replace the earlier rows from "
+                "its first round on; complete rounds are accepted in order, the first "
+                "incomplete round and the rest of that segment are superseded "
+                "(superseded_rows); rows without a segment are segment 0; cut-off lines "
+                "(truncated_lines) are no rows"),
             "segments": [*(self.plan.segments if self.plan else []), current],
             "unit_order": list(self.unit_order),
             "config": self.config_record(),
@@ -1964,15 +2505,18 @@ class Engine:
                  "run": self.cfg.run, "segment": self.segment,
                  "seed_namespace": self.cfg.seed_namespace, "output_dir": str(out_dir),
                  "request_deadline_s": self.deadline, "stall_timeout_s": self.stall_timeout,
-                 "code_version": self.code_version,
+                 "code_version": self.code_version, "lock": self.lock,
                  "unit_order": self.unit_order, "config": self.config_record()}
         if self.plan:
             p = self.plan
             event.update(
                 prior_segments=p.prior_segments, prior_cost_usd=p.prior_cost_usd,
                 prior_cost_source=p.prior_source, cost_check=p.cost_check,
-                n_units=p.n_units, n_complete=len(p.complete), superseded_units=p.partial,
-                started_without_rows=p.started_without_rows,
+                n_units=p.n_units, n_complete=len(p.complete), superseded_rows=p.superseded,
+                resume_points=p.resume_points, started_without_rows=p.started_without_rows,
+                n_discarded_found=len(p.unmarked_discarded),
+                truncated_last_line=({k: v for k, v in p.truncated_last_line.items()
+                                      if k != "text"} if p.truncated_last_line else None),
                 remaining_units=[s.label for s in todo], stopped_models=dict(self.stopped_models),
                 config_checked=p.config_checked,
                 summary_backup=str(backup) if backup else None)
@@ -2031,6 +2575,45 @@ class Engine:
         summary_path = out_dir / f"{cfg.run}_summary.json"
         self._specs = self.unit_specs()
         self.unit_order = [s.label for s in self._specs]
+        if resume:
+            if not path.is_file():
+                raise ValueError(f"nothing to resume: {path} does not exist")
+        else:
+            out_dir.mkdir(exist_ok=True)   # the parent exists (validate)
+        # no other process may run or resume this run at the same time
+        self.lock = acquire_run_lock(self._lock_path())
+        try:
+            return self._run_locked(resume, out_dir, path, summary_path)
+        finally:
+            release_run_lock(self.lock)
+
+    def _record_truncated(self, cut: dict) -> None:
+        """Record the cut-off last line in <run>.partial.jsonl (once), before a newline closes it."""
+        if (cut["line"], cut["sha256"]) in self._recorded_truncated():
+            return
+        rec = {"ts": time.time(), "run": self.cfg.run, "file": f"{self.cfg.run}.jsonl",
+               "found_in_segment": self.segment, **cut}
+        with open(self._partial_path(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+
+    def _close_raw_log_line(self) -> bool:
+        """End a raw log whose last record was cut off with a newline; True if one was added."""
+        try:
+            with open(self.llm.LOG_PATH, "rb") as f:
+                f.seek(-1, os.SEEK_END)
+                last = f.read(1)
+        except (OSError, TypeError, ValueError):       # missing or empty
+            return False
+        if last == b"\n":
+            return False
+        with open(self.llm.LOG_PATH, "ab") as f:
+            f.write(b"\n")
+        return True
+
+    def _run_locked(self, resume: bool, out_dir: Path, path: Path, summary_path: Path) -> Path:
+        cfg = self.cfg
         backup = None
         if resume:
             # everything is checked before the first call and the first write
@@ -2042,21 +2625,32 @@ class Engine:
             backup = self._backup_summary(summary_path)
             todo = [s for s in self._specs if s.label not in plan.complete]
         else:
-            out_dir.mkdir(exist_ok=True)   # the parent exists (validate)
             todo = self._specs
         started = time.time()
         # "x": never overwrite a run; "a": a resumed run only appends
         with open(path, "a" if resume else "x", encoding="utf-8") as out:
+            if resume and self.plan.truncated_last_line:
+                self._record_truncated(self.plan.truncated_last_line)
             if resume and not self.plan.results_ends_with_newline:
                 out.write("\n")            # a cut-off last line stays as it is, on its own
+                out.flush()
             log_path = cfg.raw_log_path()
             previous_log = self.llm.set_log_path(log_path) if log_path else None
+            self._run_log = Path(self.llm.LOG_PATH)
             self._out = out
             handlers: dict = {}
             try:
                 try:
                     self._catch_signals(handlers)
-                    self.llm._append_log(self._start_event(out_dir, todo, backup))
+                    raw_closed = self._close_raw_log_line()
+                    self.llm._append_log({**self._start_event(out_dir, todo, backup),
+                                          "raw_log_cut_line_closed": raw_closed})
+                    if self.lock.get("stale_lock"):
+                        self._log({"ts": time.time(), "event": "pgg_stale_lock_taken_over",
+                                   "run": cfg.run, "segment": self.segment, "lock": self.lock})
+                    for model_key, session_id, call in (self.plan.unmarked_discarded
+                                                        if self.plan else []):
+                        self._discard(model_key, session_id, call, "found_on_resume")
                     units = self.units(todo)
                     # units in a pool (in order when parallel_units is 1); the
                     # main thread watches for a stall and receives the signals
@@ -2282,26 +2876,59 @@ def resume_report(engine: Engine, plan: ResumePlan) -> str:
     cfg = engine.cfg
     specs = {s.label: s for s in engine.unit_specs()}
     remaining = [specs[label] for label in plan.remaining]
+    points = {p["unit"]: p for p in plan.resume_points}
     never = [s for s in remaining if s.label not in plan.started_without_rows
-             and s.label not in {p["unit"] for p in plan.partial}]
+             and s.label not in points]
+    cut = plan.truncated_last_line
     lines = [
         f"SÜRDÜRME PLANI (salt okunur: API çağrısı yok, hiçbir dosya yazılmadı): {cfg.output_dir()}",
         f"Önceki segmentler: {plan.prior_segments}; sürdürülürse yeni segment: {plan.segment}",
         f"Sonuç dosyası: {plan.n_rows} satır (segment başına {plan.rows_per_segment}); "
-        f"son satır {'yarım kesilmiş' if plan.truncated_last_line else 'tam'}",
+        + (f"son satır yarım kesilmiş (satır {cut['line']}, {cut['n_bytes']} bayt; sürdürmede "
+           f"{cfg.run}.partial.jsonl'a kaydedilir, dosyada kalır)" if cut else "son satır tam")
+        + (f"; daha önce kaydedilmiş yarım satır {len(plan.truncated_lines)} "
+           f"(satır {[t['line'] for t in plan.truncated_lines]}, yok sayılır)"
+           if plan.truncated_lines else ""),
         f"Birimler: toplam {plan.n_units}; tamam {len(plan.complete)}; "
-        f"yarım (satırı var, baştan koşulacak) {len(plan.partial)}; "
+        f"yarım (kaldığı turdan sürer) {len(points)}; "
         f"satırsız başlamış (çağrı var, satır yok) {len(plan.started_without_rows)}; "
         f"hiç başlanmamış {len(never)}; kalan (koşulacak) {len(remaining)}",
-        "Tamamlanma kuralı: bir birim, tek bir segmentte beklenen satırların hepsi varsa tamamdır "
-        "(grup: tur x ajan katkı satırı, P'de ceza satırı da; izole: her koşul değeri bir satır).",
+        "Geçerlilik kuralı: segmentler sırayla okunur; bir segmentin bir birime ait satırları "
+        "başladığı turdan itibaren öncekilerin yerine geçer; tamamlanmış turlar (turun bütün "
+        "ajan satırları, P'de ceza satırları da) sırayla kabul edilir, ilk eksik tur ve "
+        "segmentin geri kalanı superseded olur. Birim, her turu kabul edilmişse tamamdır "
+        "(izole çizelge tek blok: her koşul değeri bir satır).",
     ]
     for label, seg in plan.complete.items():
         lines.append(f"  tamam: {label} (segment {seg})")
-    for p in plan.partial:
-        lines.append(f"  yarım -> superseded: {p['unit']} (segment {p['segment']}, {p['n_rows']} satır)")
+    for p in plan.resume_points:
+        if p["from_round"] is None:
+            lines.append(f"  yarım -> baştan: {p['unit']} (izole çizelge)")
+        else:
+            lines.append(f"  yarım -> {p['from_round']}. turdan sürer: {p['unit']} "
+                         f"(tur 1-{p['rounds_kept']} korunur, segment {p['kept_from_segments']})"
+                         if p["rounds_kept"] else
+                         f"  yarım -> 1. turdan: {p['unit']} (kabul edilmiş tur yok)")
+    for p in plan.superseded:
+        rounds = f", tur {p['rounds']}" if p["rounds"] is not None else ""
+        lines.append(f"  superseded: {p['unit']} (segment {p['segment']}{rounds}, "
+                     f"{p['n_rows']} satır)")
     for label in plan.started_without_rows:
         lines.append(f"  satırsız başlamış: {label}")
+    n_disc = {k: st.get("n_discarded", 0) for k, st in plan.prior_stats.items()}
+    lines.append(f"Atılan (discarded) yanıtlar — kabul edilmiş ama satıra dönüşmemiş, maliyeti "
+                 f"bütçede: {sum(n_disc.values())} ({', '.join(f'{k} {n}' for k, n in n_disc.items())}"
+                 f"); ham logda henüz işaretsiz {len(plan.unmarked_discarded)} (sürdürmede "
+                 "found_on_resume olarak işaretlenir)")
+    lock = plan.lock
+    if lock is None:
+        lines.append("Kilit: yok")
+    else:
+        what = {"alive": "sahibi yaşıyor — sürdürme şu an BAŞLAMAZ",
+                "stale": "bayat (sahibi ölü) — sürdürmede devralınır ve loglanır",
+                "unknown": "doğrulanamıyor (başka makine ya da okunamıyor) — sürdürme başlamaz"}
+        lines.append(f"Kilit: PID {lock.get('pid')} ({lock.get('host')}, "
+                     f"{lock.get('started_at_utc')}): {what[lock['state']]}")
     budget = cfg.budget_usd
     lines.append(f"Önceki maliyet: {plan.prior_cost_usd:.6f} USD (kaynak: {plan.prior_source}; "
                  f"kontrol: {plan.cost_check})"
@@ -2315,9 +2942,12 @@ def resume_report(engine: Engine, plan: ResumePlan) -> str:
            if limit is not None and s["n_invalid"] + s["n_parse_fail"] > limit else "")
         for k, s in plan.prior_stats.items()) + (f" (geçersiz sınırı {limit})" if limit else ""))
     calls: dict[str, dict[str, int]] = {k: {} for k in cfg.models}
+    rounds = cfg.params.rounds
     for spec in remaining:
+        kept = points.get(spec.label, {}).get("rounds_kept", 0) if spec.arm == "group" else 0
         for kind, n in spec.calls_by_kind:
-            calls[spec.model_key][kind] = calls[spec.model_key].get(kind, 0) + n
+            n_left = n * (rounds - kept) // rounds       # group kinds are per round
+            calls[spec.model_key][kind] = calls[spec.model_key].get(kind, 0) + n_left
     total_calls, total_cost, priced = 0, 0.0, True
     parts = []
     for key, by_kind in calls.items():
@@ -2435,15 +3065,17 @@ def main(argv=None) -> int:
               file=sys.stderr)
     try:
         path = engine.run(resume=args.resume)
-    except ValueError as e:                  # resume refused before any call
+    except (ValueError, RunLocked) as e:     # refused before any call
         print(f"HATA: {e}", file=sys.stderr)
         return 1
     except (RunAborted, RunStopped) as e:
         print(f"HATA: {e}", file=sys.stderr)
         _print_files(engine.files, file=sys.stderr)
+        _warn_stale_lock(engine)
         if engine.stalled:
             _exit_after_stall(1)
         return 1
+    _warn_stale_lock(engine)
     if engine.stopped_models:
         print(f"UYARI: durdurulan modeller: {engine.stopped_models}", file=sys.stderr)
         print(f"yazıldı: {path}")
@@ -2452,6 +3084,13 @@ def main(argv=None) -> int:
     print(f"yazıldı: {path}")
     _print_files(engine.files)
     return 0
+
+
+def _warn_stale_lock(engine: Engine) -> None:
+    stale = (engine.lock or {}).get("stale_lock")
+    if stale:
+        print(f"UYARI: bayat kilit devralındı (PID {stale.get('pid')} yaşamıyordu); "
+              "ham logda pgg_stale_lock_taken_over", file=sys.stderr)
 
 
 def _exit_after_stall(code: int) -> None:

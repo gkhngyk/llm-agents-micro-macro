@@ -429,6 +429,7 @@ def _call_llm_counted(
     timeout: float | None = None,
     request_deadline_s: float | None = None,
     on_late_response=None,
+    call_info: dict | None = None,
 ) -> tuple[dict, int, int]:
     """call_llm that also returns the parse failures and provider errors it retried.
 
@@ -463,6 +464,10 @@ def _call_llm_counted(
     billed) is logged as a "late_response" event, never used as a decision;
     on_late_response(info) then runs in the attempt's thread. All records of
     the call go to the log file that was set when the call started.
+
+    call_info: a dict that identifies the decision this call is for (e.g.
+    pgg_game's segment / step / round / agent); written as "call" into every
+    record of the call, so that a reader can match records to result rows.
     """
     deadline_s = DEFAULT_REQUEST_DEADLINE_S if request_deadline_s is None else request_deadline_s
     if not deadline_s > 0:
@@ -479,6 +484,7 @@ def _call_llm_counted(
     if provider is not None:
         body["provider"] = provider
     effort_label = reasoning_effort_label(reasoning_effort)
+    tag = {} if call_info is None else {"call": call_info}
 
     last_err = None
     last_finish_reason = None
@@ -514,7 +520,7 @@ def _call_llm_counted(
                 "model_snapshot": getattr(late_resp, "model", None),
                 "finish_reason": _finish_reason(late_resp),
                 "reasoning_effort": effort_label,
-                "provider": provider_name, "provider_quantization": quantization,
+                "provider": provider_name, "provider_quantization": quantization, **tag,
             }, log_path)
             if on_late_response is not None:
                 on_late_response(_response_info(late_resp))
@@ -551,7 +557,7 @@ def _call_llm_counted(
                 "error_type": type(e).__name__, "error_kind": kind,
                 "error": str(e), "attempt": attempt, "retrying": True,
                 "finish_reason": _finish_reason(resp),
-                "reasoning_effort": effort_label,
+                "reasoning_effort": effort_label, **tag,
             }
             if isinstance(e, openai.APIStatusError):
                 record["status_code"] = e.status_code
@@ -578,7 +584,7 @@ def _call_llm_counted(
             "attempt": attempt, "degraded": degraded,
             "finish_reason": _finish_reason(resp),
             "reasoning_effort": effort_label,
-            "provider": provider_name, "provider_quantization": quantization,
+            "provider": provider_name, "provider_quantization": quantization, **tag,
         }, log_path)
         if on_response is not None:
             on_response(_response_info(resp))
@@ -595,7 +601,7 @@ def _call_llm_counted(
         "error_type": type(last_err).__name__, "error_kind": _error_kind(last_err),
         "error": str(last_err), "attempt": max_retries, "messages": messages,
         "finish_reason": last_finish_reason,
-        "reasoning_effort": effort_label,
+        "reasoning_effort": effort_label, **tag,
     }
     if isinstance(last_err, openai.APIStatusError):
         final["status_code"] = last_err.status_code
@@ -625,6 +631,7 @@ def call_llm(
     timeout: float | None = None,
     request_deadline_s: float | None = None,
     on_late_response=None,
+    call_info: dict | None = None,
 ) -> dict:
     """Call OpenRouter with structured JSON output. Retries on transient errors.
 
@@ -650,7 +657,7 @@ def call_llm(
         reasoning_effort=reasoning_effort, meta=meta,
         before_call=before_call, on_response=on_response,
         provider=provider, timeout=timeout, request_deadline_s=request_deadline_s,
-        on_late_response=on_late_response)
+        on_late_response=on_late_response, call_info=call_info)
     return parsed
 
 
@@ -674,6 +681,7 @@ def call_llm_valid(
     counts: dict | None = None,
     request_deadline_s: float | None = None,
     on_late_response=None,
+    call_info: dict | None = None,
 ) -> tuple[dict, int] | tuple[dict, int, int]:
     """call_llm, re-requesting payloads for which is_valid(parsed) is False.
 
@@ -687,8 +695,8 @@ def call_llm_valid(
     "n_parse_fail" and "n_provider_error" (provider-error responses retried;
     a third separate count), also when the call finally fails.
 
-    reasoning_effort, meta, provider, timeout, request_deadline_s and the
-    before_call / on_response / on_late_response hooks are passed through to
+    reasoning_effort, meta, provider, timeout, request_deadline_s, call_info
+    and the before_call / on_response / on_late_response hooks are passed through to
     the underlying call; meta ends up holding the metadata of the accepted
     (last) response.
     """
@@ -706,7 +714,7 @@ def call_llm_valid(
                 reasoning_effort=reasoning_effort, meta=meta,
                 before_call=before_call, on_response=on_response,
                 provider=provider, timeout=timeout, request_deadline_s=request_deadline_s,
-                on_late_response=on_late_response)
+                on_late_response=on_late_response, call_info=call_info)
         except RuntimeError as e:
             if counts is not None:
                 counts.update(
@@ -727,6 +735,7 @@ def call_llm_valid(
             "ts": time.time(), "model": model, "session_id": session_id,
             "event": "invalid_payload", "invalid": True,
             "n_invalid": n_invalid, "response_parsed": call,
+            **({} if call_info is None else {"call": call_info}),
         }, log_path)
     if counts is not None:
         counts["n_invalid"] = max_invalid + 1

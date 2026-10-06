@@ -1,7 +1,8 @@
 """Mock tests of resuming an interrupted run (--resume) and of SIGINT / SIGTERM.
 
-(a) complete units are not called again; (b) a partial unit runs again from
-its start and the earlier rows stay byte for byte; (c) budget and invalid-rate
+(a) complete units are not called again; (b) a partial group game goes on from
+its first round not complete and the earlier rows stay byte for byte (more on
+round-level resume in test_pgg_resume_rounds.py); (c) budget and invalid-rate
 cap go on across segments; (d) a config difference stops before any call;
 (e) a signal gives stop_reason "interrupted". No network, no ../.env.
 """
@@ -102,11 +103,11 @@ class ResumeBase(GuardTestBase):
 
 
 # --------------------------------------------------------------------------
-# (a) + (b) complete units skipped, partial unit re-run, earlier bytes kept
+# (a) + (b) complete units skipped, partial unit goes on, earlier bytes kept
 # --------------------------------------------------------------------------
 
 class ResumeUnits(ResumeBase):
-    def test_complete_units_are_skipped_and_partial_unit_reruns(self):
+    def test_complete_units_are_skipped_and_partial_unit_goes_on_from_its_round(self):
         first, _ = self.interrupted_run()
         specs = first.unit_specs()
         self.assertEqual([s.arm for s in specs], ["group"] * 4 + ["isolated"] * 4)
@@ -120,40 +121,42 @@ class ResumeUnits(ResumeBase):
         path = engine.run(resume=True)
         self.assertEqual(path, self.results)
 
-        # (a) only unit 2 (again, from round 1) and the untouched units are called
+        # (a) only unit 2 (from round 2: round 1 is complete) and the untouched units
         called = set(_sessions(api))
         self.assertTrue(called.isdisjoint({specs[0].session_id, specs[1].session_id}))
         self.assertEqual(called, {s.session_id for s in specs[2:]})
-        self.assertEqual(len(api.calls), 8 + 8 + 4 * 5)
+        self.assertEqual(len(api.calls), 4 + 8 + 4 * 5)
 
         # (b) append-only: the old file is a byte-for-byte prefix of the new one
         new_bytes = self.results.read_bytes()
         self.assertEqual(new_bytes[:len(old_bytes)], old_bytes)
         new_rows = _rows(self.results)[len(old_rows):]
         self.assertEqual({r["segment"] for r in new_rows}, {1})
-        self.assertEqual(len(new_rows), 8 + 8 + 4 * 5)
-        # the partial unit runs again with the same seeds and session id
-        old_u2 = {(r["round"], r["agent_id"]): r for r in old_rows if r["unit"] == specs[2].label}
-        new_u2 = {(r["round"], r["agent_id"]): r for r in new_rows if r["unit"] == specs[2].label}
-        self.assertEqual(len(old_u2), 4)
-        self.assertEqual(len(new_u2), 8)
-        for key, row in old_u2.items():
-            self.assertEqual((new_u2[key]["seed"], new_u2[key]["session_id"]),
-                             (row["seed"], row["session_id"]))
+        self.assertEqual(len(new_rows), 4 + 8 + 4 * 5)
+        # unit 2: round 1 kept from segment 0, round 2 played in segment 1
+        old_u2 = {(r["round"], r["agent_id"]) for r in old_rows if r["unit"] == specs[2].label}
+        new_u2 = {(r["round"], r["agent_id"]) for r in new_rows if r["unit"] == specs[2].label}
+        self.assertEqual(old_u2, {(1, a) for a in range(1, 5)})
+        self.assertEqual(new_u2, {(2, a) for a in range(1, 5)})
 
-        superseded = [{"unit": specs[2].label, "segment": 0, "n_rows": 4}]
+        point = [{"unit": specs[2].label, "from_round": 2, "rounds_kept": 1,
+                  "kept_from_segments": [0]}]
         summary = self.summary_now()
         self.assertEqual(summary["segment"], 1)
         self.assertTrue(summary["resumed"])
         self.assertIsNone(summary["stop_reason"])
-        self.assertEqual(summary["superseded_units"], superseded)
+        self.assertEqual(summary["superseded_rows"], [])
+        self.assertEqual(summary["resume_points"], point)
         self.assertEqual(summary["units"], {"n_units": 8, "n_complete": 8,
                                             "n_complete_this_segment": 6,
-                                            "n_partial_this_segment": 0, "n_remaining": 0})
+                                            "n_partial": 0, "n_remaining": 0})
         self.assertEqual([s["segment"] for s in summary["segments"]], [0, 1])
         self.assertEqual([s["stop_reason"] for s in summary["segments"]], ["interrupted", None])
-        self.assertEqual([s["n_rows"] for s in summary["segments"]], [20, 36])
-        self.assertEqual(summary["files"]["results"]["lines"], 56)
+        self.assertEqual([s["n_rows"] for s in summary["segments"]], [20, 32])
+        # the answer of round 2 agent 1 of segment 0 never became a row
+        self.assertEqual([s["n_discarded"] for s in summary["segments"]], [1, 0])
+        self.assertEqual(summary["n_discarded"], 1)
+        self.assertEqual(summary["files"]["results"]["lines"], 52)
         self.assertEqual(summary["files"]["raw_log"]["lines"],
                          len(self.raw.read_text().splitlines()))
         # the previous summary was kept before it was replaced
@@ -164,7 +167,8 @@ class ResumeUnits(ResumeBase):
         resume = self.raw_events("pgg_run_resume")
         self.assertEqual(len(resume), 1)
         self.assertEqual(resume[0]["segment"], 1)
-        self.assertEqual(resume[0]["superseded_units"], superseded)
+        self.assertEqual(resume[0]["superseded_rows"], [])
+        self.assertEqual(resume[0]["resume_points"], point)
         self.assertEqual(resume[0]["n_complete"], 2)
         self.assertEqual(resume[0]["remaining_units"], [s.label for s in specs[2:]])
 
@@ -180,7 +184,8 @@ class ResumeUnits(ResumeBase):
         summary = self.summary_now()
         self.assertEqual(summary["segment"], 2)
         self.assertEqual([s["segment"] for s in summary["segments"]], [0, 1, 2])
-        self.assertEqual(summary["superseded_units"][0]["segment"], 0)
+        self.assertEqual(summary["resume_points"], [])
+        self.assertEqual(summary["segments"][1]["resume_points"][0]["from_round"], 2)
         self.assertTrue((self.run_dir / "r1_summary.seg0.json").exists())
         self.assertEqual(json.loads((self.run_dir / "r1_summary.seg1.json").read_text())["segment"], 1)
 
@@ -190,7 +195,7 @@ class ResumeUnits(ResumeBase):
             f.write(b'{"run": "r1", "half a ro')      # killed while writing
         old = self.results.read_bytes()
         plan = Engine(self.rcfg(), llm=pgg_game.OfflineLLM()).resume_plan()
-        self.assertTrue(plan.truncated_last_line)
+        self.assertEqual(plan.truncated_last_line["line"], 21)
         self.assertEqual(plan.problems, [])
         engine, _ = self.resume()
         engine.run(resume=True)
@@ -223,7 +228,7 @@ class ResumeUnits(ResumeBase):
             json.dumps({k: v for k, v in r.items() if k not in ("segment", "unit")}) + "\n"
             for r in rows))
         summary = self.summary_now()
-        for k in ("config", "segments", "segment", "resumed", "units", "superseded_units",
+        for k in ("config", "segments", "segment", "resumed", "units", "superseded_rows",
                   "row_validity_rule", "segment_cost_usd"):
             summary.pop(k)
         self.summary_path.write_text(json.dumps(summary))
@@ -240,8 +245,10 @@ class ResumeUnits(ResumeBase):
         self.assertIn("unit_order", plan.config_checked)
         self.assertIn("max_tokens", plan.config_checked)
         self.assertEqual(len(plan.complete), 2)
-        self.assertEqual(plan.partial, [{"unit": first.unit_specs()[2].label, "segment": 0,
-                                         "n_rows": 4}])
+        self.assertEqual(plan.superseded, [])
+        self.assertEqual(plan.resume_points, [{"unit": first.unit_specs()[2].label,
+                                               "from_round": 2, "rounds_kept": 1,
+                                               "kept_from_segments": [0]}])
         # a changed card text is found in the raw log of the earlier segment
         changed = Card(CARD_A.card_id, CARD_A.style, CARD_A.text + " Changed.")
         bad = Engine(self.rcfg(cards=[changed, CARD_B]), llm=pgg_game.OfflineLLM()).resume_plan()
@@ -249,7 +256,7 @@ class ResumeUnits(ResumeBase):
 
         engine, api = self.resume()
         engine.run(resume=True)
-        self.assertEqual(len(api.calls), 36)
+        self.assertEqual(len(api.calls), 32)
         self.assertEqual(self.results.read_bytes()[:len(old)], old)
         self.assertEqual(self.summary_now()["units"]["n_complete"], 8)
 
@@ -351,7 +358,7 @@ class ResumeConfig(ResumeBase):
         # operational settings may change
         engine, api = self.resume(workers=2, parallel_units=2, request_timeout_s=99)
         engine.run(resume=True)
-        self.assertEqual(len(api.calls), 36)
+        self.assertEqual(len(api.calls), 32)
 
     def test_rows_of_another_design_are_refused(self):
         self.interrupted_run()
@@ -434,9 +441,11 @@ class ResumeDryRun(ResumeBase):
             code = pgg_game.main(argv)
         text = out.getvalue()
         self.assertEqual(code, 0, text)
-        self.assertIn("tamam 1; yarım (satırı var, baştan koşulacak) 1", text)
+        self.assertIn("tamam 1; yarım (kaldığı turdan sürer) 1", text)
         self.assertIn("kalan (koşulacak) 3", text)
-        self.assertIn("gemini 18; toplam 18", text)               # 8 + 5 + 5
+        self.assertIn("2. turdan sürer", text)
+        self.assertIn("gemini 14; toplam 14", text)               # 4 (round 2) + 5 + 5
+        self.assertIn("Kilit: yok", text)
         self.assertIn("yeni segment: 1", text)
         self.assertIn("Config tutarlı", text)
         self.assertEqual(_tree(self.tmp), before)
