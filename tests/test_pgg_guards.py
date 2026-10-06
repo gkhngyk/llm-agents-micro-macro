@@ -156,7 +156,7 @@ class PilotConfig(GuardTestBase):
         self.create.assert_not_called()
         self.assertEqual(text.count("540 çağrı (contribute_N=480, isolated=60)"), 3)
         self.assertIn("1620 çağrı", text)
-        self.assertIn("~0.38 USD", text)
+        self.assertIn("~0.6364 USD", text)
         self.assertIn("reasoning_effort=gönderilmez", text)
         self.assertIn("max_tokens=16000", text)
         self.assertIn("request_timeout_s=300", text)

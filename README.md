@@ -120,6 +120,12 @@ git archive <sha> | tar -x -C /abs/workspace/_kod_<sha>
 .venv/bin/python pgg_game.py --write-code-version /abs/workspace/_kod_<sha> --code-commit <sha>
 ```
 
-`--dry-run` takes prices and token estimates from `pgg_cost.py` (copied from
-`maliyet_analizi.md`, every figure is an estimate) and never imports
-`llm_client`.
+`--dry-run` takes prices and token counts from `pgg_cost.py`, calibrated on
+pilot v2 (`configs/cost_calibration_pilot_v2.json`: mean and p95 per model x
+call kind, paid-but-invalid share; Mistral entries are marked estimates).
+Every figure is still an estimate. It never imports `llm_client`. Re-derive
+the calibration (reads the run directory only):
+
+```
+.venv/bin/python pgg_cost_calibrate.py --run-dir /abs/workspace/runs/pilot_v2_20261005
+```

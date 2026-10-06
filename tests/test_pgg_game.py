@@ -505,19 +505,19 @@ class DryRun(EngineTestBase):
         self.assertIn("(tahmin)", text)
         self.assertIn("contribute_N=480", text)
         self.assertIn("isolated=60", text)
-        self.assertIn("maliyet_analizi.md", text)
+        self.assertIn("cost_calibration_pilot_v2.json", text)
 
-    def test_pilot_cost_matches_cost_analysis(self):
+    def test_pilot_cost_matches_calibration(self):
         counts = pgg_cost.call_counts(n_cells=6)
         self.assertEqual(counts, {"contribute_N": 480, "contribute_P": 0, "punish_P": 0,
                                   "isolated": 60})
         est = pgg_cost.estimate(pgg_cost.PILOT_V2_MODELS, counts)
         by_model = {k: m["cost_usd"] for k, m in est["per_model"].items()}
-        # maliyet_analizi.md §4: pilot 0,18 / 0,13 / 0,07 = 0,38 USD
-        self.assertAlmostEqual(by_model["deepseek"], 0.18, delta=0.01)
-        self.assertAlmostEqual(by_model["gpt"], 0.13, delta=0.01)
-        self.assertAlmostEqual(by_model["gemini"], 0.07, delta=0.005)
-        self.assertAlmostEqual(est["total_cost_usd"], 0.38, delta=0.01)
+        # billed usage.cost of pilot v2 per model (summary per_model, task B4)
+        self.assertAlmostEqual(by_model["deepseek"], 0.5174, delta=0.001)
+        self.assertAlmostEqual(by_model["gpt"], 0.0681, delta=0.001)
+        self.assertAlmostEqual(by_model["gemini"], 0.0510, delta=0.001)
+        self.assertAlmostEqual(est["total_cost_usd"], 0.6364, delta=0.001)
         self.assertEqual(est["total_calls"], 1620)
 
     def test_counts_for_other_designs(self):
@@ -545,7 +545,8 @@ class DryRun(EngineTestBase):
         self.assertEqual(pgg_cost.PILOT_V2_MODELS, llm_client.MODELS_PILOT_V2)
         self.assertEqual(pgg_cost.KNOWN_MODELS, llm_client.MODELS_KNOWN)
         self.assertEqual(set(pgg_cost.PRICES_USD_PER_M), set(llm_client.MODELS_KNOWN.values()))
-        self.assertEqual(set(pgg_cost.REASONING_TOKENS), set(llm_client.MODELS_KNOWN.values()))
+        self.assertEqual(set(pgg_cost.CALIBRATION["models"]),
+                         set(llm_client.MODELS_KNOWN.values()))
 
     def test_unknown_model_is_an_error(self):
         with self.assertRaises(ValueError):

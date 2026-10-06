@@ -3168,6 +3168,20 @@ def dry_run_report(*, models: dict[str, str], n_cells: int, params: GameParams,
     return report
 
 
+def example_estimate_report(models: dict[str, str], max_tokens: int | None = None) -> str:
+    """Cost of these models at the pilot v2 volume, for a config whose design is
+    still a placeholder: an example, not this config's count."""
+    counts = pgg_cost.call_counts(n_cells=6)          # pilot v2: 540 calls per model
+    report = pgg_cost.format_report(pgg_cost.estimate(models, counts), description=(
+        "ÖRNEK (tahmin): tasarım seçilmediği için pilot v2 hacmi varsayıldı — model başına "
+        "540 çağrı (6 hücre x 2 grup x 4 ajan x 10 tur + 6 hücre x 2 tekrar x 5 değer); "
+        "bu config'in çağrı sayısı değil."))
+    report = report.split("\n", 1)[1]                 # the caller printed the header
+    if max_tokens:
+        report += "\n" + pgg_cost.format_ceiling(models, counts, max_tokens)
+    return report
+
+
 def resolve_output(s: dict) -> dict:
     """RunConfig output fields of a real run; ValueError when not known or not usable.
 
@@ -3474,8 +3488,7 @@ def resume_report(engine: Engine, plan: ResumePlan) -> str:
         n = sum(by_kind.values())
         total_calls += n
         try:
-            total_cost += sum(n_k * pgg_cost.cost_per_call(cfg.models[key], kind)
-                              for kind, n_k in by_kind.items())
+            total_cost += pgg_cost.model_cost(cfg.models[key], by_kind)["cost_usd"]
         except KeyError:
             priced = False
         parts.append(f"{key} {n}")
@@ -3569,6 +3582,7 @@ def main(argv=None) -> int:
                   f"ÇAĞRI SAYISI HESAPLANAMADI: şu ayarlar henüz seçilmedi (yer tutucu): "
                   f"{', '.join(blockers)}. Modeller: "
                   + ", ".join(f"{k}={v}" for k, v in models.items()))
+            print("\n" + example_estimate_report(models, s.get("max_tokens")))
         else:
             if s.get("cards") and not is_placeholder(s["cards"]):
                 n_cells = len(load_cards(s["cards"], cities))

@@ -97,26 +97,30 @@ class MiniPilotConfig(unittest.TestCase):
         self.assertEqual(pgg_game.resolve_models(pilot["models"], llm_client.MODELS_KNOWN),
                          llm_client.MODELS_PILOT_V2)
 
-    def test_mistral_cost_has_price_but_no_estimate_yet(self):
+    def test_mistral_cost_is_a_marked_estimate(self):
         self.assertEqual(pgg_cost.PRICES_USD_PER_M[MISTRAL], (0.68, 2.09))
-        self.assertIsNone(pgg_cost.REASONING_TOKENS[MISTRAL])
-        with self.assertRaises(KeyError):
-            pgg_cost.cost_per_call(MISTRAL, "isolated")
+        self.assertEqual(pgg_cost.price(MISTRAL)[:2], (0.68, 2.09))
+        entry = pgg_cost.CALIBRATION["models"][MISTRAL]
+        self.assertIs(entry["estimate"], True)
+        self.assertEqual(entry["kinds"]["isolated"]["reasoning_tokens"]["mean"], 0)  # task #59
         counts = pgg_cost.call_counts(n_cells=6)
         est = pgg_cost.estimate(pgg_cost.PILOT_MODELS, counts)
-        self.assertIsNone(est["per_model"]["mistral"]["cost_usd"])
-        self.assertEqual(est["unpriced"], ["mistral"])
+        self.assertEqual(est["unpriced"], [])
+        self.assertIs(est["per_model"]["mistral"]["estimate"], True)
+        self.assertIs(est["per_model"]["deepseek"]["estimate"], False)
         self.assertEqual(est["total_calls"], 1620)
-        known = sum(est["per_model"][k]["cost_usd"] for k in ("deepseek", "gpt"))
-        self.assertAlmostEqual(est["total_cost_usd"], known)
+        self.assertAlmostEqual(est["total_cost_usd"],
+                               sum(m["cost_usd"] for m in est["per_model"].values()))
         text = pgg_cost.format_report(est)
-        self.assertIn("maliyet tahmini yok", text)
-        self.assertIn("mistral HARİÇ", text)
-        # the max_tokens ceiling only needs the price
+        self.assertNotIn("maliyet tahmini yok", text)
+        self.assertIn("mistral: pilot verisi yok", text)
+        self.assertIn("endpoints list price", text)
+        # the max_tokens ceiling: listed price, calibrated mean prompt tokens
+        prompt = {k: entry["kinds"][k]["prompt_tokens"]["mean"] for k in ("contribute_N", "isolated")}
         ceiling = pgg_cost.ceiling({"mistral": MISTRAL}, counts, 16000)
         self.assertAlmostEqual(ceiling["mistral"],
-                               (480 * (1120 * 0.68 + 16000 * 2.09)
-                                + 60 * (630 * 0.68 + 16000 * 2.09)) / 1e6)
+                               (480 * (prompt["contribute_N"] * 0.68 + 16000 * 2.09)
+                                + 60 * (prompt["isolated"] * 0.68 + 16000 * 2.09)) / 1e6)
 
 
 class MiniPilotRuns(GuardTestBase):
@@ -239,9 +243,11 @@ class MiniPilotRuns(GuardTestBase):
         self.assertEqual(code, 0, err)
         self.assertEqual(out.count("540 çağrı (contribute_N=480, isolated=60)"), 3)
         self.assertIn("1620 çağrı", out)
-        self.assertIn("maliyet tahmini yok", out)
-        self.assertIn("mistral HARİÇ", out)
+        self.assertNotIn("maliyet tahmini yok", out)
+        self.assertNotIn("HARİÇ", out)
+        self.assertIn("mistral: pilot verisi yok", out)
         self.assertNotIn("HESAPLANAMADI", out)
+        self.assertNotIn("ÖRNEK (tahmin)", out)
         # a placeholder cards file does not block when --cells is given
         code, out, _ = self.main(
             "--dry-run", "--config", str(MINIPILOT_CONFIG), "--cells", "2", "--conditions", "N",
@@ -265,7 +271,7 @@ class MiniPilotRuns(GuardTestBase):
         self.assertEqual(code, 0, err)
         self.assertEqual(out.count("540 çağrı (contribute_N=480, isolated=60)"), 3)
         self.assertIn("gemini", out)
-        self.assertIn("~0.38 USD (tahmin)", out)
+        self.assertIn("~0.6364 USD (tahmin)", out)
         self.assertNotIn("ÖN KAYIT", out)
         self.assertNotIn("HARİÇ", out)
 
