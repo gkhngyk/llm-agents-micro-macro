@@ -137,7 +137,7 @@ class RequestDeadline(LoggingTestBase):
                                       is_valid=lambda c: True, counts=counts,
                                       request_deadline_s=0.05)
         self.assertEqual(counts, {"n_invalid": 0, "n_parse_fail": 0, "n_provider_error": 0,
-                                  "n_transport": 0, "n_deadline": 4})
+                                  "n_transport": 0, "n_deadline": 4, "n_provider_mismatch": 0})
         # released: every abandoned thread ends; an error after the deadline logs nothing
         n = len(self.records())
         hang.release()
@@ -299,7 +299,8 @@ class StallWatchdog(ResumeBase):
         seg = summary["segments"][-1]
         self.assertEqual((seg["stop_reason"], seg["stalled"]), ("stalled", True))
         self.assertEqual((seg["request_deadline_s"], seg["stall_timeout_s"]), (60, 0.3))
-        self.assertEqual(set(seg["code_version"]), {"git_commit", "git_dirty", "files_sha256"})
+        self.assertLessEqual({"git_commit", "git_dirty", "files_sha256", "source", "code_dir"},
+                             set(seg["code_version"]))
         self.assertEqual(set(seg["code_version"]["files_sha256"]), set(pgg_game.CODE_FILES))
         self.assertEqual(summary["units"]["n_complete"], 1)
         self.assertEqual(summary["files"]["results"]["lines"], 8)

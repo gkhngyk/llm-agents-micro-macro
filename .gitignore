@@ -19,3 +19,6 @@ logs/
 results/
 # run directories (results, summary, raw log); real runs write them OUTSIDE the repo
 runs/
+
+# version stamp of a code copy outside git (pgg_game.py --write-code-version); never committed
+CODE_VERSION.json

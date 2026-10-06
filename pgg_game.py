@@ -101,13 +101,28 @@ llm_client's before_call / on_response hooks:
                     (other than a "-<suffix>") stops the run.
   providers         per model {"slug", "name"[, "quantizations"]}: sent as
                     OpenRouter provider routing (order + only = [slug],
-                    allow_fallbacks false). Every response's provider name
-                    (and quantization, if the response has one) goes to the
-                    raw log and the row; a provider name other than "name"
-                    stops the run (prereg §8.2 item 5, "provider_mismatch").
+                    allow_fallbacks false, require_parameters true: the
+                    provider must support every parameter of the request).
+                    Every response's provider name (and quantization, if the
+                    response has one) goes to the raw log and the row.
                     A response without a provider name does not stop the
                     run; it is counted as n_provider_unknown (per model and
                     in total in the summary).
+  provider mismatch (A4) a response whose provider name is not "name" is NOT
+                    a decision: llm_client logs it as a failed attempt
+                    (error_kind "provider_mismatch", "provider_mismatch":
+                    true, its content and usage), its cost goes into the cost
+                    and the budget, and the same decision is re-requested.
+                    Counted as n_provider_mismatch on the row (re-requests of
+                    that decision), per model, per segment and in total.
+                    Outside the invalid-rate cap. Limit: the attempt limit of
+                    one llm_client call (max_retries = 4 attempts, shared with
+                    parse failures, provider errors and transport errors);
+                    when its last attempt is a mismatch too, the run stops
+                    with stop_reason "provider_mismatch_limit" (RunAborted).
+                    THIS CHANGES prereg_pilot.md §8.2 item 5, which stopped
+                    the run at the first mismatch (stop_reason
+                    "provider_mismatch"); the amendment is written apart.
 Provider errors (finish_reason "error", or 0 tokens at 0 cost) are retried and
 counted as n_provider_error, apart from n_parse_fail and outside the
 invalid-rate cap. A RunAborted (no valid decision for one call) also stops
@@ -227,6 +242,28 @@ workers, parallel_units and request_timeout_s may differ between segments.
 Every segment's summary entry records the settings and the code version (git
 commit and sha256 of the code files).
 
+Code version (A5). code_version() is recorded in every segment entry and
+start event and its git_commit is never empty for a real run:
+  * code directory = top of a git checkout: git_commit = HEAD; the code is
+    dirty when `git status --porcelain --untracked-files=no -- '*.py'` shows
+    a tracked .py file changed (source "git").
+  * else (e.g. a copy unpacked with git archive into workspace/_kod_<sha>/):
+    CODE_VERSION.json in the code directory, written from the git checkout
+    with
+        git archive <sha> | tar -x -C <dir>
+        python pgg_game.py --write-code-version <dir> --code-commit <sha>
+    It holds the commit and the sha256 of every tracked .py file of that
+    commit (write_code_version checks them against <dir> before writing).
+    On every start the hashes are checked again; a missing or changed file
+    makes the code dirty (source "stamp", stamp_problems).
+  * A real run and --resume do not start when the version is unknown (no
+    git checkout, no stamp) or the code is dirty: ValueError / exit 1 before
+    the lock, any write and any call. There is no option to override it. A
+    dry run (also --resume --dry-run) only prints a warning.
+  * --resume records, never refuses, a git_commit other than (or unknown in)
+    the earlier segments': "code_change" in the segment entry and in the
+    start event, "code_changes" in the summary.
+
 Per row and summary (A2, A3). Every row has elapsed_s (seconds of the accepted
 attempt), n_transport and n_deadline (connection errors and attempts past the
 deadline while the decision was obtained) and reasoning_capped:
@@ -285,6 +322,12 @@ DEFAULT_STALL_TIMEOUT_S = 1800.0
 TIMEOUT_SETTINGS = ("request_deadline_s", "stall_timeout_s")
 # Files whose sha256 goes into code_version().
 CODE_FILES = ("pgg_game.py", "llm_client.py", "pgg_cost.py")
+# Version stamp of a code directory outside git (A5, write_code_version).
+CODE_VERSION_FILE = "CODE_VERSION.json"
+# A real run and --resume refuse code whose version is unknown or dirty
+# (code_version_problem). Tests of other parts set it False (mock.patch);
+# there is deliberately no CLI option or config key for it.
+_REQUIRE_VERIFIED_CODE = True
 # A config value the user still has to choose, e.g. "<SEÇİLECEK: ...>". A
 # real run does not start while one is left (dry runs only warn).
 PLACEHOLDER_PREFIX = "<"
@@ -317,35 +360,184 @@ def _code_version() -> str:
 
 
 def code_version() -> dict:
-    """Git commit (and whether the code files differ from it) and sha256 of CODE_FILES.
+    """Version of the code that runs (A5): git commit, whether it is dirty, and how it is known.
 
     Read once per process (the code that runs is the code imported at the
-    start). git_commit / git_dirty are None when this directory is not the
-    top of a git checkout (e.g. a copied code directory) or git is missing.
+    start). See _read_code_version; code_version_problem() says whether a
+    real run may start with it.
     """
     return json.loads(_code_version())
 
 
-def _read_code_version() -> dict:
-    out = {"git_commit": None, "git_dirty": None,
-           "files_sha256": {name: hashlib.sha256((PROJECT_DIR / name).read_bytes()).hexdigest()
-                            for name in CODE_FILES if (PROJECT_DIR / name).is_file()}}
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
-    def git(*args):
-        proc = subprocess.run(["git", "-C", str(PROJECT_DIR), *args], capture_output=True,
-                              text=True, timeout=10, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
-        return proc.stdout.strip() if proc.returncode == 0 else None
 
+def _git(cwd: Path, *args, binary: bool = False, strip: bool = True):
+    """stdout of a git command in cwd (text, stripped unless strip=False; bytes if binary).
+
+    None when git fails or is missing.
+    """
     try:
-        top = git("rev-parse", "--show-toplevel")
-        if top is None or Path(top).resolve() != PROJECT_DIR.resolve():
-            return out
-        out["git_commit"] = git("rev-parse", "HEAD")
-        status = git("status", "--porcelain", "--untracked-files=no", "--", *CODE_FILES)
-        out["git_dirty"] = None if status is None else bool(status)
+        proc = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True,
+                              text=not binary, timeout=30,
+                              env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
     except (OSError, subprocess.SubprocessError):
-        pass
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout if binary or not strip else proc.stdout.strip()
+
+
+def _is_git_top(path: Path) -> bool:
+    """True if path is the top directory of a git checkout (also a linked worktree)."""
+    top = _git(path, "rev-parse", "--show-toplevel")
+    return top is not None and Path(top).resolve() == Path(path).resolve()
+
+
+def _read_code_version(code_dir: Path | None = None) -> dict:
+    """git_commit, git_dirty, source and files_sha256 (CODE_FILES) of a code directory.
+
+    source "git": code_dir is the top of a git checkout; git_commit = HEAD,
+    git_dirty = `git status --porcelain --untracked-files=no -- '*.py'` shows
+    a change of a tracked .py file (dirty_files lists them; None if git
+    status failed). source "stamp": no git checkout, but code_dir holds
+    CODE_VERSION_FILE (write_code_version); every file it lists must exist
+    with its sha256 and it must list CODE_FILES, else git_dirty is True and
+    stamp_problems says why; git_commit is the stamp's. source None: neither;
+    git_commit and git_dirty are None.
+    """
+    code_dir = Path(code_dir or PROJECT_DIR)
+    out = {"git_commit": None, "git_dirty": None, "source": None, "code_dir": str(code_dir),
+           "files_sha256": {name: _sha256_file(code_dir / name)
+                            for name in CODE_FILES if (code_dir / name).is_file()}}
+    if _is_git_top(code_dir):
+        out["source"] = "git"
+        out["git_commit"] = _git(code_dir, "rev-parse", "HEAD")
+        status = _git(code_dir, "status", "--porcelain", "--untracked-files=no", "--", "*.py",
+                      strip=False)              # "XY path": the leading blank counts
+        if status is not None:
+            out["dirty_files"] = sorted(line[3:] for line in status.splitlines() if line.strip())
+            out["git_dirty"] = bool(out["dirty_files"])
+        return out
+    stamp_path = code_dir / CODE_VERSION_FILE
+    if not stamp_path.is_file():
+        return out
+    out.update(source="stamp", stamp_path=str(stamp_path))
+    problems = []
+    try:
+        stamp = json.loads(stamp_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        stamp = None
+        problems.append(f"{CODE_VERSION_FILE} cannot be read ({e})")
+    if stamp is not None:
+        commit = stamp.get("git_commit") if isinstance(stamp, dict) else None
+        files = stamp.get("files_sha256") if isinstance(stamp, dict) else None
+        if isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit):
+            out["git_commit"] = commit
+        else:
+            problems.append(f"{CODE_VERSION_FILE}: git_commit is not a 40-digit commit id")
+        if not isinstance(files, dict) or not files:
+            problems.append(f"{CODE_VERSION_FILE}: files_sha256 is missing or empty")
+            files = {}
+        missing = [n for n in CODE_FILES if n not in files]
+        if missing:
+            problems.append(f"{CODE_VERSION_FILE} does not cover {missing}")
+        for name, sha in sorted(files.items()):
+            rel = Path(name)
+            if rel.is_absolute() or ".." in rel.parts:
+                problems.append(f"{CODE_VERSION_FILE}: path {name!r} is not inside the directory")
+            elif not (code_dir / rel).is_file():
+                problems.append(f"{name}: listed in {CODE_VERSION_FILE}, missing")
+            elif _sha256_file(code_dir / rel) != sha:
+                problems.append(f"{name}: sha256 differs from {CODE_VERSION_FILE}")
+        out["n_files_verified"] = len(files) if not problems else None
+    out["git_dirty"] = bool(problems)
+    if problems:
+        out["stamp_problems"] = problems
     return out
+
+
+def code_version_problem(cv: dict) -> str | None:
+    """Why a real run (or --resume) may not start with this code version; None if it may."""
+    where = cv.get("code_dir", "the code directory")
+    if cv.get("source") is None:
+        return (f"the code version is unknown: {where} is not the top of a git checkout and has "
+                f"no {CODE_VERSION_FILE} (write it with python pgg_game.py --write-code-version "
+                "<dir> --code-commit <sha>, from the git checkout)")
+    if cv.get("source") == "git" and cv.get("git_commit") is None:
+        return f"git HEAD of {where} could not be read"
+    if cv.get("source") == "stamp" and cv.get("git_dirty") is not False:
+        return (f"{CODE_VERSION_FILE} does not match the code: "
+                + "; ".join(cv.get("stamp_problems") or ["not verified"]))
+    if cv.get("git_dirty") is None:
+        return "git status could not be read: whether the code is dirty is unknown"
+    if cv.get("git_dirty"):
+        return (f"the code is dirty: tracked .py files differ from commit {cv.get('git_commit')} "
+                f"({', '.join(cv.get('dirty_files') or [])}); commit them first")
+    return None
+
+
+def write_code_version(target_dir, commit: str = "HEAD", repo_dir: Path | None = None) -> Path:
+    """Write CODE_VERSION_FILE into a code directory copied out of git (A5).
+
+    For a code directory that is not a git checkout, e.g. the one a builder
+    unpacks with `git archive <sha> | tar -x -C workspace/_kod_<sha>`. Run in
+    the git checkout (repo_dir, default this code's directory):
+
+        python pgg_game.py --write-code-version workspace/_kod_<sha> --code-commit <sha>
+
+    The stamp holds the commit and the sha256 of every tracked .py file of
+    that commit (`git ls-tree`, blobs as committed). Each must equal the
+    file in target_dir, else ValueError and nothing is written. An existing
+    stamp with the same commit and hashes is kept; another one is an error.
+    """
+    repo_dir = Path(repo_dir or PROJECT_DIR)
+    target = Path(target_dir).resolve()
+    if not target.is_dir():
+        raise ValueError(f"{target} is not a directory")
+    if _is_git_top(target):
+        raise ValueError(f"{target} is a git checkout: its HEAD is the code version, no stamp")
+    sha = _git(repo_dir, "rev-parse", "--verify", f"{commit}^{{commit}}")
+    if sha is None:
+        raise ValueError(f"{commit!r} is not a commit of the git checkout {repo_dir}")
+    names = _git(repo_dir, "ls-tree", "-r", "--name-only", sha)
+    files = {}
+    problems = []
+    for name in sorted((names or "").splitlines()):
+        if not name.endswith(".py"):
+            continue
+        blob = _git(repo_dir, "show", f"{sha}:{name}", binary=True)
+        if blob is None:
+            raise ValueError(f"cannot read {name} of commit {sha}")
+        files[name] = hashlib.sha256(blob).hexdigest()
+        path = target / name
+        if not path.is_file():
+            problems.append(f"{name} missing")
+        elif _sha256_file(path) != files[name]:
+            problems.append(f"{name} differs")
+    missing = [n for n in CODE_FILES if n not in files]
+    if missing:
+        problems.append(f"commit {sha} has no {missing}")
+    if problems:
+        raise ValueError(f"{target} does not hold the tracked .py files of commit {sha}: "
+                         + "; ".join(problems) + f". {CODE_VERSION_FILE} not written")
+    stamp = {"git_commit": sha, "files_sha256": files,
+             "written_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+             "written_by": "pgg_game.write_code_version"}
+    path = target / CODE_VERSION_FILE
+    if path.exists():
+        try:
+            old = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError:
+            old = None
+        if (isinstance(old, dict) and old.get("git_commit") == sha
+                and old.get("files_sha256") == files):
+            return path
+        raise ValueError(f"{path} exists with another commit or other hashes; not overwritten")
+    with open(path, "x", encoding="utf-8") as f:
+        f.write(json.dumps(stamp, indent=2) + "\n")
+    return path
 
 
 def _offline_stable_seed(namespace: str, *parts, base: int = 0) -> int:
@@ -388,7 +580,15 @@ class OfflineLLM:
 
 
 class RunAborted(RuntimeError):
-    """A decision could not be obtained validly; the run was stopped."""
+    """A decision could not be obtained validly; the run was stopped.
+
+    reason: the run's stop_reason, "run_aborted", or "provider_mismatch_limit"
+    when the last attempt of the failed call was a provider mismatch (A4).
+    """
+
+    def __init__(self, message: str, reason: str = "run_aborted"):
+        super().__init__(message)
+        self.reason = reason
 
 
 # Not RuntimeError subclasses: Engine._ask turns RuntimeError into RunAborted.
@@ -893,16 +1093,30 @@ def check_provider_spec(model_key: str, spec) -> None:
 def provider_routing(spec: dict) -> dict:
     """OpenRouter provider-routing object that pins one provider, no fallback.
 
+    require_parameters true (A4): only an endpoint that supports every
+    parameter of the request (response_format, max_tokens, ...) may serve it,
+    so a parameter is never dropped silently.
     https://openrouter.ai/docs/guides/routing/provider-selection
     """
-    routing = {"order": [spec["slug"]], "only": [spec["slug"]], "allow_fallbacks": False}
+    routing = {"order": [spec["slug"]], "only": [spec["slug"]], "allow_fallbacks": False,
+               "require_parameters": True}
     if spec.get("quantizations"):
         routing["quantizations"] = list(spec["quantizations"])
     return routing
 
 
+# How a pinned model's requests and responses are handled (A4); recorded in
+# every segment entry and start event, outside "config".
+PROVIDER_POLICY = {"require_parameters": True, "on_mismatch": "re_request",
+                   "mismatch_limit": "llm_client max_retries (4 attempts per call)"}
+
+
 def same_provider(got: str, expected: str) -> bool:
-    """Provider names compared case- and punctuation-insensitively."""
+    """Provider names compared case- and punctuation-insensitively.
+
+    Copy of llm_client.same_provider (dry runs must not import llm_client); a
+    test checks that both agree.
+    """
     def norm(s):
         return re.sub(r"[^a-z0-9]", "", s.casefold())
     return norm(got) == norm(expected)
@@ -993,8 +1207,9 @@ class RunConfig:
     # previous segment's (recorded in the summary); otherwise a difference stops
     allow_timeout_change: bool = False
     # {model key: {"slug", "name"[, "quantizations"]}}: pins one provider per
-    # model (order + only, allow_fallbacks false); a response from another
-    # provider stops the run (prereg §8.2 item 5). None = not pinned.
+    # model (order + only, allow_fallbacks false, require_parameters true); a
+    # response from another provider is re-requested (A4; it changes prereg
+    # §8.2 item 5, which stopped the run). None = not pinned.
     providers: dict | None = None
     isolated_frame: str = "one_shot"           # ISOLATED_FRAMES
 
@@ -1194,17 +1409,19 @@ def _new_stats() -> dict:
     # passed their deadline. A response past its deadline is billed: its cost
     # is in cost_usd (also in deadline_cost_usd) when its usage arrived, else
     # it is counted in n_cost_unknown (not priced).
+    # n_provider_mismatch: responses of a pinned model from another provider
+    # (billed, never a decision, re-requested; A4).
     return {"cost_usd": 0.0, "n_responses": 0, "n_accepted": 0,
             "n_invalid": 0, "n_parse_fail": 0, "n_provider_error": 0,
             "n_cost_estimated": 0, "n_length": 0, "finish_reasons": {},
             "providers": {}, "n_provider_unknown": 0, "n_discarded": 0,
             "n_reasoning_capped": 0, "n_transport": 0, "n_deadline": 0,
-            "n_cost_unknown": 0, "deadline_cost_usd": 0.0}
+            "n_cost_unknown": 0, "deadline_cost_usd": 0.0, "n_provider_mismatch": 0}
 
 
-# Totals of the summary and of each segment entry (A2, A3).
-_A3_TOTALS = ("n_reasoning_capped", "n_transport", "n_deadline", "n_cost_unknown",
-              "deadline_cost_usd")
+# Totals of the summary and of each segment entry (A2, A3, A4).
+_SEGMENT_TOTALS = ("n_reasoning_capped", "n_transport", "n_deadline", "n_cost_unknown",
+                   "deadline_cost_usd", "n_provider_mismatch")
 
 
 def _merge_stats(*parts: dict) -> dict:
@@ -1275,6 +1492,9 @@ class ResumePlan:
     # them; timeout_check says what they were compared with
     timeout_change: dict | None = None
     timeout_check: str = ""
+    # git_commit of this segment differs from (or is unknown in) earlier
+    # segments: {"now", "earlier": {segment: commit}, "differs_from_segments"}
+    code_change: dict | None = None
     # accepted responses of earlier segments without a row and without a
     # "pgg_discarded" event yet: [(model key, session_id, call)]
     unmarked_discarded: list = field(default_factory=list)
@@ -1299,6 +1519,7 @@ class Answer:
     call: dict | None = None       # call_info of the decision (segment, step, round, ...)
     n_transport: int = 0           # connection errors while this decision was obtained
     n_deadline: int = 0            # attempts past their deadline while it was obtained
+    n_provider_mismatch: int = 0   # responses from another provider, re-requested (A4)
 
 
 class _Pending:
@@ -1475,14 +1696,20 @@ class Engine:
             s["n_length"] += 1
         if info.get("provider_error"):
             s["n_provider_error"] += 1
+        if info.get("provider_mismatch"):
+            s["n_provider_mismatch"] += 1
         if self.cfg.provider_for(model_key) and provider is None:
             s["n_provider_unknown"] += 1
 
     def _on_response(self, model_key: str, info: dict) -> None:
-        """Runs for every response that arrived (billed): cost, finish_reason, model, provider."""
+        """Runs for every response that arrived (billed): cost, finish_reason, model, provider.
+
+        A response from another provider than the pinned one does not stop
+        the run any more (A4, it changes prereg §8.2 item 5): llm_client
+        re-requests it (expected_provider) and it is counted here
+        (n_provider_mismatch).
+        """
         finish = info.get("finish_reason")
-        provider = info.get("provider")
-        pinned = self.cfg.provider_for(model_key)
         with self._lock:
             self._count_response(self.stats[model_key], model_key, info)
         slug = self.cfg.models[model_key]
@@ -1492,12 +1719,6 @@ class Engine:
         if (self.cfg.check_snapshot and snapshot is not None and snapshot != slug
                 and not snapshot.startswith(slug + "-")):
             self._stop("model_snapshot_mismatch", model=slug, model_snapshot=snapshot)
-        # prereg §8.2 item 5: the provider changed. A response without a
-        # provider name cannot be checked; it is counted (n_provider_unknown).
-        if pinned and provider is not None and not same_provider(provider, pinned["name"]):
-            self._stop("provider_mismatch", model=slug, provider=provider,
-                       expected_provider=pinned["name"],
-                       provider_quantization=info.get("provider_quantization"))
 
     def _on_late_response(self, model_key: str, info: dict) -> None:
         """A response that came after its attempt was abandoned: billed, counted, not a decision."""
@@ -1601,16 +1822,23 @@ class Engine:
                 provider=provider_routing(pinned) if pinned else None,
                 request_deadline_s=self.deadline,
                 on_late_response=lambda info: self._on_late_response(model_key, info),
-                call_info=call, on_deadline=lambda info: self._on_deadline(model_key, info))
+                call_info=call, on_deadline=lambda info: self._on_deadline(model_key, info),
+                expected_provider=pinned["name"] if pinned else None)
         except RuntimeError as e:
+            mismatch = getattr(e, "last_error_kind", None) == "provider_mismatch"
+            reason = "provider_mismatch_limit" if mismatch else "run_aborted"
             self.llm._append_log({
                 "ts": time.time(), "event": "pgg_run_aborted", "run": self.cfg.run,
                 "model": self.cfg.models[model_key], "session_id": session_id,
-                "error": str(e), **ctx,
+                "error": str(e), "reason": reason,
+                "n_provider_mismatch": counts.get("n_provider_mismatch", 0), **ctx,
             })
             raise RunAborted(
                 f"run {self.cfg.run!r} stopped: no valid decision for {ctx} "
-                f"(model {model_key}): {e}") from e
+                f"(model {model_key}): {e}"
+                + (f" [{counts.get('n_provider_mismatch', 0)} response(s) from another provider "
+                   f"than {pinned['name']!r}; attempt limit reached]" if mismatch else ""),
+                reason=reason) from e
         finally:
             # connection errors and deadlines also when the call failed or was stopped
             with self._lock:
@@ -1621,7 +1849,8 @@ class Engine:
         ans = Answer(parsed, n_invalid, n_parse_fail, meta,
                      n_provider_error=counts.get("n_provider_error", 0), call=call,
                      n_transport=counts.get("n_transport", 0),
-                     n_deadline=counts.get("n_deadline", 0))
+                     n_deadline=counts.get("n_deadline", 0),
+                     n_provider_mismatch=counts.get("n_provider_mismatch", 0))
         self._count_invalid(model_key, ans)
         return ans
 
@@ -1638,6 +1867,7 @@ class Engine:
             **fields,
             "n_invalid": ans.n_invalid, "n_parse_fail": ans.n_parse_fail,
             "n_provider_error": ans.n_provider_error,
+            "n_provider_mismatch": ans.n_provider_mismatch,
             "n_transport": ans.n_transport, "n_deadline": ans.n_deadline,
             "elapsed_s": ans.meta.get("elapsed_s"),
             "reasoning_capped": self.llm.reasoning_capped(ans.meta.get("usage"), self.max_tokens),
@@ -1861,14 +2091,25 @@ class Engine:
             with self._lock:
                 if self.aborted is None:
                     self.aborted = e
-            self._stop("run_aborted", error=str(e))
+            self._stop(getattr(e, "reason", "run_aborted"), error=str(e))
 
     # -- resume ------------------------------------------------------------
 
-    def _providers_summary(self) -> dict:
-        return {k: (provider_routing(p) | {"name": p["name"]} if (p := self.cfg.provider_for(k))
-                    else None)
-                for k in self.cfg.models}
+    def _providers_summary(self, *, for_config: bool = False) -> dict:
+        """Routing sent per model plus the expected provider name (None = not pinned).
+
+        for_config: without require_parameters (A4), so that "config" stays as
+        the earlier code wrote it and its runs resume; PROVIDER_POLICY in the
+        segment entries records it instead.
+        """
+        out = {}
+        for k in self.cfg.models:
+            p = self.cfg.provider_for(k)
+            routing = provider_routing(p) | {"name": p["name"]} if p else None
+            if routing and for_config:
+                routing.pop("require_parameters", None)
+            out[k] = routing
+        return out
 
     def _effort_summary(self) -> dict:
         return {k: self.llm.reasoning_effort_label(self.cfg.effort_for(k)) for k in self.cfg.models}
@@ -1881,11 +2122,12 @@ class Engine:
         request_deadline_s and stall_timeout_s are not in it either (runs of
         the earlier code resume), but resume_plan compares them with the last
         earlier segment that recorded them: a difference stops, unless
-        allow_timeout_change (summary "timeout_changes").
+        allow_timeout_change (summary "timeout_changes"). The provider
+        routing is in it without require_parameters (A4, _providers_summary).
         """
         cfg = self.cfg
         return _json_round({
-            "models": dict(cfg.models), "providers": self._providers_summary(),
+            "models": dict(cfg.models), "providers": self._providers_summary(for_config=True),
             "seed_namespace": cfg.seed_namespace, "max_tokens": self.max_tokens,
             "isolated_frame": cfg.isolated_frame, "reasoning_effort": self._effort_summary(),
             "params": dataclasses.asdict(cfg.params), "conditions": list(cfg.conditions),
@@ -1903,7 +2145,8 @@ class Engine:
         """Top-level fields of a summary written before "config" existed."""
         return _json_round({
             "seed_namespace": self.cfg.seed_namespace, "max_tokens": self.max_tokens,
-            "isolated_frame": self.cfg.isolated_frame, "providers": self._providers_summary(),
+            "isolated_frame": self.cfg.isolated_frame,
+            "providers": self._providers_summary(for_config=True),
             "reasoning_effort": self._effort_summary(), "budget_usd": self.cfg.budget_usd,
             "invalid_rate_cap": self.cfg.invalid_rate_cap,
             "planned_calls_per_model": self.cfg.planned_calls_per_model()})
@@ -2229,7 +2472,8 @@ class Engine:
                 self._count_response(s, key, {
                     "usage": rec.get("usage"), "finish_reason": rec.get("finish_reason"),
                     "provider": rec.get("provider"),
-                    "provider_error": rec.get("error_kind") == "provider"})
+                    "provider_error": rec.get("error_kind") == "provider",
+                    "provider_mismatch": rec.get("provider_mismatch") is True})
             if "response_parsed" in rec:
                 s["n_accepted"] += 1
                 call = rec.get("call") if isinstance(rec.get("call"), dict) else None
@@ -2423,7 +2667,8 @@ class Engine:
             # operational settings and code version, as the segment recorded them
             # (summary entry, else its start / resume event; absent before #46)
             for k in ("stalled", "request_deadline_s", "stall_timeout_s", "code_version", "lock",
-                      "resume_points", "n_discarded", "timeout_change"):
+                      "resume_points", "n_discarded", "timeout_change", "code_change",
+                      "provider_policy"):
                 if k in entry:
                     item[k] = entry[k]
                 elif k in started_by_seg.get(seg, {}):
@@ -2433,7 +2678,7 @@ class Engine:
                 item.update(cost_usd=sum(s["cost_usd"] for s in by_model.values()),
                             n_responses=sum(s["n_responses"] for s in by_model.values()),
                             n_discarded=sum(s["n_discarded"] for s in by_model.values()),
-                            **{k: sum(s[k] for s in by_model.values()) for k in _A3_TOTALS},
+                            **{k: sum(s[k] for s in by_model.values()) for k in _SEGMENT_TOTALS},
                             per_model={cfg.models[k]: s for k, s in by_model.items()})
             else:
                 item.update(cost_usd=entry.get("cost_usd"), per_model=entry.get("per_model"))
@@ -2464,6 +2709,19 @@ class Engine:
                         "same values (config / --request-deadline / --stall-timeout) or allow the "
                         "change with --allow-timeout-change")
 
+        # A5: the code of this segment against the earlier segments' (recorded,
+        # never refused: pilot_v2_20261005 went on with other commits too)
+        now_commit = (self.code_version if self.code_version is not None
+                      else code_version()).get("git_commit")
+        earlier_commits = {e["segment"]: (e.get("code_version") or {}).get("git_commit")
+                           for e in segments}
+        differs = sorted(seg for seg, c in earlier_commits.items() if c != now_commit)
+        code_change = None
+        if differs:
+            code_change = {"now": now_commit,
+                           "earlier": {str(seg): c for seg, c in earlier_commits.items()},
+                           "differs_from_segments": differs}
+
         if previous is not None:
             backup = self._backup_path(previous)
             if backup.exists() and backup.read_bytes() != summary_path.read_bytes():
@@ -2485,7 +2743,8 @@ class Engine:
             config_checked=checked, problems=list(dict.fromkeys(problems)),
             histories=histories, unmarked_discarded=unmarked,
             lock=read_run_lock(self._lock_path()),
-            timeout_change=timeout_change, timeout_check=timeout_check)
+            timeout_change=timeout_change, timeout_check=timeout_check,
+            code_change=code_change)
 
     def _lock_path(self) -> Path:
         return self.cfg.output_dir() / f"{self.cfg.run}.lock"
@@ -2582,11 +2841,14 @@ class Engine:
             "n_rows": rows["rows_per_segment"].get(self.segment, 0) if rows else None,
             "n_units_completed": units["n_complete_this_segment"] if units else None,
             "n_discarded": sum(s["n_discarded"] for s in self.stats.values()),
-            **{k: sum(s[k] for s in self.stats.values()) for k in _A3_TOTALS},
+            **{k: sum(s[k] for s in self.stats.values()) for k in _SEGMENT_TOTALS},
             "stalled": self.stalled,
             "request_deadline_s": self.deadline, "stall_timeout_s": self.stall_timeout,
             "timeout_change": self.plan.timeout_change if self.plan else None,
-            "code_version": self.code_version, "lock": lock, "resume_points": resume_points,
+            "code_version": self.code_version,
+            "code_change": self.plan.code_change if self.plan else None,
+            "provider_policy": dict(PROVIDER_POLICY),
+            "lock": lock, "resume_points": resume_points,
         }
         segments = [*(self.plan.segments if self.plan else []), current]
         out = {
@@ -2608,13 +2870,21 @@ class Engine:
             "n_provider_error": sum(s["n_provider_error"] for s in per_model.values()),
             "n_provider_unknown": sum(s["n_provider_unknown"] for s in per_model.values()),
             "n_discarded": sum(s["n_discarded"] for s in per_model.values()),
-            **{k: sum(s[k] for s in per_model.values()) for k in _A3_TOTALS},
+            **{k: sum(s[k] for s in per_model.values()) for k in _SEGMENT_TOTALS},
             "reasoning_capped_rule": (
                 "reasoning_tokens >= max_tokens - "
                 f"{self.llm.REASONING_RESERVE_TOKENS} (llm_client.REASONING_RESERVE_TOKENS): "
                 "flagged on the row (reasoning_capped), kept as a decision, not re-requested; "
                 "n_reasoning_capped counts such accepted decisions"),
             "timeout_changes": [s["timeout_change"] for s in segments if s.get("timeout_change")],
+            "code_changes": [{"segment": s["segment"], **s["code_change"]}
+                             for s in segments if s.get("code_change")],
+            "provider_mismatch_rule": (
+                "a response of a pinned model from another provider is not a decision: logged "
+                "(provider_mismatch: true, content and cost), billed, re-requested within "
+                "llm_client's attempt limit (max_retries = 4 per call); a call whose last attempt "
+                "is a mismatch stops the run (provider_mismatch_limit). Changes prereg_pilot.md "
+                "§8.2 item 5 (stop at the first mismatch)"),
             "per_model": per_model,
             "units": units,
             "resume_points": resume_points,
@@ -2666,7 +2936,9 @@ class Engine:
                  "seed_namespace": self.cfg.seed_namespace, "output_dir": str(out_dir),
                  "request_deadline_s": self.deadline, "stall_timeout_s": self.stall_timeout,
                  "timeout_change": self.plan.timeout_change if self.plan else None,
-                 "code_version": self.code_version, "lock": self.lock,
+                 "code_version": self.code_version,
+                 "code_change": self.plan.code_change if self.plan else None,
+                 "provider_policy": dict(PROVIDER_POLICY), "lock": self.lock,
                  "unit_order": self.unit_order, "config": self.config_record()}
         if self.plan:
             p = self.plan
@@ -2731,6 +3003,11 @@ class Engine:
         cfg = self.cfg
         cfg.validate()                     # again: the output directory may be gone by now
         self.code_version = code_version()
+        problem = code_version_problem(self.code_version)
+        if problem is not None and _REQUIRE_VERIFIED_CODE:
+            # A5: before the lock, any write and any call
+            raise ValueError(f"run {cfg.run!r} not {'resumed' if resume else 'started'}, "
+                             f"no call made: {problem}")
         out_dir = cfg.output_dir()
         path = out_dir / f"{cfg.run}.jsonl"
         summary_path = out_dir / f"{cfg.run}_summary.json"
@@ -2977,6 +3254,11 @@ def build_parser() -> argparse.ArgumentParser:
                     "or the orc workspace/runs)")
     ap.add_argument("--results-dir", help="legacy: absolute directory outside the worktree "
                     "for <run>.jsonl, the summary and raw_calls.jsonl")
+    ap.add_argument("--write-code-version", metavar="DIR",
+                    help=f"write {CODE_VERSION_FILE} into a code directory copied out of git "
+                         "(e.g. by git archive), run from the git checkout; nothing else is done")
+    ap.add_argument("--code-commit", metavar="REV",
+                    help="with --write-code-version: the commit DIR was copied from (default HEAD)")
     return ap
 
 
@@ -3036,6 +3318,16 @@ def run_config(run: str, s: dict, models: dict[str, str], output: dict) -> RunCo
         providers=resolve_providers(s.get("providers"), models),
         isolated_frame=s.get("isolated_frame", "one_shot"),
         **output)
+
+
+def code_version_line(cv: dict) -> str:
+    """One line on the code version for a dry run (a dirty code only warns there)."""
+    problem = code_version_problem(cv)
+    source = {"git": "git deposu", "stamp": CODE_VERSION_FILE}.get(cv.get("source"), "bilinmiyor")
+    if problem is None:
+        return f"Kod sürümü: {cv['git_commit']} (kaynak: {source}; temiz)"
+    return (f"UYARI: kod sürümü doğrulanamadı ya da kod kirli (kaynak: {source}): {problem} — "
+            "gerçek koşu ve --resume bu kodla BAŞLAMAZ")
 
 
 def resume_report(engine: Engine, plan: ResumePlan) -> str:
@@ -3120,6 +3412,9 @@ def resume_report(engine: Engine, plan: ResumePlan) -> str:
             f"{k} {s['n_cost_unknown']}" for k, s in plan.prior_stats.items())
         + "; süre aşımı maliyeti (bütçede): "
         f"{sum(s['deadline_cost_usd'] for s in plan.prior_stats.values()):.6f} USD")
+    lines.append(
+        "Sağlayıcı uyuşmazlığı (karar sayılmadı, yeniden istendi, maliyeti bütçede): " + ", ".join(
+            f"{k} {s['n_provider_mismatch']}" for k, s in plan.prior_stats.items()))
     calls: dict[str, dict[str, int]] = {k: {} for k in cfg.models}
     rounds = cfg.params.rounds
     for spec in remaining:
@@ -3163,6 +3458,13 @@ def resume_report(engine: Engine, plan: ResumePlan) -> str:
     if engine.stall_timeout <= engine.deadline:
         lines.append("UYARI: stall_timeout_s, request_deadline_s'den büyük değil; tek bir uzun "
                      "deneme bekçiyi tetikleyebilir")
+    lines.append(code_version_line(engine.code_version or code_version()))
+    change = plan.code_change
+    if change is not None:
+        lines.append(
+            f"Kod commit'i önceki segment(ler)den farklı ya da onlarda bilinmiyor: segment "
+            f"{change['differs_from_segments']} (önceki: {change['earlier']}; şimdi: "
+            f"{change['now']}); engellemez, özete code_change olarak yazılır")
     if plan.problems:
         lines.append("SORUN (sürdürme başlamaz):")
         lines += [f"  - {p}" for p in plan.problems]
@@ -3173,6 +3475,18 @@ def resume_report(engine: Engine, plan: ResumePlan) -> str:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    if args.write_code_version:
+        try:
+            path = write_code_version(args.write_code_version, args.code_commit or "HEAD")
+        except ValueError as e:
+            print(f"HATA: {e}", file=sys.stderr)
+            return 1
+        stamp = json.loads(path.read_text(encoding="utf-8"))
+        print(f"yazıldı: {path} (commit {stamp['git_commit']}, "
+              f"{len(stamp['files_sha256'])} .py dosyası)")
+        return 0
+    if args.code_commit:
+        build_parser().error("--code-commit needs --write-code-version")
     s = settings_from_args(args)
     params = s["params"]
     conditions = tuple(s.get("conditions", ("N",)))
@@ -3217,6 +3531,7 @@ def main(argv=None) -> int:
                                     "isolated_frame") if s.get(k) is not None}
         print(f"Ayarlar: reasoning_effort={s.get('reasoning_effort') or 'gönderilmez'}, "
               + ", ".join(f"{k}={v}" for k, v in guards.items()))
+        print(code_version_line(code_version()))
         open_ = open_choices(s)
         if open_:
             print("SEÇİLMEMİŞ (gerçek koşu başlamaz): " + ", ".join(open_))
@@ -3241,6 +3556,11 @@ def main(argv=None) -> int:
         output = resolve_output(s)
     except ValueError as e:
         print(f"HATA: çıktı dizini: {e}", file=sys.stderr)
+        return 1
+    problem = code_version_problem(code_version())
+    if problem is not None and _REQUIRE_VERIFIED_CODE:
+        print(f"HATA: kod sürümü: {problem}; gerçek koşu başlamadı, çağrı yapılmadı",
+              file=sys.stderr)
         return 1
     llm = _llm()
     try:

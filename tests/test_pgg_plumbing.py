@@ -21,7 +21,7 @@ from test_pgg_guards import PILOT_CONFIG, CostAPI, GuardTestBase, _response  # n
 
 import llm_client  # noqa: E402
 import pgg_game  # noqa: E402
-from pgg_game import Card, Engine, GameParams, RunStopped  # noqa: E402
+from pgg_game import Card, Engine, GameParams  # noqa: E402
 
 CARDS6 = [Card(f"city{i}", "s", f"Fake card {i}: placeholder text.") for i in range(6)]
 MODELS3 = {"m1": "v/m1", "m2": "v/m2", "m3": "v/m3"}
@@ -222,7 +222,7 @@ class ProviderPinning(GuardTestBase):
         for kwargs in self.api.calls:
             self.assertEqual(kwargs["extra_body"]["provider"], {
                 "order": ["prov-a/fp8"], "only": ["prov-a/fp8"], "allow_fallbacks": False,
-                "quantizations": ["fp8"]})
+                "require_parameters": True, "quantizations": ["fp8"]})
             self.assertEqual(kwargs["extra_headers"]["X-OpenRouter-Metadata"], "enabled")
         self.assertEqual({r["provider"] for r in rows}, {"Prov A"})
         self.assertEqual({r["provider_quantization"] for r in rows}, {None})
@@ -234,21 +234,12 @@ class ProviderPinning(GuardTestBase):
 
     def test_no_quantizations_key_when_not_given(self):
         self.assertEqual(pgg_game.provider_routing({"slug": "openai", "name": "OpenAI"}),
-                         {"order": ["openai"], "only": ["openai"], "allow_fallbacks": False})
+                         {"order": ["openai"], "only": ["openai"], "allow_fallbacks": False,
+                          "require_parameters": True})
 
     def test_unpinned_models_send_no_provider(self):
         self.run_engine(params=GameParams(rounds=1))
         self.assertTrue(all("provider" not in c["extra_body"] for c in self.api.calls))
-
-    def test_other_provider_stops_the_run(self):
-        self.use(CostAPI(provider_fn=lambda k: "Prov A" if len(self.api.calls) < 3 else "Prov B"))
-        with self.assertRaises(RunStopped):
-            Engine(self.cfg(providers=PINNED)).run()
-        self.assertEqual(len(self.api.calls), 3)
-        ev = self.events("pgg_run_stopped")
-        self.assertEqual((ev[0]["reason"], ev[0]["provider"], ev[0]["expected_provider"]),
-                         ("provider_mismatch", "Prov B", "Prov A"))
-        self.assertEqual(self.summary()["stop_reason"], "provider_mismatch")
 
     def test_name_match_ignores_case_and_punctuation_and_unknown_is_counted(self):
         self.assertTrue(pgg_game.same_provider("Google AI Studio", "google-ai-studio"))
@@ -363,7 +354,7 @@ class ProviderErrors(GuardTestBase):
             counts=counts)
         self.assertEqual(out, ({"x": 1}, 0, 0))                 # n_parse_fail stays 0
         self.assertEqual(counts, {"n_invalid": 0, "n_parse_fail": 0, "n_provider_error": 2,
-                                  "n_transport": 0, "n_deadline": 0})
+                                  "n_transport": 0, "n_deadline": 0, "n_provider_mismatch": 0})
         kinds = [r.get("error_kind") for r in self.raw_log()]
         self.assertEqual(kinds, ["provider", "provider", None])
 
@@ -394,7 +385,7 @@ class ProviderErrors(GuardTestBase):
                                       schema={"type": "object"}, session_id="s",
                                       is_valid=lambda c: True, counts=counts)
         self.assertEqual(counts, {"n_invalid": 0, "n_parse_fail": 0, "n_provider_error": 4,
-                                  "n_transport": 0, "n_deadline": 0})
+                                  "n_transport": 0, "n_deadline": 0, "n_provider_mismatch": 0})
 
     def test_engine_counts_them_apart_and_not_in_the_invalid_cap(self):
         n = []

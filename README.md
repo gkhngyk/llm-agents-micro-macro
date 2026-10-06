@@ -53,7 +53,7 @@ tested. Design choices are in the module docstring; the main ones:
   start. The summary lists the files with their line counts.
 - **Choices left to the user** are placeholders (`"<SEÇİLECEK: ...>"`) in the
   config: one provider per model (`providers`, OpenRouter provider routing,
-  no fallback; a response from another provider stops the run) and the
+  no fallback, `require_parameters: true`) and the
   isolated arm's wording (`isolated_frame`: `one_shot` or `repeated`). A real
   run does not start while one is left; `--dry-run` lists them.
 - Provider errors (`finish_reason` "error", or 0 tokens at 0 cost) are
@@ -92,6 +92,22 @@ tested. Design choices are in the module docstring; the main ones:
   re-requested). The summary counts them per model, per segment and in total
   (`n_reasoning_capped`, `n_transport`, `n_deadline`, `n_cost_unknown`,
   `deadline_cost_usd`).
+- **Provider mismatch (A4):** a response of a pinned model from another
+  provider is not a decision. It is logged (`"provider_mismatch": true`,
+  content and cost), counts in the budget and is re-requested, within the
+  same attempt limit as other failures (4 attempts per call); the run stops
+  with stop_reason "provider_mismatch_limit" when that limit ends on a
+  mismatch. Counted as `n_provider_mismatch` per row, model, segment and in
+  total. This replaces the "stop at the first mismatch" rule of
+  prereg_pilot.md §8.2 item 5 (amendment written separately).
+- **Code version (A5):** every segment records `code_version` with a
+  `git_commit`. In a git checkout it is HEAD; a code copy outside git (e.g.
+  unpacked with git archive into `workspace/_kod_<sha>/`) needs
+  `CODE_VERSION.json` (commit + sha256 of the tracked .py files, re-checked
+  at every start). A real run and `--resume` refuse unknown or dirty code (a
+  tracked .py file changed, or the stamp does not match); a dry run only
+  warns. A resumed segment with another commit is recorded (`code_change`,
+  `code_changes`).
 
 ```bash
 .venv/bin/python pgg_game.py --dry-run --config configs/pilot.json   # no API, no key
@@ -99,6 +115,9 @@ tested. Design choices are in the module docstring; the main ones:
 .venv/bin/python pgg_game.py --config configs/pilot.json --run pilot_<date> --resume --dry-run  # plan only
 .venv/bin/python pgg_game.py --config configs/pilot.json --run pilot_<date> --resume
 .venv/bin/python -m unittest discover -s tests -v
+# code copy outside git: unpack it, then stamp it from the git checkout
+git archive <sha> | tar -x -C /abs/workspace/_kod_<sha>
+.venv/bin/python pgg_game.py --write-code-version /abs/workspace/_kod_<sha> --code-commit <sha>
 ```
 
 `--dry-run` takes prices and token estimates from `pgg_cost.py` (copied from

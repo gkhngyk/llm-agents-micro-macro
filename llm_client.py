@@ -16,6 +16,9 @@ Contract (unchanged from the first study):
     and its usage / cost when known) and retried
   * a response whose reasoning reached max_tokens - REASONING_RESERVE_TOKENS
     is flagged "reasoning_capped" in the log; it is kept as it is
+  * with expected_provider, a response that names another provider is no
+    decision: it is logged (content and cost, "provider_mismatch": true),
+    billed and re-requested within the same attempt limit (max_retries)
 
 The API key is read from ../.env (OPENROUTER_API_KEY), shared with the other
 projects in this folder; it is not copied here.
@@ -317,6 +320,13 @@ def _provider_info(resp) -> tuple[str | None, str | None]:
             quantization if isinstance(quantization, str) else None)
 
 
+def same_provider(got: str, expected: str) -> bool:
+    """Provider names compared case- and punctuation-insensitively."""
+    def norm(s):
+        return re.sub(r"[^a-z0-9]", "", s.casefold())
+    return norm(got) == norm(expected)
+
+
 def _response_info(resp) -> dict:
     """What on_response hooks receive.
 
@@ -385,6 +395,10 @@ class _EmptyResponseError(ValueError):
 
 class _ProviderErrorResponse(Exception):
     """A response that arrived but that the provider failed to produce."""
+
+
+class _ProviderMismatch(Exception):
+    """A response from another provider than expected_provider: billed, never a decision."""
 
 
 class RequestDeadlineExceeded(Exception):
@@ -540,9 +554,11 @@ def _partial_record(partial: dict | None) -> tuple[dict, dict | None]:
 
 
 def _error_kind(e: Exception) -> str:
-    """Class of a failed attempt: provider, transport, http, parse or other."""
+    """Class of a failed attempt: provider, provider_mismatch, transport, http, parse or other."""
     if isinstance(e, _ProviderErrorResponse):
         return "provider"
+    if isinstance(e, _ProviderMismatch):
+        return "provider_mismatch"
     if isinstance(e, RequestDeadlineExceeded):
         return "transport"  # error_subkind "deadline" in the log
     if isinstance(e, (openai.APIConnectionError, httpx.TransportError)):
@@ -574,6 +590,7 @@ def _call_llm_counted(
     call_info: dict | None = None,
     on_deadline=None,
     attempt_counts: dict | None = None,
+    expected_provider: str | None = None,
 ) -> tuple[dict, int, int]:
     """call_llm that also returns the parse failures and provider errors it retried.
 
@@ -626,6 +643,18 @@ def _call_llm_counted(
     The success record carries elapsed_s (seconds of the successful
     attempt), max_tokens and reasoning_capped (reasoning_capped(); null
     without reasoning_tokens); meta gets elapsed_s and reasoning_capped too.
+
+    expected_provider: the provider name a pinned model's responses must
+    carry (same_provider). A response that names another provider is not
+    parsed and not a decision: it is logged as a failed attempt with
+    error_kind "provider_mismatch", "provider_mismatch": true,
+    expected_provider, its content (response_raw, reasoning), usage and
+    provider, passed to on_response with "provider_mismatch": true (it is
+    billed) and re-requested within the same max_retries attempts as every
+    other failure; attempt_counts["n_provider_mismatch"] counts it. A
+    response without a provider name is not a mismatch. When every attempt
+    fails, the RuntimeError carries last_error_kind (e.g.
+    "provider_mismatch").
     """
     deadline_s = DEFAULT_REQUEST_DEADLINE_S if request_deadline_s is None else request_deadline_s
     if not deadline_s > 0:
@@ -697,6 +726,12 @@ def _call_llm_counted(
                 raise _ProviderErrorResponse(
                     f"provider error response (finish_reason={_finish_reason(resp)!r}, "
                     f"usage={_usage_dict(getattr(resp, 'usage', None))!r})")
+            if expected_provider is not None:
+                got = _provider_info(resp)[0]
+                if got is not None and not same_provider(got, expected_provider):
+                    raise _ProviderMismatch(
+                        f"response from provider {got!r}, expected {expected_provider!r}; "
+                        "not a decision, re-requested")
             raw = resp.choices[0].message.content
             if raw is None or not raw.strip():
                 raise _EmptyResponseError("empty response content")
@@ -730,12 +765,25 @@ def _call_llm_counted(
                 record["usage"] = _usage_dict(getattr(resp, "usage", None))
                 record["model_snapshot"] = getattr(resp, "model", None)
                 record["provider"], record["provider_quantization"] = _provider_info(resp)
-            if attempt_counts is not None and kind == "transport":
-                name = "n_deadline" if isinstance(e, RequestDeadlineExceeded) else "n_transport"
+            mismatch = kind == "provider_mismatch"
+            if mismatch:
+                try:
+                    content = resp.choices[0].message.content
+                except (AttributeError, IndexError, TypeError):
+                    content = None
+                record.update(provider_mismatch=True, expected_provider=expected_provider,
+                              response_raw=content if isinstance(content, str) else None,
+                              reasoning=_reasoning_text(resp))
+            if attempt_counts is not None and kind in ("transport", "provider_mismatch"):
+                name = ("n_provider_mismatch" if mismatch else
+                        "n_deadline" if isinstance(e, RequestDeadlineExceeded) else "n_transport")
                 attempt_counts[name] = attempt_counts.get(name, 0) + 1
             _append_log(record, log_path)
             if resp is not None and on_response is not None:
-                on_response(_response_info(resp))
+                info = _response_info(resp)
+                if mismatch:
+                    info["provider_mismatch"] = True
+                on_response(info)
             if isinstance(e, RequestDeadlineExceeded) and on_deadline is not None:
                 on_deadline({"usage": deadline_usage, "cost_unknown": record["cost_unknown"],
                              "late_response": record["late_response"],
@@ -781,10 +829,13 @@ def _call_llm_counted(
         final["status_code"] = last_err.status_code
     if isinstance(last_err, RequestDeadlineExceeded):
         final.update(error_subkind="deadline", request_deadline_s=deadline_s)
+    if isinstance(last_err, _ProviderMismatch):
+        final.update(expected_provider=expected_provider)
     _append_log(final, log_path)
     err = RuntimeError(f"LLM call failed after {max_retries} attempts: {last_err}")
     err.n_parse_fail = n_parse_fail
     err.n_provider_error = n_provider_error
+    err.last_error_kind = _error_kind(last_err)
     raise err
 
 
@@ -807,6 +858,7 @@ def call_llm(
     on_late_response=None,
     call_info: dict | None = None,
     on_deadline=None,
+    expected_provider: str | None = None,
 ) -> dict:
     """Call OpenRouter with structured JSON output. Retries on transient errors.
 
@@ -826,6 +878,9 @@ def call_llm(
     DEFAULT_REQUEST_DEADLINE_S); past it the attempt is abandoned and logged
     with error_kind "transport", error_subkind "deadline" and what had
     arrived; on_deadline(info) then runs (_call_llm_counted).
+
+    expected_provider: a response from another provider is logged, billed
+    and re-requested, never returned (_call_llm_counted).
     """
     parsed, _, _ = _call_llm_counted(
         model, messages, schema=schema, session_id=session_id,
@@ -833,7 +888,8 @@ def call_llm(
         reasoning_effort=reasoning_effort, meta=meta,
         before_call=before_call, on_response=on_response,
         provider=provider, timeout=timeout, request_deadline_s=request_deadline_s,
-        on_late_response=on_late_response, call_info=call_info, on_deadline=on_deadline)
+        on_late_response=on_late_response, call_info=call_info, on_deadline=on_deadline,
+        expected_provider=expected_provider)
     return parsed
 
 
@@ -859,6 +915,7 @@ def call_llm_valid(
     on_late_response=None,
     call_info: dict | None = None,
     on_deadline=None,
+    expected_provider: str | None = None,
 ) -> tuple[dict, int] | tuple[dict, int, int]:
     """call_llm, re-requesting payloads for which is_valid(parsed) is False.
 
@@ -871,11 +928,13 @@ def call_llm_valid(
     counts: when a dict, it is kept up to date with "n_invalid",
     "n_parse_fail" and "n_provider_error" (provider-error responses retried;
     a third separate count), "n_transport" (connection errors) and
-    "n_deadline" (attempts past their deadline), also when the call finally
-    fails or a hook stops it.
+    "n_deadline" (attempts past their deadline) and "n_provider_mismatch"
+    (responses from another provider than expected_provider, re-requested),
+    also when the call finally fails or a hook stops it.
 
-    reasoning_effort, meta, provider, timeout, request_deadline_s, call_info
-    and the before_call / on_response / on_late_response / on_deadline hooks are passed through to
+    reasoning_effort, meta, provider, timeout, request_deadline_s, call_info,
+    expected_provider and the before_call / on_response / on_late_response /
+    on_deadline hooks are passed through to
     the underlying call; meta ends up holding the metadata of the accepted
     (last) response.
     """
@@ -885,7 +944,7 @@ def call_llm_valid(
     n_provider_error = 0
     if counts is not None:
         counts.update(n_invalid=0, n_parse_fail=0, n_provider_error=0, n_transport=0,
-                      n_deadline=0)
+                      n_deadline=0, n_provider_mismatch=0)
     for n_invalid in range(max_invalid + 1):
         try:
             call, n_pf, n_pe = _call_llm_counted(
@@ -895,7 +954,8 @@ def call_llm_valid(
                 before_call=before_call, on_response=on_response,
                 provider=provider, timeout=timeout, request_deadline_s=request_deadline_s,
                 on_late_response=on_late_response, call_info=call_info,
-                on_deadline=on_deadline, attempt_counts=counts)
+                on_deadline=on_deadline, attempt_counts=counts,
+                expected_provider=expected_provider)
         except RuntimeError as e:
             if counts is not None:
                 counts.update(

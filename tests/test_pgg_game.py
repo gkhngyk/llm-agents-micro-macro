@@ -98,6 +98,9 @@ class EngineTestBase(unittest.TestCase):
             mock.patch.object(llm_client, "LOG_PATH", self.log_path),
             mock.patch.object(llm_client, "_client"),
             mock.patch.object(llm_client.time, "sleep"),
+            # A5's refusal of dirty / unversioned code has its own tests
+            # (test_pgg_a4_a5.py); here the code may be uncommitted or a copy
+            mock.patch.object(pgg_game, "_REQUIRE_VERIFIED_CODE", False),
         ):
             p.start()
             self.addCleanup(p.stop)

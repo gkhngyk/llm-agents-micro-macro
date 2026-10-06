@@ -228,7 +228,8 @@ class PilotConfig(GuardTestBase):
             self.assertNotIn("reasoning", kwargs["extra_body"])
             self.assertNotIn("temperature", kwargs)
             pslug, _, quant = PILOT_V2_PROVIDERS[slug_of[kwargs["model"]]]
-            expected = {"order": [pslug], "only": [pslug], "allow_fallbacks": False}
+            expected = {"order": [pslug], "only": [pslug], "allow_fallbacks": False,
+                        "require_parameters": True}
             if quant:
                 expected["quantizations"] = quant
             self.assertEqual(kwargs["extra_body"]["provider"], expected)

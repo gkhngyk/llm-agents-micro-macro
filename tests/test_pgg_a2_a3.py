@@ -249,6 +249,15 @@ def _completion(content: str, cost: float, reasoning_tokens=None, model="vendor/
                      "message": {"role": "assistant", "content": content}}]}).encode()
 
 
+# Deadline of the slow first attempt and when its second half comes (after the
+# stream started). The grace ends SLOW_DEADLINE_S after the deadline, measured
+# from the attempt's start, so the second half is caught as long as setting up
+# the request takes less than 2 * SLOW_DEADLINE_S - SLOW_SECOND_HALF_S = 0.7 s
+# (0.5 / 0.75 left 0.25 s and failed now and then under load).
+SLOW_DEADLINE_S = 1.0
+SLOW_SECOND_HALF_S = 1.3
+
+
 def _slow_whole(body: bytes, at: float):
     """First half at once, the rest `at` seconds later (after the deadline)."""
     def plan(stop):
@@ -320,10 +329,10 @@ class DeadlineThroughHttpx(HttpPathMixin, LoggingTestBase):
 
     def test_body_cut_at_the_deadline_logs_content_and_cost(self):
         body = _completion('{"action": 7}', cost=0.0123, reasoning_tokens=11904)
-        net = self.use_network(Network([_slow_whole(body, at=0.75)],
+        net = self.use_network(Network([_slow_whole(body, at=SLOW_SECOND_HALF_S)],
                                        lambda k: _completion('{"action": 1}', cost=0.001)))
         started = time.monotonic()
-        out, counts, seen, responses = self.call(0.5)
+        out, counts, seen, responses = self.call(SLOW_DEADLINE_S)
         self.assertLess(time.monotonic() - started, 5)
         self.assertEqual(out, ({"action": 1}, 0))           # the cut response is no decision
         self.assertEqual(len(net.requests), 2)
@@ -331,7 +340,7 @@ class DeadlineThroughHttpx(HttpPathMixin, LoggingTestBase):
         cut, ok = self.records()
         self.assertEqual((cut["error_kind"], cut["error_subkind"], cut["retrying"]),
                          ("transport", "deadline", True))
-        self.assertGreaterEqual(cut["elapsed_s"], 0.5)
+        self.assertGreaterEqual(cut["elapsed_s"], SLOW_DEADLINE_S)
         self.assertEqual(cut["response_partial"], body.decode())
         self.assertEqual(cut["response_partial_n_bytes"], len(body))
         self.assertEqual((cut["response_complete"], cut["attempt_ended"], cut["cost_unknown"],
@@ -436,13 +445,14 @@ class EngineDeadlineThroughHttpx(HttpPathMixin, ResumeBase):
         # first request (others_mean 0): cut at the deadline, its usage arrived;
         # later: fast, reasoning at the cap on odd request numbers
         return self.use_network(Network(
-            [_slow_whole(_completion(content, cost=0.0123, reasoning_tokens=11904), at=0.75)],
+            [_slow_whole(_completion(content, cost=0.0123, reasoning_tokens=11904),
+                         at=SLOW_SECOND_HALF_S)],
             lambda k: _completion(content, cost=0.001,
                                   reasoning_tokens=11904 if k % 2 else 11903)))
 
     def cfg1(self, **kw):
         base = dict(models={"m1": "vendor/model-1"}, cards=[CARD_A], arms=("isolated",),
-                    request_deadline_s=0.5, stall_timeout_s=30)
+                    request_deadline_s=SLOW_DEADLINE_S, stall_timeout_s=30)
         base.update(kw)
         return self.rcfg(**base)
 
