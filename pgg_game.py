@@ -143,9 +143,22 @@ raw_calls.jsonl. runs_dir must be an absolute, existing directory outside the
 git worktree (worktrees are deleted after merging, with their git-ignored
 outputs); CLI: --runs-dir, else config "runs_dir", else $PGG_RUNS_DIR, else
 <orc project>/workspace/runs when run from an orc worktree; otherwise the
-run does not start. Config values starting with "<" are placeholders: a real
-run does not start while one is left. --dry-run prints call counts and an
-estimated cost without importing llm_client (no key, no ../.env, no API).
+run does not start. Config values starting with "<" are placeholders (e.g.
+"<TBD_PREREG: ...>"), in any setting: a real run does not start while one is
+left. --dry-run prints call counts and an estimated cost without importing
+llm_client (no key, no ../.env, no API); when a setting the counts depend on
+is still a placeholder it says so instead of counting.
+
+Pre-registration lock. A config with "prereg_approved" (configs/minipilot.json)
+starts a real run (also --resume) only when it is exactly true, i.e. after the
+user approved its prereg_*.md; otherwise the run stops before llm_client is
+imported and before any call. Dry runs (also --resume --dry-run) still work.
+A config without the field (configs/pilot.json, approved 2026-10-05) is not
+gated by it. The config may also hold the run name ("run"; --run wins).
+
+Models: llm_client.MODELS (= pgg_cost.PILOT_MODELS) is the mini-pilot set and
+the default; a run may name any model of llm_client.MODELS_KNOWN, which also
+holds pilot v2's gemini (MODELS_PILOT_V2), so configs/pilot.json still runs.
 
 Resume (--resume; Engine.run(resume=True)). A run that was cut off goes on in
 the same directory as a new segment (0 = the first run, then 1, 2, ...). The
@@ -3183,9 +3196,40 @@ def resolve_output(s: dict) -> dict:
 
 
 def open_choices(s: dict) -> list[str]:
-    """Config values the user still has to choose (placeholders)."""
-    return [p for key in ("providers", "isolated_frame", "runs_dir", "results_dir")
-            for p in placeholders_in(s.get(key), key)]
+    """Config values the user still has to choose (placeholders), in any setting
+    except comments (keys starting with "_")."""
+    return [p for key, value in s.items() if not key.startswith("_")
+            for p in placeholders_in(value, key)]
+
+
+# Settings the call counts of a dry run depend on (besides "params").
+COUNT_SETTINGS = ("conditions", "arms", "groups_per_cell", "isolated_reps", "isolated_points")
+
+
+def count_blockers(s: dict) -> list[str]:
+    """Placeholders that keep a dry run from counting the calls.
+
+    The number of cells comes from the cards file (filtered by "cities"), else
+    from "cells"; a placeholder cards file only blocks when no cells are given.
+    """
+    out = [p for key in COUNT_SETTINGS for p in placeholders_in(s.get(key), key)]
+    cards = [p for key in ("cards", "cities") for p in placeholders_in(s.get(key), key)]
+    if cards and not (is_placeholder(s.get("cards")) and s.get("cells") is not None):
+        out += cards
+    return out
+
+
+def prereg_problem(s: dict) -> str | None:
+    """Why a real run may not start under the pre-registration lock (None = it may).
+
+    Only a config with "prereg_approved" is gated: the field must be exactly
+    true (the user approved the prereg file). The CLI cannot set it.
+    """
+    if "prereg_approved" not in s or s["prereg_approved"] is True:
+        return None
+    return (f"prereg_approved is {json.dumps(s['prereg_approved'], ensure_ascii=False)}, not "
+            "true: the pre-registration (prereg_*.md) of this config is not approved by the "
+            "user yet, so no game call may be made (dry runs still work)")
 
 
 def _csv(value: str) -> list[str]:
@@ -3206,13 +3250,15 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--resume", action="store_true",
                     help="go on with an interrupted run in the same directory (new segment); "
                          "with --dry-run only print what is complete and what is left")
-    ap.add_argument("--run", help="run name; output goes to <runs-dir>/<run>/")
+    ap.add_argument("--run", help="run name (else config \"run\"); output goes to "
+                                  "<runs-dir>/<run>/")
     ap.add_argument("--config", help="JSON file with the options below (CLI wins)")
     ap.add_argument("--cards", help="JSON list of {card_id, style, text}")
     ap.add_argument("--cities", help="comma-separated: keep only these cards' \"city\" values")
     ap.add_argument("--cells", type=int, help="dry-run only: number of card x style cells "
                     "(default: cards file, else 6 = 2 identities x 3 styles)")
-    ap.add_argument("--models", help="comma-separated keys or slugs (default: the 3 pilot models)")
+    ap.add_argument("--models", help="comma-separated keys or slugs (default: the 3 mini-pilot "
+                                     "models)")
     ap.add_argument("--conditions", help="comma-separated, N and/or P (default N)")
     ap.add_argument("--arms", help="comma-separated, group and/or isolated (default both)")
     ap.add_argument("--groups-per-cell", type=int)
@@ -3268,7 +3314,7 @@ def settings_from_args(args) -> dict:
     if args.config:
         s.update(json.loads(Path(args.config).read_text(encoding="utf-8")))
     cli = {
-        "cards": args.cards, "cells": args.cells,
+        "run": args.run, "cards": args.cards, "cells": args.cells,
         "cities": _csv(args.cities) if args.cities else None,
         "parallel_units": args.parallel_units, "seed_namespace": args.seed_namespace,
         "budget_usd": args.budget_usd, "invalid_rate_cap": args.invalid_rate_cap,
@@ -3495,19 +3541,20 @@ def main(argv=None) -> int:
     isolated_reps = s.get("isolated_reps", 2)
     points = tuple(s.get("isolated_points", ISOLATED_POINTS))
     names = s.get("models") or list(pgg_cost.PILOT_MODELS)
+    run = s.get("run")
 
     cities = s.get("cities")
     if args.dry_run and args.resume:
         # read-only plan of a resumed run: no llm_client, no key, no write
-        if not args.run or not s.get("cards"):
+        if not run or not s.get("cards"):
             build_parser().error("--resume needs --run and --cards")
         open_ = open_choices(s)
         if open_:
             print("SEÇİLMEMİŞ: " + ", ".join(open_), file=sys.stderr)
             return 1
         try:
-            models = resolve_models(names, pgg_cost.PILOT_MODELS)
-            engine = Engine(run_config(args.run, s, models, resolve_output(s)), llm=OfflineLLM())
+            models = resolve_models(names, pgg_cost.KNOWN_MODELS)
+            engine = Engine(run_config(run, s, models, resolve_output(s)), llm=OfflineLLM())
             plan = engine.resume_plan()
         except ValueError as e:
             print(f"HATA: {e}", file=sys.stderr)
@@ -3515,15 +3562,22 @@ def main(argv=None) -> int:
         print(resume_report(engine, plan))
         return 1 if plan.problems else 0
     if args.dry_run:
-        models = resolve_models(names, pgg_cost.PILOT_MODELS)
-        if s.get("cards"):
-            n_cells = len(load_cards(s["cards"], cities))
+        models = resolve_models(names, pgg_cost.KNOWN_MODELS)
+        blockers = count_blockers(s)
+        if blockers:
+            print("KURU ÇALIŞTIRMA — API çağrısı yapılmadı.\n"
+                  f"ÇAĞRI SAYISI HESAPLANAMADI: şu ayarlar henüz seçilmedi (yer tutucu): "
+                  f"{', '.join(blockers)}. Modeller: "
+                  + ", ".join(f"{k}={v}" for k, v in models.items()))
         else:
-            n_cells = s.get("cells", 6)
-        print(dry_run_report(
-            models=models, n_cells=n_cells, params=params, conditions=conditions, arms=arms,
-            groups_per_cell=groups_per_cell, isolated_reps=isolated_reps, n_points=len(points),
-            max_tokens=s.get("max_tokens")))
+            if s.get("cards") and not is_placeholder(s["cards"]):
+                n_cells = len(load_cards(s["cards"], cities))
+            else:
+                n_cells = s.get("cells", 6)
+            print(dry_run_report(
+                models=models, n_cells=n_cells, params=params, conditions=conditions, arms=arms,
+                groups_per_cell=groups_per_cell, isolated_reps=isolated_reps,
+                n_points=len(points), max_tokens=s.get("max_tokens")))
         guards = {k: s[k] for k in ("max_tokens", "request_timeout_s", "request_deadline_s",
                                     "stall_timeout_s", "budget_usd",
                                     "invalid_rate_cap", "stop_on_length", "check_snapshot",
@@ -3532,6 +3586,10 @@ def main(argv=None) -> int:
         print(f"Ayarlar: reasoning_effort={s.get('reasoning_effort') or 'gönderilmez'}, "
               + ", ".join(f"{k}={v}" for k, v in guards.items()))
         print(code_version_line(code_version()))
+        if "prereg_approved" in s:
+            problem = prereg_problem(s)
+            print("Ön kayıt: onaylı (prereg_approved=true)" if problem is None else
+                  f"ÖN KAYIT ONAYI YOK (gerçek koşu başlamaz): {problem}")
         open_ = open_choices(s)
         if open_:
             print("SEÇİLMEMİŞ (gerçek koşu başlamaz): " + ", ".join(open_))
@@ -3543,10 +3601,14 @@ def main(argv=None) -> int:
                 print(f"ÇIKTI DİZİNİ KULLANILAMIYOR (gerçek koşu başlamaz): {e}")
         return 0
 
-    if not args.run or not s.get("cards"):
-        build_parser().error("a real run needs --run and --cards (or use --dry-run)")
     # Everything that can stop a real run is checked here, before llm_client is
-    # imported and before any call.
+    # imported and before any call; the pre-registration lock first.
+    problem = prereg_problem(s)
+    if problem is not None:
+        print(f"HATA: {problem}; gerçek koşu başlamadı, çağrı yapılmadı", file=sys.stderr)
+        return 1
+    if not run or not s.get("cards"):
+        build_parser().error("a real run needs --run and --cards (or use --dry-run)")
     open_ = open_choices(s)
     if open_:
         print("HATA: seçilmemiş ayarlar (yer tutucu), gerçek koşu başlamadı: "
@@ -3564,8 +3626,8 @@ def main(argv=None) -> int:
         return 1
     llm = _llm()
     try:
-        models = resolve_models(names, llm.MODELS)
-        cfg = run_config(args.run, s, models, output)
+        models = resolve_models(names, llm.MODELS_KNOWN)
+        cfg = run_config(run, s, models, output)
         engine = Engine(cfg, llm=llm)
     except ValueError as e:
         print(f"HATA: {e}", file=sys.stderr)

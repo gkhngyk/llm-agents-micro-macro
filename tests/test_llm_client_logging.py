@@ -246,13 +246,21 @@ class TemperatureDefault(LoggingTestBase):
 
 class ModelsDict(unittest.TestCase):
     def test_models_are_this_studys_and_old_ones_kept_apart(self):
-        self.assertEqual(set(llm_client.MODELS), {"deepseek", "gpt", "gemini"})
+        # mini-pilot set: gemini out (pilot_v2_degerlendirme.md K5), mistral in
         self.assertEqual(llm_client.MODELS, {
+            "deepseek": "deepseek/deepseek-v4.1-flash",
+            "mistral": "mistralai/mistral-large-4-0",
+            "gpt": "openai/gpt-6-luna",
+        })
+        # pilot v2's set is kept, so configs/pilot.json still resolves
+        self.assertEqual(llm_client.MODELS_PILOT_V2, {
             "deepseek": "deepseek/deepseek-v4.1-flash",
             "gpt": "openai/gpt-6-luna",
             "gemini": "google/gemini-2.5-flash-lite",
         })
-        self.assertFalse(any(":" in v for v in llm_client.MODELS.values()))
+        self.assertEqual(llm_client.MODELS_KNOWN,
+                         {**llm_client.MODELS_PILOT_V2, **llm_client.MODELS})
+        self.assertFalse(any(":" in v for v in llm_client.MODELS_KNOWN.values()))
         self.assertEqual(set(llm_client.MODELS_ULTIMATUM), {"haiku", "gemma", "gptoss"})
         self.assertFalse(set(llm_client.MODELS.values()) & set(llm_client.MODELS_ULTIMATUM.values()))
 

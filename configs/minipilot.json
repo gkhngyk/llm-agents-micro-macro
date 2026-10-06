@@ -1,0 +1,42 @@
+{
+  "_notes": "Mini-pilot (task B1+B3, 2026-10-06). Every \"<TBD_PREREG: ...>\" value is decided in prereg_minipilot.md, not here; a real run does not start while one is left or while prereg_approved is not true (the user approves prereg_minipilot.md first). Dry runs work. Models: gemini-2.5-flash-lite left after pilot v2 (pilot_v2_degerlendirme.md K5), mistral-large-4-0 added. providers: tag / provider_name from GET /api/v1/models/{id}/endpoints, checked 2026-10-06 (deepinfra/fp8 = DeepInfra fp8, as in pilot v2; mistral = Mistral; openai = OpenAI). Fallback off (allow_fallbacks false) and require_parameters true for all three (pgg_game.provider_routing). temperature and reasoning_effort are not sent (logged \"default\"). runs_dir must exist; outputs go to runs_dir/<run>/.",
+  "prereg_approved": false,
+  "run": "<TBD_PREREG: run name>",
+  "cards": "<TBD_PREREG: cards file>",
+  "cities": "<TBD_PREREG: cities of the cards file>",
+  "models": ["deepseek/deepseek-v4.1-flash", "mistralai/mistral-large-4-0", "openai/gpt-6-luna"],
+  "conditions": "<TBD_PREREG: conditions (N / P)>",
+  "arms": "<TBD_PREREG: arms (group / isolated)>",
+  "groups_per_cell": "<TBD_PREREG: homogeneous groups per cell>",
+  "isolated_reps": "<TBD_PREREG: isolated schedule repetitions>",
+  "isolated_points": "<TBD_PREREG: isolated conditioning values>",
+  "isolated_frame": "<TBD_PREREG: one_shot or repeated>",
+  "rationale": "<TBD_PREREG: rationale field true / false>",
+  "max_tokens": 16000,
+  "request_deadline_s": 900,
+  "stall_timeout_s": 1800,
+  "providers": {
+    "deepseek": {
+      "slug": "deepinfra/fp8",
+      "name": "DeepInfra",
+      "quantizations": ["fp8"]
+    },
+    "mistral": {
+      "slug": "mistral",
+      "name": "Mistral"
+    },
+    "gpt": {
+      "slug": "openai",
+      "name": "OpenAI"
+    }
+  },
+  "runs_dir": "/Users/karbon/Desktop/Veri Bilimi/complexity-prj/orc/data/projects/PublicGoods/workspace/runs",
+  "seed_namespace": "<TBD_PREREG: seed namespace>",
+  "max_invalid": "<TBD_PREREG: re-requests per decision>",
+  "budget_usd": "<TBD_PREREG: hard cost cap, USD>",
+  "invalid_rate_cap": "<TBD_PREREG: invalid-rate cap per model>",
+  "stop_on_length": "<TBD_PREREG: stop at finish_reason length, true / false>",
+  "check_snapshot": "<TBD_PREREG: stop at another model snapshot, true / false>",
+  "workers": "<TBD_PREREG: parallel calls within a unit>",
+  "parallel_units": "<TBD_PREREG: units at once>"
+}

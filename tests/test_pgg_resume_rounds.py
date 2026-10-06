@@ -606,7 +606,7 @@ class RunLock(RoundBase):
                 "--invalid-rate-cap", "0.5", "--runs-dir", str(self.tmp / "runs"), "--resume"]
         before = _tree(self.run_dir)
         self.create.reset_mock()
-        with mock.patch.dict(llm_client.MODELS, MODELS2, clear=True), \
+        with mock.patch.dict(llm_client.MODELS_KNOWN, MODELS2, clear=True), \
                 contextlib.redirect_stderr(io.StringIO()) as err:
             code = pgg_game.main(argv)
         self.assertEqual(code, 1)

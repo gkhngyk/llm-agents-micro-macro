@@ -17,13 +17,21 @@ from __future__ import annotations
 
 CALL_KINDS = ("contribute_N", "contribute_P", "punish_P", "isolated")
 
-# Generating models of the pilot. Must equal llm_client.MODELS (a test checks
-# it); kept here so the dry run does not import llm_client.
+# Generating models of the mini-pilot, the default of the dry run. Must equal
+# llm_client.MODELS, and PILOT_V2_MODELS / KNOWN_MODELS llm_client's
+# MODELS_PILOT_V2 / MODELS_KNOWN (a test checks it); kept here so the dry run
+# does not import llm_client.
 PILOT_MODELS = {
+    "deepseek": "deepseek/deepseek-v4.1-flash",
+    "mistral":  "mistralai/mistral-large-4-0",
+    "gpt":      "openai/gpt-6-luna",
+}
+PILOT_V2_MODELS = {
     "deepseek": "deepseek/deepseek-v4.1-flash",
     "gpt":      "openai/gpt-6-luna",
     "gemini":   "google/gemini-2.5-flash-lite",
 }
+KNOWN_MODELS = {**PILOT_V2_MODELS, **PILOT_MODELS}
 
 # USD per 1M tokens: (input, output). Reasoning tokens are billed at the
 # output price (maliyet_analizi.md §1 "Reasoning" column, line 24-28).
@@ -34,10 +42,16 @@ PILOT_MODELS = {
 # The pinned providers of pilot v2 (configs/pilot.json) have the same prices in
 # GET /api/v1/models/{id}/endpoints on 2026-10-05: deepinfra/fp8 0,14 / 0,42,
 # openai 0,10 / 0,50, google-vertex 0,10 / 0,40.
+# mistral-large-4-0: listed price of its only endpoint (tag "mistral"), GET
+# https://openrouter.ai/api/v1/models/mistralai/mistral-large-4-0/endpoints on
+# 2026-10-06: prompt 0,00000068, completion 0,00000209 USD per token. The
+# endpoint also says "discount": 0.5; what it applies to is not verified, so the
+# undiscounted listed price is used.
 PRICES_USD_PER_M = {
     "deepseek/deepseek-v4.1-flash": (0.14, 0.42),
     "openai/gpt-6-luna":            (0.10, 0.50),
     "google/gemini-2.5-flash-lite": (0.10, 0.40),
+    "mistralai/mistral-large-4-0":  (0.68, 2.09),
 }
 
 # Input tokens per call (maliyet_analizi.md §2 table, "Toplam girdi" row,
@@ -59,11 +73,14 @@ VISIBLE_OUTPUT_TOKENS = {
 
 # Reasoning tokens per call (maliyet_analizi.md §2 "Reasoning varsayımı",
 # lines 63-66): deepseek 400 and gpt 200 are unsourced assumptions; gemini 0 is
-# one measurement on a tiny prompt. All "(tahmin)".
+# one measurement on a tiny prompt. All "(tahmin)". None = not measured yet
+# (mistral-large-4-0: the plumbing call of task B2 measures it, B4 calibrates);
+# such a model gets call counts but no cost estimate.
 REASONING_TOKENS = {
     "deepseek/deepseek-v4.1-flash": 400,
     "openai/gpt-6-luna": 200,
     "google/gemini-2.5-flash-lite": 0,
+    "mistralai/mistral-large-4-0": None,
 }
 
 SOURCE_NOTE = (
@@ -106,6 +123,8 @@ def cost_per_call(model: str, kind: str) -> float:
     """Estimated USD for one call of this kind to this model (tahmin)."""
     if model not in PRICES_USD_PER_M:
         raise KeyError(f"no price for model {model!r}; add it to PRICES_USD_PER_M")
+    if REASONING_TOKENS.get(model) is None:
+        raise KeyError(f"no reasoning-token estimate for model {model!r} (not measured yet)")
     price_in, price_out = PRICES_USD_PER_M[model]
     out_tokens = VISIBLE_OUTPUT_TOKENS[kind] + REASONING_TOKENS[model]
     return (INPUT_TOKENS[kind] * price_in + out_tokens * price_out) / 1e6
@@ -116,11 +135,16 @@ def estimate(models: dict[str, str], counts: dict[str, int]) -> dict:
 
     models maps short key -> slug. Returns
     {"per_model": {key: {"slug", "calls", "calls_by_kind", "cost_usd"}},
-     "total_calls", "total_cost_usd"}.
+     "total_calls", "total_cost_usd", "unpriced"}. A model without a price or
+    reasoning-token estimate has cost_usd None, is listed in "unpriced" and is
+    left out of total_cost_usd.
     """
     per_model = {}
     for key, slug in models.items():
-        cost = sum(counts[kind] * cost_per_call(slug, kind) for kind in CALL_KINDS)
+        try:
+            cost = sum(counts[kind] * cost_per_call(slug, kind) for kind in CALL_KINDS)
+        except KeyError:
+            cost = None
         per_model[key] = {
             "slug": slug,
             "calls": sum(counts.values()),
@@ -130,7 +154,9 @@ def estimate(models: dict[str, str], counts: dict[str, int]) -> dict:
     return {
         "per_model": per_model,
         "total_calls": sum(m["calls"] for m in per_model.values()),
-        "total_cost_usd": sum(m["cost_usd"] for m in per_model.values()),
+        "total_cost_usd": sum(m["cost_usd"] for m in per_model.values()
+                              if m["cost_usd"] is not None),
+        "unpriced": [k for k, m in per_model.items() if m["cost_usd"] is None],
     }
 
 
@@ -167,12 +193,14 @@ def format_report(est: dict, *, description: str = "") -> str:
     lines.append("")
     for key, m in est["per_model"].items():
         kinds = ", ".join(f"{k}={v}" for k, v in m["calls_by_kind"].items())
-        lines.append(
-            f"{key:<9} {m['slug']:<32} {m['calls']:>6} çağrı ({kinds})  "
-            f"~{m['cost_usd']:.2f} USD (tahmin)")
+        cost = ("maliyet tahmini yok (reasoning token ölçülmedi)" if m["cost_usd"] is None
+                else f"~{m['cost_usd']:.2f} USD (tahmin)")
+        lines.append(f"{key:<9} {m['slug']:<32} {m['calls']:>6} çağrı ({kinds})  {cost}")
+    unpriced = est.get("unpriced") or []
     lines.append(
         f"{'TOPLAM':<9} {'':<32} {est['total_calls']:>6} çağrı"
-        f"{'':<30}~{est['total_cost_usd']:.2f} USD (tahmin)")
+        f"{'':<30}~{est['total_cost_usd']:.2f} USD (tahmin"
+        + (f"; {', '.join(unpriced)} HARİÇ — eksik toplam)" if unpriced else ")"))
     lines.append("")
     lines.append(SOURCE_NOTE)
     return "\n".join(lines)

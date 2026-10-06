@@ -511,7 +511,7 @@ class DryRun(EngineTestBase):
         counts = pgg_cost.call_counts(n_cells=6)
         self.assertEqual(counts, {"contribute_N": 480, "contribute_P": 0, "punish_P": 0,
                                   "isolated": 60})
-        est = pgg_cost.estimate(pgg_cost.PILOT_MODELS, counts)
+        est = pgg_cost.estimate(pgg_cost.PILOT_V2_MODELS, counts)
         by_model = {k: m["cost_usd"] for k, m in est["per_model"].items()}
         # maliyet_analizi.md §4: pilot 0,18 / 0,13 / 0,07 = 0,38 USD
         self.assertAlmostEqual(by_model["deepseek"], 0.18, delta=0.01)
@@ -542,8 +542,10 @@ class DryRun(EngineTestBase):
 
     def test_pilot_models_equal_llm_client_models(self):
         self.assertEqual(pgg_cost.PILOT_MODELS, llm_client.MODELS)
-        self.assertEqual(set(pgg_cost.PRICES_USD_PER_M), set(llm_client.MODELS.values()))
-        self.assertEqual(set(pgg_cost.REASONING_TOKENS), set(llm_client.MODELS.values()))
+        self.assertEqual(pgg_cost.PILOT_V2_MODELS, llm_client.MODELS_PILOT_V2)
+        self.assertEqual(pgg_cost.KNOWN_MODELS, llm_client.MODELS_KNOWN)
+        self.assertEqual(set(pgg_cost.PRICES_USD_PER_M), set(llm_client.MODELS_KNOWN.values()))
+        self.assertEqual(set(pgg_cost.REASONING_TOKENS), set(llm_client.MODELS_KNOWN.values()))
 
     def test_unknown_model_is_an_error(self):
         with self.assertRaises(ValueError):

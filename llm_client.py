@@ -44,12 +44,26 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 PROJECT_DIR = Path(__file__).parent
 LOG_PATH = PROJECT_DIR / "logs" / "raw_calls.jsonl"
 
-# Generating models of this study (the `__main__` loop runs over this dict).
+# Generating models of the mini-pilot (configs/minipilot.json; the `__main__`
+# loop runs over this dict). gemini-2.5-flash-lite is not in it: in pilot v2 it
+# misread the rule (pilot_v2_degerlendirme.md K5); it stays in MODELS_PILOT_V2.
 MODELS = {
+    "deepseek": "deepseek/deepseek-v4.1-flash",
+    "mistral":  "mistralai/mistral-large-4-0",
+    "gpt":      "openai/gpt-6-luna",
+}
+
+# Models of pilot v2 (configs/pilot.json, run pilot_v2_20261005). Kept so that
+# its config, dry run and --resume still resolve.
+MODELS_PILOT_V2 = {
     "deepseek": "deepseek/deepseek-v4.1-flash",
     "gpt":      "openai/gpt-6-luna",
     "gemini":   "google/gemini-2.5-flash-lite",
 }
+
+# Every model a run of this study may name (pgg_game resolves run configs
+# against it); a key always means the same slug.
+MODELS_KNOWN = {**MODELS_PILOT_V2, **MODELS}
 
 # Record of the first (ultimatum) study. Kept apart from MODELS on purpose, so
 # that nothing iterating over MODELS calls the old models.

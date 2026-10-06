@@ -183,7 +183,8 @@ class PilotConfig(GuardTestBase):
         # The committed config is complete; without an existing runs_dir a real
         # run refuses without a call. With one (a copy whose cards path is
         # absolute) it runs the 1620 calls of pilot v2.
-        names = {slug: PILOT_V2_PROVIDERS[key][1] for key, slug in llm_client.MODELS.items()}
+        names = {slug: PILOT_V2_PROVIDERS[key][1]
+                 for key, slug in llm_client.MODELS_PILOT_V2.items()}
         self.use(CostAPI(cost=0.0001, provider_fn=lambda k: names[k["model"]]))
         err = io.StringIO()
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
@@ -206,7 +207,7 @@ class PilotConfig(GuardTestBase):
         rows = [json.loads(x) for x in (run_dir / "pilot_mock.jsonl").read_text().splitlines()]
         self.assertEqual(len(rows), 1620)
         self.assertEqual(len(self.api.calls), 1620)
-        for slug in llm_client.MODELS.values():
+        for slug in llm_client.MODELS_PILOT_V2.values():
             mine = [r for r in rows if r["model"] == slug]
             self.assertEqual(len(mine), 540)
             self.assertEqual(sum(r["arm"] == "group" for r in mine), 480)
@@ -221,7 +222,7 @@ class PilotConfig(GuardTestBase):
                              (len(texts[r["card_id"]].split()), len(texts[r["card_id"]])))
         self.assertEqual({r["isolated_frame"] for r in rows if r["arm"] == "isolated"},
                          {"repeated"})
-        slug_of = {slug: key for key, slug in llm_client.MODELS.items()}
+        slug_of = {slug: key for key, slug in llm_client.MODELS_PILOT_V2.items()}
         for kwargs in self.api.calls:     # reasoning_effort not sent, no temperature
             self.assertEqual(kwargs["max_tokens"], 16000)
             self.assertEqual(kwargs["timeout"], 300)
