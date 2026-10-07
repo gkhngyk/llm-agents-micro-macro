@@ -52,9 +52,15 @@ GAME_VARS = frozenset({"n", "n_others", "rounds", "endowment", "mpcr", "multipli
 # answer key is computed from GameParams (comprehension_key), never written.
 COMPREHENSION_KINDS = ("round_earnings", "own_change")
 
-TOP_KEYS = {"schema", "name", "description", "system", "player_label", "you_suffix", "rules",
-            "history", "contribute", "punish", "isolated", "comprehension", "response"}
-OPTIONAL_TOP_KEYS = {"description", "comprehension", "response"}
+TOP_KEYS = {"schema", "name", "description", "kind", "system", "player_label", "you_suffix",
+            "rules", "history", "contribute", "punish", "isolated", "comprehension", "response"}
+OPTIONAL_TOP_KEYS = {"description", "kind", "comprehension", "response"}
+# "kind" of a frame (task #67): a "story" frame must hold none of the forbidden
+# roots of the frame linter (cerceve_linter.ROOTS: game, player, contribut,
+# ...), checked at the start of every run; an "abstract" frame (the default)
+# says "game" / "contribute" on purpose and is not linted.
+FRAME_KINDS = ("abstract", "story")
+DEFAULT_KIND = "abstract"
 HISTORY_KEYS = {"empty", "header", "list_item", "list_separator", "contributions", "round",
                 "round_P", "punish_given_separator", "punish_given_none"}
 RESPONSE_DEFAULTS = {
@@ -130,7 +136,7 @@ def _comprehension_vars(answer: dict) -> set[str]:
         k = len(others) if isinstance(others, list) else 0
         return {"own"} | {f"other_{i}" for i in range(1, k + 1)}
     if answer.get("kind") == "own_change":
-        return {"delta"}
+        return {"delta"} | ({"example"} if "example" in answer else set())
     return set()
 
 
@@ -209,6 +215,8 @@ def validate_frame(raw, where: str = "frame") -> None:
         c.add("name", "must be [A-Za-z0-9_.-]+")
     if "description" in raw:
         c.string(raw["description"], "description")
+    if "kind" in raw and raw["kind"] not in FRAME_KINDS:
+        c.add("kind", f"must be one of {FRAME_KINDS}")
     if "system" in raw:
         c.template(raw["system"], "system", {"card"}, [{"card"}], game_vars=False)
     if "player_label" in raw:
@@ -366,8 +374,11 @@ def _answer_spec_problem(answer) -> str | None:
                 or not others or not all(_is_int(x) and x >= 0 for x in others):
             return "round_earnings: own and others must be non-negative integers"
     else:
-        if set(answer) != {"kind", "delta"} or not _is_int(answer["delta"]) or answer["delta"] <= 0:
-            return "own_change takes exactly \"delta\", a positive integer"
+        if not {"kind", "delta"} <= set(answer) <= {"kind", "delta", "example"} \
+                or not all(_is_int(answer[k]) and answer[k] > 0
+                           for k in ("delta", "example") if k in answer):
+            return ("own_change takes \"delta\" and optionally \"example\" (a number for the "
+                    "sign example of the text), both positive integers")
     return None
 
 
@@ -434,6 +445,11 @@ class Frame:
     @property
     def isolated_frames(self) -> tuple[str, ...]:
         return tuple(k for k in ISOLATED_FRAMES if k in self.data["isolated"])
+
+    @property
+    def kind(self) -> str:
+        """"story" or "abstract" (FRAME_KINDS); only a story frame is linted."""
+        return self.data.get("kind", DEFAULT_KIND)
 
     @property
     def has_comprehension(self) -> bool:
@@ -556,7 +572,8 @@ class Frame:
                 values = {"own": f"{a['own']}",
                           **{f"other_{i}": f"{x}" for i, x in enumerate(a["others"], 1)}}
             else:
-                values = {"delta": f"{a['delta']}"}
+                values = {"delta": f"{a['delta']}",
+                          **({"example": f"{a['example']}"} if "example" in a else {})}
             texts[q["id"]] = self._fill(q["text"], params, **values)
         user = "\n\n".join([self.rules_text(params, condition, single_round=single_round),
                             self._fill(comp["prompt"], params, **texts)])
@@ -603,4 +620,5 @@ class Frame:
             _is_int(payload.get(q["id"])) for q in self.comprehension_questions())
 
     def describe(self) -> dict:
-        return {"frame_id": self.name, "sha256": self.sha256, "path": self.path}
+        return {"frame_id": self.name, "kind": self.kind, "sha256": self.sha256,
+                "path": self.path}

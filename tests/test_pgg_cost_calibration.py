@@ -142,7 +142,16 @@ class CalibrationFile(unittest.TestCase):
 
 class MiniPilotEstimate(unittest.TestCase):
     def test_placeholder_config_prints_example_at_pilot_v2_volume(self):
-        text = _dry_run("--config", str(MINIPILOT_CONFIG))
+        # the committed config is filled since task #67; the placeholder state before it
+        raw = json.loads(MINIPILOT_CONFIG.read_text(encoding="utf-8"))
+        for k in ("run", "cards", "cities", "conditions", "arms", "groups_per_cell",
+                  "isolated_reps", "isolated_points", "isolated_frame", "frames"):
+            raw[k] = f"<TBD_PREREG: {k}>"
+        raw["frame_files"] = {"story": "<TBD_PREREG: story frame file>"}
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "minipilot_placeholder.json"
+            cfg_path.write_text(json.dumps(raw), encoding="utf-8")
+            text = _dry_run("--config", str(cfg_path))
         self.assertIn("ÇAĞRI SAYISI HESAPLANAMADI", text)
         self.assertIn("ÖRNEK (tahmin)", text)
         self.assertEqual(text.count("540 çağrı (contribute_N=480, isolated=60)"), 3)

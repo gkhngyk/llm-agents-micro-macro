@@ -4,9 +4,11 @@ No network, no ../.env: the OpenRouter client is a mock (EngineTestBase).
 """
 
 import contextlib
+import hashlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import unittest
@@ -30,18 +32,39 @@ MINIPILOT_PROVIDERS = {
     "mistral": ("mistral", MISTRAL, "Mistral", None),
     "gpt": ("openai", "openai/gpt-6-luna", "OpenAI", None),
 }
-# Settings prereg_minipilot.md decides; the config leaves them open.
+# Settings prereg_minipilot.md decides (EMIR 2 Part 1, filled in task #67).
 PREREG_SETTINGS = ("run", "cards", "cities", "conditions", "arms", "groups_per_cell",
                    "isolated_reps", "isolated_points", "isolated_frame", "rationale",
                    "seed_namespace", "max_invalid", "invalid_rate_cap",
                    "stop_on_length", "check_snapshot", "workers", "parallel_units", "frames")
-# budget_usd (6) and expected_cost_gate_usd (4.5) are fixed by goal C5 (task #61);
-# the story file is chosen with the story draft
-NESTED_PREREG = ("frame_files.story",)
+# The values of task #67 (Part 1; the TBD fields from prereg_minipilot.md's settings table).
+DECIDED = {
+    "run": "minipilot_{run_date}", "cards": "cards/pilot_cards_v3.json",
+    "cities": ["Boston", "Riyadh"], "conditions": ["N"], "arms": ["group", "isolated"],
+    "groups_per_cell": 2, "isolated_reps": 2, "isolated_points": [0, 5, 10, 15, 20],
+    "isolated_frame": "fixed_round", "rationale": True, "seed_namespace": "pgg-minipilot",
+    "max_invalid": 3, "invalid_rate_cap": 0.05, "stop_on_length": True, "check_snapshot": True,
+    "workers": 4, "parallel_units": 3,
+    "frames": {"abstract_v3": ["deepseek", "mistral", "gpt"],
+               "story": ["deepseek", "mistral", "gpt"]},
+}
+FRAME_FILES = {"abstract_v3": "frames/abstract_v3.json", "story": "frames/story_A.json"}
 
 
 def _raw():
     return json.loads(MINIPILOT_CONFIG.read_text(encoding="utf-8"))
+
+
+def placeholder_config(tmp: Path) -> Path:
+    """The committed config with the design settings open again ("<TBD_PREREG: ...>"),
+    as it was before task #67: for the tests of the placeholder paths of the dry run."""
+    raw = _raw()
+    for key in PREREG_SETTINGS:
+        raw[key] = f"<TBD_PREREG: {key}>"
+    raw["frame_files"] = {"story": "<TBD_PREREG: story frame file>"}
+    path = Path(tmp) / "minipilot_placeholders.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    return path
 
 
 class MiniPilotConfig(unittest.TestCase):
@@ -79,14 +102,35 @@ class MiniPilotConfig(unittest.TestCase):
         self.assertNotIn("reasoning_effort", raw)
         self.assertEqual(raw["runs_dir"], json.loads(PILOT_CONFIG.read_text())["runs_dir"])
 
-    def test_prereg_settings_are_open_placeholders(self):
+    def test_prereg_settings_are_the_part_one_decisions(self):
         raw = _raw()
-        for key in PREREG_SETTINGS:
-            self.assertTrue(pgg_game.is_placeholder(raw[key]), key)
-            self.assertTrue(raw[key].startswith("<TBD_PREREG"), key)
-        self.assertEqual(sorted(pgg_game.open_choices(raw)),
-                         sorted(PREREG_SETTINGS + NESTED_PREREG))
+        for key, value in DECIDED.items():
+            self.assertEqual(raw[key], value, key)
+        self.assertEqual(pgg_game.open_choices(raw), [])           # no TBD_PREREG left
+        self.assertNotIn("TBD", json.dumps({k: v for k, v in raw.items() if k != "_notes"}))
+        self.assertIs(raw["prereg_approved"], False)                # ... but not approved
         self.assertIsNotNone(pgg_game.prereg_problem(raw))
+        # every frame file is locked with the sha256 of the committed file
+        self.assertEqual(set(raw["frame_files"]), set(FRAME_FILES))
+        for label, rel in FRAME_FILES.items():
+            entry = raw["frame_files"][label]
+            self.assertEqual(entry["path"], rel)
+            self.assertEqual(entry["sha256"],
+                             hashlib.sha256((ROOT / rel).read_bytes()).hexdigest(), label)
+        self.assertEqual(pgg_game.load_frame_file("story", raw["frame_files"]["story"]).kind,
+                         "story")
+        self.assertEqual(
+            pgg_game.load_frame_file("abstract_v3", raw["frame_files"]["abstract_v3"]).kind,
+            "abstract")
+        # the cards: v3 as checked before the copy (a4f50d0f...a9aa), 6 cards of 2 cities
+        sha = hashlib.sha256((ROOT / raw["cards"]).read_bytes()).hexdigest()
+        self.assertTrue(sha.startswith("a4f50d0f") and sha.endswith("a9aa"), sha)
+        cards = pgg_game.load_cards(ROOT / raw["cards"], raw["cities"])
+        self.assertEqual(sorted((c.card_id, c.style) for c in cards),
+                         sorted((f"{city}_{style}", style) for city in ("boston", "riyadh")
+                                for style in ("minimal", "value", "factual")))
+        # the story frame of the workspace that was not chosen (draft B) is not in the repo
+        self.assertFalse(list((ROOT / "frames").glob("*story_B*")))
 
     def test_prereg_lock_rule(self):
         self.assertIsNone(pgg_game.prereg_problem({}))          # no field: not gated
@@ -232,6 +276,37 @@ class MiniPilotRuns(GuardTestBase):
         code, out, err = self.main("--dry-run", "--config", str(MINIPILOT_CONFIG))
         self.assertEqual(code, 0, err)
         self.create.assert_not_called()
+        self.assertNotIn("HESAPLANAMADI", out)
+        self.assertNotIn("SEÇİLMEMİŞ", out)
+        # 6 cards x 3 models x 2 frames; per cell: 2 groups x 4 agents x 10 rounds,
+        # 2 x 5 isolated values, comprehension 2 x 4 + 2
+        lines = [x for x in out.splitlines()
+                 if re.match(r"^(abstract_v3|story)\s+(deepseek|mistral|gpt)\s", x)]
+        self.assertEqual(len(lines), 6)
+        for x in lines:
+            self.assertIn("600 çağrı (contribute_N=480, isolated=60, comprehension=60)", x)
+        self.assertIn("3600 çağrı", out)
+        self.assertIn("p95 üst sınır", next(x for x in out.splitlines() if x.startswith("TOPLAM")))
+        self.assertIn("Beklenti kapısı expected_cost_gate_usd=4.5 USD: GEÇER", out)
+        self.assertIn(f"mistral   {MISTRAL}", out)
+        for label, rel in FRAME_FILES.items():
+            sha = hashlib.sha256((ROOT / rel).read_bytes()).hexdigest()
+            self.assertIn(f"Çerçeve {label}: {ROOT / rel} (kind "
+                          + ("story, yasaklı kök denetimi temiz" if label == "story"
+                             else "abstract") + f"), sha256 {sha} — kilitli, beklenenle aynı", out)
+        self.assertIn("Run adı: şablon minipilot_{run_date} — yeni gerçek koşuda koşu günüyle "
+                      f"çözülür (bugün: minipilot_{pgg_game.run_date()})", out)
+        self.assertIn("ÖN KAYIT ONAYI YOK", out)
+        self.assertIn("reasoning_effort=gönderilmez", out)
+        self.assertIn("max_tokens=16000", out)
+        self.assertIn("request_deadline_s=900", out)
+        self.assertIn("stall_timeout_s=1800", out)
+        self.assertIn("seed_namespace=pgg-minipilot, parallel_units=3, workers=4", out)
+
+    def test_dry_run_of_the_placeholder_config(self):
+        code, out, err = self.main("--dry-run", "--config", str(placeholder_config(self.tmp)))
+        self.assertEqual(code, 0, err)
+        self.create.assert_not_called()
         self.assertIn("ÇAĞRI SAYISI HESAPLANAMADI", out)
         for key in ("conditions", "arms", "groups_per_cell", "isolated_reps", "isolated_points",
                     "cards", "cities"):
@@ -239,15 +314,12 @@ class MiniPilotRuns(GuardTestBase):
         self.assertIn(f"mistral={MISTRAL}", out)
         self.assertIn("ÖN KAYIT ONAYI YOK", out)
         self.assertIn("SEÇİLMEMİŞ (gerçek koşu başlamaz)", out)
-        self.assertIn("reasoning_effort=gönderilmez", out)
-        self.assertIn("max_tokens=16000", out)
-        self.assertIn("request_deadline_s=900", out)
-        self.assertIn("stall_timeout_s=1800", out)
 
     def test_dry_run_counts_once_the_design_is_given(self):
         # CLI values on top of the placeholders (cards file: cities filter it)
         code, out, err = self.main(
-            "--dry-run", "--config", str(MINIPILOT_CONFIG), "--cards", str(PILOT_CARDS_V2),
+            "--dry-run", "--config", str(placeholder_config(self.tmp)), "--cards",
+            str(PILOT_CARDS_V2),
             "--cities", "Boston,Riyadh", "--conditions", "N", "--arms", "group,isolated",
             "--groups-per-cell", "2", "--isolated-reps", "2", "--points", "0,5,10,15,20",
             "--frames", "abstract_v3=deepseek,mistral,gpt", "--isolated-frame", "fixed_round")
@@ -262,7 +334,8 @@ class MiniPilotRuns(GuardTestBase):
         self.assertNotIn("ÖRNEK (tahmin)", out)
         # a placeholder cards file does not block when --cells is given
         code, out, _ = self.main(
-            "--dry-run", "--config", str(MINIPILOT_CONFIG), "--cells", "2", "--conditions", "N",
+            "--dry-run", "--config", str(placeholder_config(self.tmp)), "--cells", "2",
+            "--conditions", "N",
             "--arms", "group", "--groups-per-cell", "1", "--isolated-reps", "1", "--points", "0",
             "--frames", "abstract_v3=deepseek,mistral,gpt")
         self.assertEqual(code, 0)
@@ -276,7 +349,9 @@ class MiniPilotRuns(GuardTestBase):
              str(MINIPILOT_CONFIG)],
             capture_output=True, text=True, env=env, cwd=self.tmp, timeout=60)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("ÇAĞRI SAYISI HESAPLANAMADI", proc.stdout)
+        # the config's relative cards / frame paths are the repository's, not the cwd's
+        self.assertIn("3600 çağrı", proc.stdout)
+        self.assertIn(f"Çerçeve story: {ROOT / 'frames' / 'story_A.json'} (kind story", proc.stdout)
 
     def test_pilot_v2_dry_run_unchanged(self):
         code, out, err = self.main("--dry-run", "--config", str(PILOT_CONFIG),

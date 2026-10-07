@@ -1,0 +1,72 @@
+{
+  "_notes": "Story draft A (task #62, goal C2): a phone app's 'jar'. System message = the card alone (as abstract_v3); the story starts in the user message. Windfall: the app adds the credits free of charge; no effort, no 'earn' / 'earnings' wording. Equal split is the jar's explicit rule. Same numbers as abstract_v3 via placeholders (endowment, multiplier, mpcr, n, rounds). Punishment step (condition P, not in the mini-pilot) written neutrally as 'reductions' of a balance: no complaint, court, sanction or institution. Rule-comprehension questions measure the same as abstract_v3 (q1 own 8, others 4/12/16 -> 28; q2 delta 10 -> -6, keys computed by the engine). Format: frames/SCHEMA.md of commit 8616997. Do not change after data has been seen. Task #67 (before any data): copied from workspace/frames_story_A.json into the repository; kind story (linted for the forbidden roots at every run start); the last sentence of q2 is 'Give the change as a whole number with its sign, for example +3 or -3.' (was 'Use a negative number if it goes down.'; the 3 comes from answer.example).",
+  "schema": 1,
+  "name": "story_A_jar",
+  "description": "Story frame draft A: credits that a phone app adds every day, and a jar of strangers whose contents grow and are always divided equally.",
+  "kind": "story",
+  "system": "{card}",
+  "player_label": "User {player_no}",
+  "you_suffix": " (you)",
+  "rules": [
+    {"text": "THE JAR"},
+    {"text": "- A phone app you use has opened a jar for {n} of its users: you and {n_others} other people whom you do not know. Nobody in the jar can contact anybody else in it."},
+    {"text": "- The jar runs for several days; this question is about a single day.", "when": ["single_round"]},
+    {"text": "- The jar runs for {rounds} days, with the same {n} users every day.", "when": ["multi_round"]},
+    {"text": "- At the start of every day the app adds {endowment} credits to the balance of each user, free of charge. Credits can be spent in the app like cash."},
+    {"text": "- Each user then decides how many of these new credits (a whole number from 0 to {endowment}) to put into the jar. Credits that are not put into the jar stay in the user's balance."},
+    {"text": "- At the end of the day the app makes the jar {multiplier} times as large. The jar has a fixed rule: everything in it is divided equally among the {n} users, no matter who put in how much. So every credit put into the jar brings {mpcr} credits to each of the {n} users. Your part of the jar in a day is therefore:"},
+    {"text": "  {mpcr} x (credits put into the jar by all {n} users together)"},
+    {"text": "- What you end a day with is the credits you kept plus your part of the jar:"},
+    {"text": "  {endowment} - (credits you put into the jar) + {mpcr} x (credits put into the jar by all {n} users together)"},
+    {"text": "- After the amounts of a day are shown, each user may also make reductions (0 to {max_punish}) to the balance of each other user. Each reduction costs the user who makes it {punish_cost} credit(s) and removes {punish_impact} credits from the other user's balance. A user learns only the total number of reductions made to their balance, not who made them.", "when": ["P"]},
+    {"text": "- After each day you see how many credits each user put into the jar and what you ended the day with.", "when": ["multi_round"]}
+  ],
+  "history": {
+    "empty": "EARLIER DAYS\nThis is the first day; there are no earlier days yet.",
+    "header": "EARLIER DAYS",
+    "list_item": "{label}: {value}",
+    "list_separator": "; ",
+    "contributions": "Put into the jar: {contributions_list}. Jar total before it grew: {group_total}.",
+    "round": [
+      "Day {round}",
+      "  {contributions}",
+      "  Your part of the jar: {project_share}. What you ended the day with: {round_earnings}."
+    ],
+    "round_P": [
+      "  Reductions you made: {punish_given} (cost to you: {cost_paid}).",
+      "  Reductions made to your balance: {received} (credits removed: {points_lost}).",
+      "  What you ended the day with after reductions: {final_earnings}."
+    ],
+    "punish_given_separator": ", ",
+    "punish_given_none": "none"
+  },
+  "contribute": "DAY {round_no} of {rounds}. You are {me}. All users choose at the same time, without seeing each other's choice for this day.\nHow many of your {endowment} new credits do you put into the jar? (a whole number from 0 to {endowment})",
+  "punish": "DAY {round_no} of {rounds}, reduction step. You are {me}.\nThis day: {contributions} Your part of the jar this day: {project_share}. What you end this day with (before reductions): {earnings}.\nYou may now make reductions (0 to {max_punish}) to the balance of each other user. Each reduction costs you {punish_cost} credit(s) and removes {punish_impact} credits from that user's balance. Your total cost may not exceed what you end this day with, so you can make at most {max_points} reductions in total. All users choose at the same time.",
+  "isolated": {
+    "fixed_round": {
+      "rules": "multi_round",
+      "question": "QUESTION\nThis is day {round_no} of {rounds}. On the previous day the other {n_others} users of your jar put in, on average, {others_mean} credits each.\nHow many of your {endowment} new credits do you put into the jar on this day? (a whole number from 0 to {endowment})"
+    }
+  },
+  "comprehension": {
+    "prompt": "CHECK OF THE JAR'S RULES\nBefore you choose anything, answer the questions below about the jar's rules. Your answers do not change anybody's balance.\n1. {q1}\n2. {q2}\nAnswer each question with a whole number.",
+    "questions": [
+      {
+        "id": "q1",
+        "text": "Suppose that on a day you put {own} credits into the jar and the other {n_others} users put in {other_1}, {other_2} and {other_3} credits. How many credits do you end that day with?",
+        "answer": {"kind": "round_earnings", "own": 8, "others": [4, 12, 16]}
+      },
+      {
+        "id": "q2",
+        "text": "Suppose that the other users put the same amounts into the jar. If you put {delta} more credits into the jar, by how much does what you end that day with change? Give the change as a whole number with its sign, for example +{example} or -{example}.",
+        "answer": {"kind": "own_change", "delta": 10, "example": 3}
+      }
+    ]
+  },
+  "response": {
+    "decision_key": "credits_into_jar",
+    "rationale_description": "One or two sentences on why you chose this.",
+    "punishment_key": "reductions",
+    "punishment_description": "Reductions per other user, keyed by user number."
+  }
+}

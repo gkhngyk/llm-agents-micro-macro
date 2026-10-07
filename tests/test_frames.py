@@ -792,7 +792,15 @@ class CostGateAndCap(FrameBase):
         self.assertIn("AŞILIYOR — gerçek koşu BAŞLAMAZ", out)
 
     def test_dry_run_with_a_story_file_not_chosen(self):
-        code, out, err = self.dry("--frames", "abstract_v3=deepseek,mistral,gpt;story=deepseek")
+        # the committed config locks story_A (task #67); a placeholder story file is
+        # the state before the user chose a draft
+        cfg_path = self.tmp / "mp_unchosen.json"
+        raw = json.loads(MINIPILOT_CONFIG.read_text())
+        raw["frame_files"]["story"] = "<TBD_PREREG: story frame file chosen by the user>"
+        cfg_path.write_text(json.dumps(raw))
+        code, out, err = _main("--dry-run", "--config", str(cfg_path), "--cards",
+                               str(PILOT_CARDS_V2), "--cities", "Boston,Riyadh",
+                               "--frames", "abstract_v3=deepseek,mistral,gpt;story=deepseek")
         self.assertEqual(code, 0, err)
         self.assertIn("istem ölçeği yok: çerçeve dosyası seçilmedi", out)
 

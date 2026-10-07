@@ -262,19 +262,66 @@ def _usage_dict(u) -> dict | None:
         return None
 
 
-def _parse_json_strict(raw: str) -> tuple[dict, bool]:
+# Signs before a number that JSON does not allow: "+" is dropped, the minus
+# sign U+2212 becomes "-" (_normalize_number_signs).
+_NUMBER_SIGNS = {"+": "", "−": "-"}
+
+
+def _normalize_number_signs(raw: str) -> str:
+    """raw with a "+" (dropped) or "−" (-> "-") directly before a digit where a
+    JSON value starts (after ":", "[" or ","), outside strings; nothing else changes."""
+    out = []
+    in_string = escaped = False
+    prev = ""                                   # last non-blank character outside strings
+    for i, ch in enumerate(raw):
+        if in_string:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+                prev = ch
+            continue
+        if ch in _NUMBER_SIGNS and prev in (":", "[", ",") and raw[i + 1:i + 2] in tuple("0123456789"):
+            out.append(_NUMBER_SIGNS[ch])
+            prev = ch
+            continue
+        if ch == '"':
+            in_string = True
+        out.append(ch)
+        if not ch.isspace():
+            prev = ch
+    return "".join(out)
+
+
+def _parse_json_strict(raw: str, signed_numbers: bool = False) -> tuple[dict, bool]:
     """Parse a JSON payload; returns (parsed, degraded).
 
     degraded is True when the prose-wrapping fallback was needed. The fallback
     behaves as before; it is only labelled so the log shows it.
+
+    signed_numbers (task #67, rule-comprehension answers such as {"q2": +3}):
+    when the payload is not JSON, a "+" or a minus sign U+2212 written before a
+    number value (outside strings) is normalised first (_normalize_number_signs);
+    such a parse is degraded too. Off by default: decisions are parsed as before.
     """
     try:
         return json.loads(raw), False
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as first:
+        if signed_numbers:
+            fixed = _normalize_number_signs(raw)
+            if fixed != raw:
+                raw = fixed
+                try:
+                    return json.loads(raw), True
+                except json.JSONDecodeError:
+                    pass
         # Fallback for models that wrap JSON in prose — logged as degraded.
         m = re.search(r"\{.*\}", raw, re.DOTALL)
         if not m:
-            raise
+            raise first
         return json.loads(m.group(0)), True
 
 
@@ -605,11 +652,16 @@ def _call_llm_counted(
     on_deadline=None,
     attempt_counts: dict | None = None,
     expected_provider: str | None = None,
+    signed_numbers: bool = False,
 ) -> tuple[dict, int, int]:
     """call_llm that also returns the parse failures and provider errors it retried.
 
     Returns (parsed, n_parse_fail, n_provider_error). If every attempt fails,
     the RuntimeError carries both counts as attributes.
+
+    signed_numbers: a number value written "+3" (or with the minus sign
+    U+2212) is parsed, not a parse failure (_parse_json_strict; pgg_game uses
+    it for the rule-comprehension answers only).
 
     reasoning_effort=None is not sent (provider default, logged "default");
     otherwise it goes out as OpenRouter's reasoning.effort. When meta is a
@@ -749,7 +801,7 @@ def _call_llm_counted(
             raw = resp.choices[0].message.content
             if raw is None or not raw.strip():
                 raise _EmptyResponseError("empty response content")
-            parsed, degraded = _parse_json_strict(raw)
+            parsed, degraded = _parse_json_strict(raw, signed_numbers)
         except Exception as e:
             last_err = e
             last_finish_reason = _finish_reason(resp)
@@ -930,6 +982,7 @@ def call_llm_valid(
     call_info: dict | None = None,
     on_deadline=None,
     expected_provider: str | None = None,
+    signed_numbers: bool = False,
 ) -> tuple[dict, int] | tuple[dict, int, int]:
     """call_llm, re-requesting payloads for which is_valid(parsed) is False.
 
@@ -947,8 +1000,8 @@ def call_llm_valid(
     also when the call finally fails or a hook stops it.
 
     reasoning_effort, meta, provider, timeout, request_deadline_s, call_info,
-    expected_provider and the before_call / on_response / on_late_response /
-    on_deadline hooks are passed through to
+    expected_provider, signed_numbers and the before_call / on_response /
+    on_late_response / on_deadline hooks are passed through to
     the underlying call; meta ends up holding the metadata of the accepted
     (last) response.
     """
@@ -969,7 +1022,7 @@ def call_llm_valid(
                 provider=provider, timeout=timeout, request_deadline_s=request_deadline_s,
                 on_late_response=on_late_response, call_info=call_info,
                 on_deadline=on_deadline, attempt_counts=counts,
-                expected_provider=expected_provider)
+                expected_provider=expected_provider, signed_numbers=signed_numbers)
         except RuntimeError as e:
             if counts is not None:
                 counts.update(

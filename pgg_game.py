@@ -275,15 +275,17 @@ commit and sha256 of the code files).
 Code version (A5). code_version() is recorded in every segment entry and
 start event and its git_commit is never empty for a real run:
   * code directory = top of a git checkout: git_commit = HEAD; the code is
-    dirty when `git status --porcelain --untracked-files=no -- '*.py'` shows
-    a tracked .py file changed (source "git").
+    dirty when `git status --porcelain --untracked-files=no -- <VERSIONED>`
+    shows a tracked file changed, VERSIONED = '*.py', 'frames/*.json',
+    'configs/*.json', 'cards/*.json' (task #67: frame, config and card files
+    decide the prompts and the design as much as the code; source "git").
   * else (e.g. a copy unpacked with git archive into workspace/_kod_<sha>/):
     CODE_VERSION.json in the code directory, written from the git checkout
     with
         git archive <sha> | tar -x -C <dir>
         python pgg_game.py --write-code-version <dir> --code-commit <sha>
-    It holds the commit and the sha256 of every tracked .py file of that
-    commit (write_code_version checks them against <dir> before writing).
+    It holds the commit and the sha256 of every tracked VERSIONED file of
+    that commit (write_code_version checks them against <dir> before writing).
     On every start the hashes are checked again; a missing or changed file
     makes the code dirty (source "stamp", stamp_problems).
   * A real run and --resume do not start when the version is unknown (no
@@ -352,7 +354,11 @@ DEFAULT_STALL_TIMEOUT_S = 1800.0
 # difference needs allow_timeout_change / --allow-timeout-change).
 TIMEOUT_SETTINGS = ("request_deadline_s", "stall_timeout_s")
 # Files whose sha256 goes into code_version().
-CODE_FILES = ("pgg_game.py", "llm_client.py", "pgg_cost.py", "pgg_frames.py")
+CODE_FILES = ("pgg_game.py", "llm_client.py", "pgg_cost.py", "pgg_frames.py", "cerceve_linter.py")
+# Tracked files whose change makes the code dirty (git pathspecs, A5; frames,
+# configs and cards since task #67) and that a CODE_VERSION.json stamp covers.
+VERSIONED_PATHSPECS = ("*.py", "frames/*.json", "configs/*.json", "cards/*.json")
+VERSIONED_DATA_DIRS = ("frames", "configs", "cards")
 # Version stamp of a code directory outside git (A5, write_code_version).
 CODE_VERSION_FILE = "CODE_VERSION.json"
 # A real run and --resume refuse code whose version is unknown or dirty
@@ -377,6 +383,44 @@ def placeholders_in(value, path: str) -> list[str]:
     if isinstance(value, (list, tuple)):
         return [p for i, v in enumerate(value) for p in placeholders_in(v, f"{path}[{i}]")]
     return []
+
+
+def is_versioned_file(name: str) -> bool:
+    """True for a repository path VERSIONED_PATHSPECS covers (as git matches them)."""
+    parts = Path(name).parts
+    return name.endswith(".py") or (len(parts) > 1 and parts[0] in VERSIONED_DATA_DIRS
+                                    and name.endswith(".json"))
+
+
+# Run name template (task #67): config "run" may hold RUN_DATE_FIELD, e.g.
+# "minipilot_{run_date}". A new real run resolves it to the local date of its
+# start (YYYYMMDD) and records the template in the summary ("run_template");
+# --resume needs the resolved name given explicitly (--run). The run day is not
+# written into the config, so the committed config (and the code) stay clean.
+RUN_DATE_FIELD = "{run_date}"
+
+
+def is_run_template(run) -> bool:
+    return isinstance(run, str) and RUN_DATE_FIELD in run
+
+
+def run_date() -> str:
+    """Local date of the run start, YYYYMMDD (tests patch it)."""
+    return time.strftime("%Y%m%d")
+
+
+def resolve_run_name(run: str, date: str | None = None) -> str:
+    """The run name with RUN_DATE_FIELD replaced by the date; ValueError for any other brace."""
+    name = run.replace(RUN_DATE_FIELD, date or run_date())
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+        raise ValueError(f"run name template {run!r} gives {name!r}: only {RUN_DATE_FIELD} may "
+                         "be in it and the name must be [A-Za-z0-9_.-]+")
+    return name
+
+
+def run_template_pattern(run: str) -> str:
+    """Regex of the names a template gives (RUN_DATE_FIELD = eight digits)."""
+    return re.escape(run).replace(re.escape(RUN_DATE_FIELD), r"\d{8}")
 
 
 def _llm():
@@ -430,9 +474,10 @@ def _read_code_version(code_dir: Path | None = None) -> dict:
     """git_commit, git_dirty, source and files_sha256 (CODE_FILES) of a code directory.
 
     source "git": code_dir is the top of a git checkout; git_commit = HEAD,
-    git_dirty = `git status --porcelain --untracked-files=no -- '*.py'` shows
-    a change of a tracked .py file (dirty_files lists them; None if git
-    status failed). source "stamp": no git checkout, but code_dir holds
+    git_dirty = `git status --porcelain --untracked-files=no -- <VERSIONED_PATHSPECS>`
+    shows a change of a tracked .py, frames/*.json, configs/*.json or
+    cards/*.json file (dirty_files lists them; None if git status failed).
+    source "stamp": no git checkout, but code_dir holds
     CODE_VERSION_FILE (write_code_version); every file it lists must exist
     with its sha256 and it must list CODE_FILES, else git_dirty is True and
     stamp_problems says why; git_commit is the stamp's. source None: neither;
@@ -445,8 +490,8 @@ def _read_code_version(code_dir: Path | None = None) -> dict:
     if _is_git_top(code_dir):
         out["source"] = "git"
         out["git_commit"] = _git(code_dir, "rev-parse", "HEAD")
-        status = _git(code_dir, "status", "--porcelain", "--untracked-files=no", "--", "*.py",
-                      strip=False)              # "XY path": the leading blank counts
+        status = _git(code_dir, "status", "--porcelain", "--untracked-files=no", "--",
+                      *VERSIONED_PATHSPECS, strip=False)   # "XY path": the leading blank counts
         if status is not None:
             out["dirty_files"] = sorted(line[3:] for line in status.splitlines() if line.strip())
             out["git_dirty"] = bool(out["dirty_files"])
@@ -504,8 +549,9 @@ def code_version_problem(cv: dict) -> str | None:
     if cv.get("git_dirty") is None:
         return "git status could not be read: whether the code is dirty is unknown"
     if cv.get("git_dirty"):
-        return (f"the code is dirty: tracked .py files differ from commit {cv.get('git_commit')} "
-                f"({', '.join(cv.get('dirty_files') or [])}); commit them first")
+        return (f"the code is dirty: tracked code / frame / config / card files differ from "
+                f"commit {cv.get('git_commit')} ({', '.join(cv.get('dirty_files') or [])}); "
+                "commit them first")
     return None
 
 
@@ -518,8 +564,9 @@ def write_code_version(target_dir, commit: str = "HEAD", repo_dir: Path | None =
 
         python pgg_game.py --write-code-version workspace/_kod_<sha> --code-commit <sha>
 
-    The stamp holds the commit and the sha256 of every tracked .py file of
-    that commit (`git ls-tree`, blobs as committed). Each must equal the
+    The stamp holds the commit and the sha256 of every tracked file of that
+    commit that VERSIONED_PATHSPECS covers (.py, and *.json under frames/,
+    configs/ and cards/; `git ls-tree`, blobs as committed). Each must equal the
     file in target_dir, else ValueError and nothing is written. An existing
     stamp with the same commit and hashes is kept; another one is an error.
     """
@@ -536,7 +583,7 @@ def write_code_version(target_dir, commit: str = "HEAD", repo_dir: Path | None =
     files = {}
     problems = []
     for name in sorted((names or "").splitlines()):
-        if not name.endswith(".py"):
+        if not is_versioned_file(name):
             continue
         blob = _git(repo_dir, "show", f"{sha}:{name}", binary=True)
         if blob is None:
@@ -551,7 +598,7 @@ def write_code_version(target_dir, commit: str = "HEAD", repo_dir: Path | None =
     if missing:
         problems.append(f"commit {sha} has no {missing}")
     if problems:
-        raise ValueError(f"{target} does not hold the tracked .py files of commit {sha}: "
+        raise ValueError(f"{target} does not hold the tracked versioned files of commit {sha}: "
                          + "; ".join(problems) + f". {CODE_VERSION_FILE} not written")
     stamp = {"git_commit": sha, "files_sha256": files,
              "written_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1125,6 +1172,106 @@ def check_output_dir(path, *, must_exist: bool, what: str) -> Path:
     return path
 
 
+# --------------------------------------------------------------------------
+# Frame files of a run: sha256 lock and story linter (task #67)
+# --------------------------------------------------------------------------
+
+def frame_file_spec(label: str, value) -> tuple[str | None, str | None]:
+    """(path, locked sha256) of a frame_files entry: a path, or {"path"[, "sha256"]}."""
+    if value is None:
+        return None, None
+    if isinstance(value, str):
+        return value, None
+    if (isinstance(value, dict) and isinstance(value.get("path"), str)
+            and set(value) <= {"path", "sha256"}):
+        sha = value.get("sha256")
+        if sha is not None and not (isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{64}", sha)):
+            raise ValueError(f"frame_files[{label}].sha256 must be 64 lower-case hex digits, "
+                             f"got {sha!r}")
+        return value["path"], sha
+    raise ValueError(f"frame_files[{label}] must be a path or {{\"path\": ..., \"sha256\": ...}}, "
+                     f"got {value!r}")
+
+
+def resolve_frame_path(label: str, path: str | None) -> Path:
+    """File of a frame: its frame_files path (a relative one is relative to the code
+    directory, so the run does not depend on the working directory), else
+    frames/<label>.json."""
+    if path is None:
+        return pgg_frames.frame_path(label)
+    p = Path(path)
+    return p if p.is_absolute() else PROJECT_DIR / p
+
+
+def load_frame_file(label: str, value) -> Frame:
+    """Read and validate a frame_files entry; FrameError when its sha256 is not the locked one."""
+    path, sha = frame_file_spec(label, value)
+    frame = pgg_frames.load_frame(resolve_frame_path(label, path))
+    if sha is not None and frame.sha256 != sha:
+        raise FrameError(f"frame {label!r}: sha256 of {frame.path} is {frame.sha256}, but "
+                         f"frame_files locks {sha}: the file changed after it was locked; "
+                         "no run starts")
+    return frame
+
+
+def story_frame_problems(frame: Frame, params: GameParams) -> list[str]:
+    """Forbidden roots (cerceve_linter.ROOTS) in a story frame, as "where: root (word)".
+
+    Scans every text of the frame file (comments "_..." excluded, placeholder
+    names removed) and what the frame and the code put around the card in the
+    rendered prompts: the user message of every call kind (round 1 and a later
+    round under N and P, the punishment step, every isolated wording, the rule
+    comprehension), the JSON schemas and the schema request
+    (SCHEMA_PROMPT_SUFFIX). The card (system message) is not scanned: its
+    text is the cards' business (kart_linter).
+    """
+    import cerceve_linter
+    out = [f"{where}: {root} ({word})"
+           for where, root, word in cerceve_linter.frame_file_hits(frame.data)]
+    card = Card("lint", "lint", "-")
+    n = params.group_size
+    c = [(7 * j) % (params.endowment + 1) for j in range(n)]
+    pe = project_payoffs(params, c)
+    pun = [[1 if i != j else 0 for j in range(n)] for i in range(n)]
+    final, cost, received = apply_punishment(params, pe, pun)
+    history = {"N": [RoundRecord(1, c, pe, final_earnings=pe)],
+               "P": [RoundRecord(1, c, pe, pun, cost, received, final)]}
+    parts = [("schema request", SCHEMA_PROMPT_SUFFIX)]
+
+    def add(kind, messages, schema):
+        parts.append((kind, "\n".join(m["content"] for m in messages if m["role"] != "system")))
+        parts.append((f"{kind} schema", json.dumps(schema, ensure_ascii=False)))
+
+    decision = contribution_schema(params, True, prompt_frame=frame)
+    for cond in ("N", "P"):
+        for hist in ([], history[cond]):
+            r = len(hist) + 1
+            add(f"contribute {cond} round {r}",
+                frame.contribution_messages(params, cond, card, hist, 0, r), decision)
+    add("punish", frame.punishment_messages(params, card, history["P"], 0, 2, c, pe[0],
+                                            punishment_budget(pe[0])),
+        punishment_schema(params, list(range(2, n + 1)), True, prompt_frame=frame))
+    for iso in frame.isolated_frames:
+        add(f"isolated {iso}", frame.isolated_messages(params, card, params.endowment, iso,
+                                                       params.rounds), decision)
+    if frame.has_comprehension:
+        for cond in ("N", "P"):
+            add(f"comprehension {cond}", frame.comprehension_messages(params, card, cond),
+                frame.comprehension_schema(True))
+    for kind, text in parts:
+        out += [f"rendered {kind}: {root} ({word})" for root, word in cerceve_linter.find_hits(text)]
+    return list(dict.fromkeys(out))
+
+
+def check_story_frame(label: str, frame: Frame, params: GameParams) -> None:
+    """FrameError when a story frame holds a forbidden root (story_frame_problems)."""
+    problems = story_frame_problems(frame, params)
+    if problems:
+        raise FrameError(f"story frame {label!r} ({frame.path}) holds forbidden roots of "
+                         "cerceve_linter (game, player, contribut, ...); no run starts:\n  - "
+                         + "\n  - ".join(problems))
+
+
 @dataclass
 class RunConfig:
     run: str
@@ -1177,8 +1324,12 @@ class RunConfig:
     # without a frame part, exactly as before frames existed (pilot v2).
     # Otherwise {frame label: [model keys]}: cell = card x model x frame, and
     # the frame label is part of every unit label, session id, group id,
-    # seed and order key. A frame's file is frame_files[label] (a path, e.g.
-    # a story in the workspace), else frames/<label>.json.
+    # seed and order key. A frame's file is frame_files[label], else
+    # frames/<label>.json. An entry is a path or {"path": ..., "sha256": ...}
+    # (task #67: the file must have that sha256, else no run starts, and a
+    # dry run fails); a relative path is relative to the code directory. A
+    # frame of kind "story" must hold none of cerceve_linter.ROOTS
+    # (story_frame_problems, checked in _validate_frames).
     frames: dict | None = None
     frame_files: dict | None = None
     # isolated_frame "fixed_round": the round the isolated question names
@@ -1189,6 +1340,9 @@ class RunConfig:
     # a real run does not start when the dry-run estimate (design_estimate,
     # cost_usd) is above this; None = no gate
     expected_cost_gate_usd: float | None = None
+    # the config's run name template ("minipilot_{run_date}") when run was
+    # resolved from it at the start of this (new) run; written to the summary
+    run_template: str | None = None
     _frame_cache: dict | None = field(default=None, init=False, repr=False, compare=False)
 
     def frame_models(self) -> dict[str, list[str]]:
@@ -1201,7 +1355,8 @@ class RunConfig:
         return [label for label, keys in self.frame_models().items() if model_key in keys]
 
     def load_frames(self) -> dict[str, Frame]:
-        """{frame label: Frame}, read and validated once (FrameError if a file is invalid)."""
+        """{frame label: Frame}, read and validated once (FrameError if a file is invalid
+        or its sha256 is not the one frame_files locks)."""
         if self._frame_cache is None:
             files = self.frame_files or {}
             out = {}
@@ -1209,7 +1364,7 @@ class RunConfig:
                 if label == DEFAULT_FRAME and label not in files:
                     out[label] = default_frame()
                 else:
-                    out[label] = pgg_frames.load_frame(pgg_frames.frame_path(label, files.get(label)))
+                    out[label] = load_frame_file(label, files.get(label))
             self._frame_cache = out
         return self._frame_cache
 
@@ -1333,6 +1488,8 @@ class RunConfig:
             open_ = placeholders_in(self.frame_files, "frame_files")
             if open_:
                 raise ValueError(f"not chosen yet (placeholder): {', '.join(open_)}")
+            for label, value in self.frame_files.items():
+                frame_file_spec(label, value)           # ValueError if malformed
         if not isinstance(self.comprehension, bool):
             raise ValueError("comprehension must be true or false")
         if self.expected_cost_gate_usd is not None and (
@@ -1344,8 +1501,13 @@ class RunConfig:
                 self.isolated_round_no, 2, self.params.rounds):
             raise ValueError(f"isolated_round_no must be an integer in 2..{self.params.rounds} "
                              f"(the previous round's mean is given), got {self.isolated_round_no!r}")
-        frames = self.load_frames()            # FrameError (a ValueError) if a file is invalid
+        # FrameError (a ValueError) if a file is invalid or not the locked sha256
+        frames = self.load_frames()
         for label, f in frames.items():
+            # task #67: a story frame with a forbidden root stops the run (abstract
+            # frames say "game" / "contribute" on purpose: not linted)
+            if f.kind == "story":
+                check_story_frame(label, f, self.params)
             if "isolated" in self.arms and self.isolated_frame not in f.isolated_frames:
                 raise ValueError(f"frame {label!r} ({f.path}) has no isolated question "
                                  f"{self.isolated_frame!r}; it offers {list(f.isolated_frames)}")
@@ -1899,7 +2061,10 @@ class Engine:
                 request_deadline_s=self.deadline,
                 on_late_response=lambda info: self._on_late_response(model_key, info),
                 call_info=call, on_deadline=lambda info: self._on_deadline(model_key, info),
-                expected_provider=pinned["name"] if pinned else None)
+                expected_provider=pinned["name"] if pinned else None,
+                # task #67: q2 asks for the change "with its sign, for example +3";
+                # a rule-comprehension answer {"q2": +3} is parsed (decisions: as before)
+                **({"signed_numbers": True} if ctx.get("step") == "comprehension" else {}))
         except RuntimeError as e:
             mismatch = getattr(e, "last_error_kind", None) == "provider_mismatch"
             reason = "provider_mismatch_limit" if mismatch else "run_aborted"
@@ -2913,7 +3078,7 @@ class Engine:
             # (summary entry, else its start / resume event; absent before #46)
             for k in ("stalled", "request_deadline_s", "stall_timeout_s", "code_version", "lock",
                       "resume_points", "n_discarded", "timeout_change", "code_change",
-                      "provider_policy"):
+                      "provider_policy", "run_template"):
                 if k in entry:
                     item[k] = entry[k]
                 elif k in started_by_seg.get(seg, {}):
@@ -3094,10 +3259,15 @@ class Engine:
             "code_change": self.plan.code_change if self.plan else None,
             "provider_policy": dict(PROVIDER_POLICY),
             "lock": lock, "resume_points": resume_points,
+            "run_template": self.cfg.run_template,
         }
         segments = [*(self.plan.segments if self.plan else []), current]
         out = {
-            "run": self.cfg.run, "seed_namespace": self.cfg.seed_namespace,
+            "run": self.cfg.run,
+            # the config's run name template, resolved in the first segment
+            "run_template": next((s["run_template"] for s in segments
+                                  if s.get("run_template")), None),
+            "seed_namespace": self.cfg.seed_namespace,
             "segment": self.segment, "resumed": self.segment > 0,
             "stop_reason": self.stop_reason, "stopped_models": dict(self.stopped_models),
             "budget_usd": self.cfg.budget_usd, "invalid_rate_cap": self.cfg.invalid_rate_cap,
@@ -3209,7 +3379,8 @@ class Engine:
 
     def _start_event(self, out_dir: Path, todo: list[UnitSpec], backup: Path | None) -> dict:
         event = {"ts": time.time(), "event": "pgg_run_resume" if self.plan else "pgg_run_start",
-                 "run": self.cfg.run, "segment": self.segment,
+                 "run": self.cfg.run, "run_template": self.cfg.run_template,
+                 "segment": self.segment,
                  "seed_namespace": self.cfg.seed_namespace, "output_dir": str(out_dir),
                  "request_deadline_s": self.deadline, "stall_timeout_s": self.stall_timeout,
                  "timeout_change": self.plan.timeout_change if self.plan else None,
@@ -3718,6 +3889,23 @@ def count_blockers(s: dict) -> list[str]:
     return out
 
 
+def resume_run_name_problem(s: dict) -> str | None:
+    """Why --resume may not go on with this run name (None = it may).
+
+    A run name template ("minipilot_{run_date}") is resolved only for a new
+    run: --resume needs the resolved name given with --run, and that name must
+    be one the config's template gives.
+    """
+    run, template = s.get("run"), s.get("_config_run")
+    if is_run_template(run):
+        return (f"--resume needs the run name given explicitly (--run, e.g. "
+                f"{resolve_run_name(run, 'YYYYMMDD')}): the config's run name {run!r} is a "
+                "template, resolved only when a new run starts")
+    if is_run_template(template) and not re.fullmatch(run_template_pattern(template), run or ""):
+        return f"run name {run!r} does not fit the config's run name template {template!r}"
+    return None
+
+
 def prereg_problem(s: dict) -> str | None:
     """Why a real run may not start under the pre-registration lock (None = it may).
 
@@ -3768,22 +3956,41 @@ def resolve_frames(frames, models: dict[str, str]) -> dict | None:
     return out
 
 
-def dry_run_frames(frame_models: dict, frame_files) -> dict:
+def dry_run_frames(frame_models: dict, frame_files, params: GameParams | None = None) -> dict:
     """{label: Frame} for a dry run; None for a file that is still a placeholder.
 
-    FrameError (a ValueError) when a chosen file is missing or invalid.
+    FrameError (a ValueError) when a chosen file is missing or invalid, when its
+    sha256 is not the one frame_files locks, or (with params) when a story frame
+    holds a forbidden root: the dry run fails as the real run would.
     """
     files = frame_files if isinstance(frame_files, dict) else {}
     out = {}
     for label in frame_models:
-        path = files.get(label)
-        if is_placeholder(path):
+        value = files.get(label)
+        if placeholders_in(value, label):
             out[label] = None
-        elif label == DEFAULT_FRAME and path is None:
+        elif label == DEFAULT_FRAME and value is None:
             out[label] = default_frame()
         else:
-            out[label] = pgg_frames.load_frame(pgg_frames.frame_path(label, path))
+            out[label] = load_frame_file(label, value)
+            if params is not None and out[label].kind == "story":
+                check_story_frame(label, out[label], params)
     return out
+
+
+def frame_lock_lines(frames: dict, frame_files) -> list[str]:
+    """One dry-run line per frame: file, kind, sha256 and whether frame_files locks it."""
+    files = frame_files if isinstance(frame_files, dict) else {}
+    lines = []
+    for label, f in frames.items():
+        if f is None:
+            continue
+        sha = frame_file_spec(label, files.get(label))[1]
+        lines.append(f"Çerçeve {label}: {f.path} (kind {f.kind}"
+                     + (", yasaklı kök denetimi temiz" if f.kind == "story" else "")
+                     + f"), sha256 {f.sha256} — "
+                     + ("kilitli, beklenenle aynı" if sha else "KİLİTSİZ (frame_files'ta sha256 yok)"))
+    return lines
 
 
 def _parse_effort(value: str):
@@ -3802,7 +4009,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "with --dry-run only print what is complete and what is left")
     ap.add_argument("--run", help="run name (else config \"run\"); output goes to "
                                   "<runs-dir>/<run>/")
-    ap.add_argument("--config", help="JSON file with the options below (CLI wins)")
+    ap.add_argument("--config", help="JSON file with the options below (CLI wins); its relative "
+                                     "cards / frame_files paths are relative to the code "
+                                     "directory, its \"run\" may hold {run_date}")
     ap.add_argument("--cards", help="JSON list of {card_id, style, text}")
     ap.add_argument("--cities", help="comma-separated: keep only these cards' \"city\" values")
     ap.add_argument("--cells", type=int, help="dry-run only: number of card x style cells "
@@ -3870,6 +4079,14 @@ def settings_from_args(args) -> dict:
     s = {}
     if args.config:
         s.update(json.loads(Path(args.config).read_text(encoding="utf-8")))
+        # a relative cards path of a config is relative to the code directory (as
+        # frame_files paths are): the committed configs name repository files
+        cards = s.get("cards")
+        if isinstance(cards, str) and not is_placeholder(cards) and not Path(cards).is_absolute():
+            s["cards"] = str(PROJECT_DIR / cards)
+        # the config's own run name (a template, e.g. "minipilot_{run_date}",
+        # is checked against an explicit --run on --resume)
+        s["_config_run"] = s.get("run")
     cli = {
         "run": args.run, "cards": args.cards, "cells": args.cells,
         "cities": _csv(args.cities) if args.cities else None,
@@ -4103,8 +4320,10 @@ def main(argv=None) -> int:
             print(f"HATA: {e}", file=sys.stderr)
             return 1
         stamp = json.loads(path.read_text(encoding="utf-8"))
-        print(f"yazıldı: {path} (commit {stamp['git_commit']}, "
-              f"{len(stamp['files_sha256'])} .py dosyası)")
+        n_py = sum(1 for name in stamp["files_sha256"] if name.endswith(".py"))
+        n_data = len(stamp["files_sha256"]) - n_py
+        print(f"yazıldı: {path} (commit {stamp['git_commit']}, {n_py} .py dosyası"
+              + (f", {n_data} çerçeve/config/kart dosyası" if n_data else "") + ")")
         return 0
     if args.code_commit:
         build_parser().error("--code-commit needs --write-code-version")
@@ -4123,6 +4342,10 @@ def main(argv=None) -> int:
         # read-only plan of a resumed run: no llm_client, no key, no write
         if not run or not s.get("cards"):
             build_parser().error("--resume needs --run and --cards")
+        problem = resume_run_name_problem(s)
+        if problem is not None:
+            print(f"HATA: {problem}", file=sys.stderr)
+            return 1
         open_ = open_choices(s)
         if open_:
             print("SEÇİLMEMİŞ: " + ", ".join(open_), file=sys.stderr)
@@ -4157,7 +4380,7 @@ def main(argv=None) -> int:
             if s.get("frames") is not None:
                 try:
                     frame_models = resolve_frames(s["frames"], models)
-                    frames = dry_run_frames(frame_models, s.get("frame_files"))
+                    frames = dry_run_frames(frame_models, s.get("frame_files"), params)
                 except ValueError as e:
                     print(f"HATA: çerçeve: {e}", file=sys.stderr)
                     return 1
@@ -4182,6 +4405,8 @@ def main(argv=None) -> int:
                         f"{len(points)} değer, kural anlama "
                         + ("açık (ajan başına grup öncesi 1, izole çizelge başına 1 çağrı)"
                            if s.get("comprehension") else "kapalı") + ".")))
+                for line in frame_lock_lines(frames, s.get("frame_files")):
+                    print(line)
             else:
                 print(dry_run_report(
                     models=models, n_cells=n_cells, params=params, conditions=conditions,
@@ -4206,6 +4431,15 @@ def main(argv=None) -> int:
         print(f"Ayarlar: reasoning_effort={s.get('reasoning_effort') or 'gönderilmez'}, "
               + ", ".join(f"{k}={v}" for k, v in guards.items()))
         print(code_version_line(code_version()))
+        if is_run_template(run):
+            try:
+                print(f"Run adı: şablon {run} — yeni gerçek koşuda koşu günüyle çözülür (bugün: "
+                      f"{resolve_run_name(run)}); --resume açık adla (--run) çalışır")
+            except ValueError as e:
+                print(f"HATA: {e}", file=sys.stderr)
+                return 1
+        elif run:
+            print(f"Run adı: {run}")
         if "prereg_approved" in s:
             problem = prereg_problem(s)
             print("Ön kayıt: onaylı (prereg_approved=true)" if problem is None else
@@ -4229,6 +4463,19 @@ def main(argv=None) -> int:
         return 1
     if not run or not s.get("cards"):
         build_parser().error("a real run needs --run and --cards (or use --dry-run)")
+    run_template = None
+    if args.resume:
+        problem = resume_run_name_problem(s)
+        if problem is not None:
+            print(f"HATA: {problem}; çağrı yapılmadı", file=sys.stderr)
+            return 1
+    elif is_run_template(run):
+        # a new run: the template gets the run day now (first segment)
+        try:
+            run_template, run = run, resolve_run_name(run)
+        except ValueError as e:
+            print(f"HATA: {e}; gerçek koşu başlamadı, çağrı yapılmadı", file=sys.stderr)
+            return 1
     open_ = open_choices(s)
     if open_:
         print("HATA: seçilmemiş ayarlar (yer tutucu), gerçek koşu başlamadı: "
@@ -4248,6 +4495,7 @@ def main(argv=None) -> int:
     try:
         models = resolve_models(names, llm.MODELS_KNOWN)
         cfg = run_config(run, s, models, output)
+        cfg.run_template = run_template
         engine = Engine(cfg, llm=llm)
     except ValueError as e:
         print(f"HATA: {e}", file=sys.stderr)

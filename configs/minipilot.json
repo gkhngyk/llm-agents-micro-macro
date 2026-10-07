@@ -1,23 +1,33 @@
 {
-  "_notes": "Mini-pilot (task B1+B3, 2026-10-06). Every \"<TBD_PREREG: ...>\" value is decided in prereg_minipilot.md, not here; a real run does not start while one is left or while prereg_approved is not true (the user approves prereg_minipilot.md first). Dry runs work. Models: gemini-2.5-flash-lite left after pilot v2 (pilot_v2_degerlendirme.md K5), mistral-large-4-0 added. providers: tag / provider_name from GET /api/v1/models/{id}/endpoints, checked 2026-10-06 (deepinfra/fp8 = DeepInfra fp8, as in pilot v2; mistral = Mistral; openai = OpenAI). Fallback off (allow_fallbacks false) and require_parameters true for all three (pgg_game.provider_routing). temperature and reasoning_effort are not sent (logged \"default\"). runs_dir must exist; outputs go to runs_dir/<run>/. Task #61 (goal C): frames = {frame label: [models]} (cell = card x model x frame; e.g. abstract_v3 for all three models, story for deepseek and mistral only), the story file is frame_files.story (the draft the user chooses, in the workspace); comprehension = the two rule-comprehension questions of each frame (C4); budget_usd = 6 is the hard cap on accumulated usage.cost (C5); a real run does not start while the dry-run estimate is above expected_cost_gate_usd = 4.5 (C5). isolated_round_no = 5: 'This is round 5 of 10.' (isolated_frame fixed_round, C1).",
+  "_notes": "Mini-pilot (task B1+B3, 2026-10-06; filled with the decisions of EMIR 2 Part 1 in task #67, 2026-10-07). prereg_approved stays false until the user approves prereg_minipilot.md: until then a real run (also --resume) does not start; dry runs work. Models: gemini-2.5-flash-lite left after pilot v2 (pilot_v2_degerlendirme.md K5), mistral-large-4-0 added. providers: tag / provider_name from GET /api/v1/models/{id}/endpoints, checked 2026-10-06 (deepinfra/fp8 = DeepInfra fp8, as in pilot v2; mistral = Mistral; openai = OpenAI). Fallback off (allow_fallbacks false) and require_parameters true for all three (pgg_game.provider_routing). temperature and reasoning_effort are not sent (logged \"default\"). runs_dir must exist; outputs go to runs_dir/<run>/. run: the template minipilot_{run_date} gets the local date of the run start (YYYYMMDD) when a new run starts and is written to the summary (run_template); --resume needs the resolved name with --run. cards: cards/pilot_cards_v3.json (sha256 a4f50d0f...a9aa), Boston + Riyadh = 6 cards, styles minimal / value / factual of v3 (prereg name of factual: neutral procedure card, Q5). frames: abstract_v3 and story for all three models (Q2 (a), Q3 (b)); frame_files lock each file by sha256 (task #67 K1: another file stops the run and the dry run); story = frames/story_A.json (draft A, the jar, Q1), kind story: linted for the forbidden roots of cerceve_linter at every run start. Relative paths are relative to the code directory. comprehension = the two rule-comprehension questions of each frame (q2 with the sign sentence of task #67 K2). budget_usd = 6 is the hard cap on accumulated usage.cost; a real run does not start while the dry-run estimate is above expected_cost_gate_usd = 4.5 (Q4). isolated_round_no = 5: 'This is round 5 of 10.' (isolated_frame fixed_round). rationale, max_invalid, invalid_rate_cap, stop_on_length and workers: prereg_minipilot.md settings table (max_invalid 3 as in configs/pilot.json). parallel_units 3 (item 14), check_snapshot true (item 15), seed_namespace pgg-minipilot (item 13).",
   "prereg_approved": false,
-  "run": "<TBD_PREREG: run name>",
-  "cards": "<TBD_PREREG: cards file>",
-  "cities": "<TBD_PREREG: cities of the cards file>",
+  "run": "minipilot_{run_date}",
+  "cards": "cards/pilot_cards_v3.json",
+  "cities": ["Boston", "Riyadh"],
   "models": ["deepseek/deepseek-v4.1-flash", "mistralai/mistral-large-4-0", "openai/gpt-6-luna"],
-  "conditions": "<TBD_PREREG: conditions (N / P)>",
-  "arms": "<TBD_PREREG: arms (group / isolated)>",
-  "groups_per_cell": "<TBD_PREREG: homogeneous groups per cell>",
-  "isolated_reps": "<TBD_PREREG: isolated schedule repetitions>",
-  "isolated_points": "<TBD_PREREG: isolated conditioning values>",
-  "isolated_frame": "<TBD_PREREG: isolated wording; abstract_v3 offers fixed_round>",
+  "conditions": ["N"],
+  "arms": ["group", "isolated"],
+  "groups_per_cell": 2,
+  "isolated_reps": 2,
+  "isolated_points": [0, 5, 10, 15, 20],
+  "isolated_frame": "fixed_round",
   "isolated_round_no": 5,
-  "frames": "<TBD_PREREG: frames per model, e.g. {\"abstract_v3\": [\"deepseek\", \"mistral\", \"gpt\"], \"story\": [\"deepseek\", \"mistral\"]}>",
+  "frames": {
+    "abstract_v3": ["deepseek", "mistral", "gpt"],
+    "story": ["deepseek", "mistral", "gpt"]
+  },
   "frame_files": {
-    "story": "<TBD_PREREG: story frame file chosen by the user (absolute path in the workspace)>"
+    "abstract_v3": {
+      "path": "frames/abstract_v3.json",
+      "sha256": "9bdc919a0eebe1991e69212e9144e6ef49622da0f20cd9886bd94ded312bf163"
+    },
+    "story": {
+      "path": "frames/story_A.json",
+      "sha256": "4e38eb4891071419659a1b3f26b2c1a80a77fe88e3be74cc559b1f7575e49977"
+    }
   },
   "comprehension": true,
-  "rationale": "<TBD_PREREG: rationale field true / false>",
+  "rationale": true,
   "max_tokens": 16000,
   "request_deadline_s": 900,
   "stall_timeout_s": 1800,
@@ -37,13 +47,13 @@
     }
   },
   "runs_dir": "/Users/karbon/Desktop/Veri Bilimi/complexity-prj/orc/data/projects/PublicGoods/workspace/runs",
-  "seed_namespace": "<TBD_PREREG: seed namespace>",
-  "max_invalid": "<TBD_PREREG: re-requests per decision>",
+  "seed_namespace": "pgg-minipilot",
+  "max_invalid": 3,
   "budget_usd": 6,
   "expected_cost_gate_usd": 4.5,
-  "invalid_rate_cap": "<TBD_PREREG: invalid-rate cap per model>",
-  "stop_on_length": "<TBD_PREREG: stop at finish_reason length, true / false>",
-  "check_snapshot": "<TBD_PREREG: stop at another model snapshot, true / false>",
-  "workers": "<TBD_PREREG: parallel calls within a unit>",
-  "parallel_units": "<TBD_PREREG: units at once>"
+  "invalid_rate_cap": 0.05,
+  "stop_on_length": true,
+  "check_snapshot": true,
+  "workers": 4,
+  "parallel_units": 3
 }
