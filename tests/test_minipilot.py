@@ -45,7 +45,9 @@ DECIDED = {
     "isolated_frame": "fixed_round", "rationale": True, "seed_namespace": "pgg-minipilot",
     "max_invalid": 3, "invalid_rate_cap": 0.05, "stop_on_length": True, "check_snapshot": True,
     "workers": 4, "parallel_units": 3,
-    "frames": {"abstract_v3": ["deepseek", "mistral", "gpt"],
+    # Q3 (b) put all three models in both frames; task #71 (EMIR 2 M2a) dropped
+    # Mistral's abstract_v3 arm by the pre-specified fallback of Q4 (the gate)
+    "frames": {"abstract_v3": ["deepseek", "gpt"],
                "story": ["deepseek", "mistral", "gpt"]},
 }
 FRAME_FILES = {"abstract_v3": "frames/abstract_v3.json", "story": "frames/story_A.json"}
@@ -151,21 +153,28 @@ class MiniPilotConfig(unittest.TestCase):
     def test_mistral_cost_is_a_marked_estimate(self):
         self.assertEqual(pgg_cost.PRICES_USD_PER_M[MISTRAL], (0.68, 2.09))
         self.assertEqual(pgg_cost.price(MISTRAL)[:2], (0.68, 2.09))
+        # task #71: the M1 overlay replaces pilot v2's "estimate": true entry
+        base = pgg_cost.load_calibration(overlays=())["models"][MISTRAL]
+        self.assertIs(base["estimate"], True)
+        self.assertEqual(base["kinds"]["isolated"]["reasoning_tokens"]["mean"], 0)  # task #59
         entry = pgg_cost.CALIBRATION["models"][MISTRAL]
-        self.assertIs(entry["estimate"], True)
-        self.assertEqual(entry["kinds"]["isolated"]["reasoning_tokens"]["mean"], 0)  # task #59
+        self.assertIs(entry["estimate"], False)
+        self.assertGreater(entry["measured"]["isolated"]["reasoning_tokens"]["mean"], 1000)
+        self.assertTrue(entry["assumptions"])
+        self.assertIn("(tahmin)", entry["later_rounds"]["text"])
         counts = pgg_cost.call_counts(n_cells=6)
         est = pgg_cost.estimate(pgg_cost.PILOT_MODELS, counts)
         self.assertEqual(est["unpriced"], [])
-        self.assertIs(est["per_model"]["mistral"]["estimate"], True)
+        self.assertIs(est["per_model"]["mistral"]["estimate"], False)
+        self.assertIs(est["per_model"]["mistral"]["lower_bound"], False)
         self.assertIs(est["per_model"]["deepseek"]["estimate"], False)
         self.assertEqual(est["total_calls"], 1620)
         self.assertAlmostEqual(est["total_cost_usd"],
                                sum(m["cost_usd"] for m in est["per_model"].values()))
         text = pgg_cost.format_report(est)
         self.assertNotIn("maliyet tahmini yok", text)
-        self.assertIn("mistral: pilot verisi yok", text)
-        self.assertIn("endpoints list price", text)
+        self.assertIn("mistral: kalibrasyon M1 tesisat ölçümü tesisat_olcum_20261007", text)
+        self.assertIn("tesisat_olcum_20261007 (M1)", text)          # price source
         # the max_tokens ceiling: listed price, calibrated mean prompt tokens
         prompt = {k: entry["kinds"][k]["prompt_tokens"]["mean"] for k in ("contribute_N", "isolated")}
         ceiling = pgg_cost.ceiling({"mistral": MISTRAL}, counts, 16000)
@@ -282,10 +291,12 @@ class MiniPilotRuns(GuardTestBase):
         # 2 x 5 isolated values, comprehension 2 x 4 + 2
         lines = [x for x in out.splitlines()
                  if re.match(r"^(abstract_v3|story)\s+(deepseek|mistral|gpt)\s", x)]
-        self.assertEqual(len(lines), 6)
+        # Mistral's abstract_v3 arm dropped by the gate fallback (task #71)
+        self.assertEqual(len(lines), 5)
+        self.assertFalse([x for x in lines if re.match(r"^abstract_v3\s+mistral\s", x)])
         for x in lines:
             self.assertIn("600 çağrı (contribute_N=480, isolated=60, comprehension=60)", x)
-        self.assertIn("3600 çağrı", out)
+        self.assertIn("3000 çağrı", out)
         self.assertIn("p95 üst sınır", next(x for x in out.splitlines() if x.startswith("TOPLAM")))
         self.assertIn("Beklenti kapısı expected_cost_gate_usd=4.5 USD: GEÇER", out)
         self.assertIn(f"mistral   {MISTRAL}", out)
@@ -329,7 +340,7 @@ class MiniPilotRuns(GuardTestBase):
         self.assertIn("1800 çağrı", out)
         self.assertNotIn("maliyet tahmini yok", out)
         self.assertNotIn("HARİÇ", out)
-        self.assertIn("mistral: pilot verisi yok", out)
+        self.assertIn("mistral: kalibrasyon M1 tesisat ölçümü tesisat_olcum_20261007", out)
         self.assertNotIn("HESAPLANAMADI", out)
         self.assertNotIn("ÖRNEK (tahmin)", out)
         # a placeholder cards file does not block when --cells is given
@@ -351,7 +362,7 @@ class MiniPilotRuns(GuardTestBase):
             capture_output=True, text=True, env=env, cwd=self.tmp, timeout=60)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         # the config's relative cards / frame paths are the repository's, not the cwd's
-        self.assertIn("3600 çağrı", proc.stdout)
+        self.assertIn("3000 çağrı", proc.stdout)
         self.assertIn(f"Çerçeve story: {ROOT / 'frames' / 'story_A.json'} (kind story", proc.stdout)
 
     def test_pilot_v2_dry_run_unchanged(self):

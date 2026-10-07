@@ -156,7 +156,7 @@ class MiniPilotEstimate(unittest.TestCase):
         self.assertIn("ÖRNEK (tahmin)", text)
         self.assertEqual(text.count("540 çağrı (contribute_N=480, isolated=60)"), 3)
         self.assertEqual(text.count("KURU ÇALIŞTIRMA"), 1)
-        self.assertIn("mistral: pilot verisi yok", text)
+        self.assertIn("mistral: kalibrasyon M1 tesisat ölçümü tesisat_olcum_20261007", text)
         self.assertNotIn("gemini", text)
         line = next(x for x in text.splitlines() if x.startswith("TOPLAM"))
         self.assertIn("1620 çağrı", line)

@@ -4170,6 +4170,8 @@ def format_design_report(est: dict, *, description: str = "", gate: float | None
         if r.get("lower_bound"):
             notes.append(f"  {r['model']}: pilot verisi yok, akıl yürütme 0 varsayıldı: beklenen "
                          "değer ALT SINIR (p95 üst sınırı akıl yürütmeyi içerir)")
+        if r.get("calibration_note"):
+            notes.append(f"  {r['model']}: {r['calibration_note']}")
         if r.get("extrapolated_kinds"):
             notes.append(f"  {r['model']}: {', '.join(r['extrapolated_kinds'])} pilot v2'de yoktu; "
                          "contribute_N ölçümünden oranla (tahmin)")

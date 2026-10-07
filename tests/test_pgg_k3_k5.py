@@ -319,7 +319,9 @@ class DryRunP95(ResumeBase):
             self.assertAlmostEqual(est["per_model"][key]["cost_usd"], mean, places=12)
             self.assertAlmostEqual(est["per_model"][key]["p95_upper_usd"], p95, places=12)
             line = next(x for x in out.splitlines() if x.startswith(f"  {key} "))
-            self.assertIn("1200 çağrı (abstract_v3, story)", line)
+            # Mistral's abstract_v3 arm dropped by the gate fallback (task #71)
+            self.assertIn("600 çağrı (story)" if key == "mistral"
+                          else "1200 çağrı (abstract_v3, story)", line)
             self.assertIn(f"ortalama ~{mean:.4f} USD", line)
             self.assertIn(f"p95 üst sınır ~{p95:.4f} USD", line)
             self.assertIn(f"model_budget_usd={raw['model_budget_usd'][key]:g} USD", line)

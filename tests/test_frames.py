@@ -738,13 +738,22 @@ class CostGateAndCap(FrameBase):
         counts = pgg_cost.call_counts(n_cells=6, comprehension=True)
         self.assertEqual(counts["comprehension"], 6 * 2 * 4 + 6 * 2)
         self.assertNotIn("comprehension", pgg_cost.call_counts(n_cells=6))
-        m = pgg_cost.model_cost(MODELS3["mistral"], counts, {"comprehension": 0.5})
-        self.assertIs(m["lower_bound"], True)
-        self.assertIn("comprehension", m["extrapolated_kinds"])
-        self.assertEqual(m["scaled_kinds"], {"comprehension": 0.5})
+        # pilot v2's Mistral entry ("estimate": true, no reasoning): a lower bound
+        with mock.patch.object(pgg_cost, "CALIBRATION", pgg_cost.load_calibration(overlays=())):
+            m = pgg_cost.model_cost(MODELS3["mistral"], counts, {"comprehension": 0.5})
+            self.assertIs(m["lower_bound"], True)
+            self.assertIn("comprehension", m["extrapolated_kinds"])
+            self.assertEqual(m["scaled_kinds"], {"comprehension": 0.5})
+            text = pgg_cost.format_report(pgg_cost.estimate(MODELS3, counts))
+            self.assertIn("(tahmin, ALT SINIR;", text)
         self.assertIs(pgg_cost.model_cost(MODELS3["deepseek"], counts)["lower_bound"], False)
+        # task #71: the M1 overlay measured Mistral's reasoning, no longer a lower bound
+        m = pgg_cost.model_cost(MODELS3["mistral"], counts, {"comprehension": 0.5})
+        self.assertIs(m["lower_bound"], False)
+        self.assertIn("comprehension", m["extrapolated_kinds"])
         text = pgg_cost.format_report(pgg_cost.estimate(MODELS3, counts))
-        self.assertIn("(tahmin, ALT SINIR;", text)
+        self.assertNotIn("ALT SINIR", text)
+        self.assertIn("mistral: kalibrasyon M1 tesisat ölçümü tesisat_olcum_20261007", text)
 
     def dry(self, *extra):
         return _main("--dry-run", "--config", str(MINIPILOT_CONFIG), "--cards",
@@ -770,7 +779,8 @@ class CostGateAndCap(FrameBase):
         self.assertFalse([x for x in lines if x.startswith("story") and " gpt " in x])
         for x in lines:
             self.assertIn("600 çağrı (contribute_N=480, isolated=60, comprehension=60)", x)
-        self.assertEqual(len([x for x in lines if "ALT SINIR" in x]), 2)     # mistral x 2
+        self.assertFalse([x for x in lines if "ALT SINIR" in x])   # Mistral from M1 (task #71)
+        self.assertEqual(out.count("mistral: kalibrasyon M1 tesisat ölçümü tesisat_olcum_20261007"), 1)
         self.assertIn("3000 çağrı", out)
         self.assertIn("istem ölçeği (karakter oranı, tahmin): contribute_N x", out)
         self.assertIn("Beklenti kapısı expected_cost_gate_usd=4.5 USD:", out)

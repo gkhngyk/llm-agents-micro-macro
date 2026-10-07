@@ -6,8 +6,12 @@ file configs/cost_calibration_pilot_v2.json (task B4), made by
 pgg_cost_calibrate.py from the real token distribution of pilot v2
 (runs/pilot_v2_20261005): per model x call kind the mean and p95 of prompt,
 completion and reasoning tokens. Every cost is still an ESTIMATE ("(tahmin)")
-of a future run. Mistral has no pilot data; its calibration entry is marked
-"estimate": true and lists its assumptions. Deliberately does not import
+of a future run. Mistral has no pilot data; its entry in that file is marked
+"estimate": true and lists its assumptions. Since task #71 the overlay
+configs/cost_calibration_minipilot_m1.json (CALIBRATION_OVERLAYS) replaces
+it with an entry from the M1 plumbing measurement (round 1 and isolated X =
+10 measured, later rounds from pilot v2's round profile, labelled tahmin; its
+"report_note" goes into the dry-run report). Deliberately does not import
 llm_client: importing it needs the API key and reads ../.env, and a dry run
 must touch neither.
 
@@ -23,8 +27,9 @@ Prompt scale (task #61): the calibration measured the prompts of the
 abstract_v2 frame; for another frame pgg_game passes, per kind, the ratio of
 the frame's prompt characters to abstract_v2's (1 = not scaled). Scaled kinds
 are listed and labelled (tahmin). Models whose calibration is "estimate": true
-(Mistral) assume no reasoning tokens on game prompts: their expected cost is a
-LOWER BOUND (alt sınır); the p95 upper bound includes reasoning.
+(Mistral of the pilot v2 file, without the overlay) assume no reasoning tokens
+on game prompts: their expected cost is a LOWER BOUND (alt sınır); the p95
+upper bound includes reasoning.
 
 Call kinds:
   contribute_N  contribution step, no-punishment condition
@@ -43,6 +48,10 @@ from pathlib import Path
 CALL_KINDS = ("contribute_N", "contribute_P", "punish_P", "isolated", "comprehension")
 
 CALIBRATION_PATH = Path(__file__).resolve().parent / "configs" / "cost_calibration_pilot_v2.json"
+# Later calibration files (task #71): their model entries replace the base's.
+CALIBRATION_OVERLAYS = (
+    Path(__file__).resolve().parent / "configs" / "cost_calibration_minipilot_m1.json",
+)
 
 # Generating models of the mini-pilot, the default of the dry run. Must equal
 # llm_client.MODELS, and PILOT_V2_MODELS / KNOWN_MODELS llm_client's
@@ -88,8 +97,30 @@ EXTRAPOLATED_KINDS = {
 }
 
 
-def load_calibration(path: Path = CALIBRATION_PATH) -> dict:
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+def load_calibration(path: Path = CALIBRATION_PATH, overlays=CALIBRATION_OVERLAYS) -> dict:
+    """The base calibration with the model entries of each overlay file put over it.
+
+    "overlays" of the result lists {"file", "run", "models"} per applied overlay,
+    "overlays_missing" the overlay files not found (pgg_cost_calibrate.py
+    imports this module before it writes one); the report names them.
+    """
+    cal = json.loads(Path(path).read_text(encoding="utf-8"))
+    cal["overlays"], cal["overlays_missing"] = [], []
+    for over_path in overlays:
+        if not Path(over_path).is_file():
+            cal["overlays_missing"].append(Path(over_path).name)
+            continue
+        over = json.loads(Path(over_path).read_text(encoding="utf-8"))
+        if over.get("overlay_of") != Path(path).name:
+            raise ValueError(f"{Path(over_path).name} is an overlay of {over.get('overlay_of')!r}, "
+                             f"not of {Path(path).name}")
+        for slug, entry in over["models"].items():
+            if not {"contribute_N", "isolated"} <= set(entry["kinds"]):
+                raise ValueError(f"{Path(over_path).name}: {slug} lacks contribute_N or isolated")
+            cal["models"][slug] = entry
+        cal["overlays"].append({"file": Path(over_path).name, "run": over["source"]["run"],
+                                "models": sorted(over["models"])})
+    return cal
 
 
 CALIBRATION = load_calibration()
@@ -99,6 +130,10 @@ SOURCE_NOTE = (
     f"{CALIBRATION['source']['run']}: model x çağrı türü ortalama/p95 token, gerçek "
     "usage.cost). Tüm sayılar (tahmin): pilot v2 dağılımı yeni koşuda aynı kalmayabilir; "
     "\"estimate\": true olan modeller ölçülmedi, kesin bütçe değil."
+    + "".join(f" Üzerine yazılan: configs/{o['file']} (koşu {o['run']}: "
+              f"{', '.join(o['models'])})." for o in CALIBRATION["overlays"])
+    + "".join(f" EKSİK kalibrasyon dosyası: configs/{name} (yerine pilot v2 girdisi)."
+              for name in CALIBRATION["overlays_missing"])
 )
 
 
@@ -163,6 +198,7 @@ def model_cost(slug: str, counts: dict[str, int], prompt_scale: dict | None = No
         "scaled_kinds": {k: v for k, v in scale.items() if v != 1.0},
         "price_usd_per_m": price(slug)[:2],
         "price_source": price(slug)[2],
+        "calibration_note": _model(slug).get("report_note"),
     }
 
 
@@ -286,6 +322,8 @@ def format_report(est: dict, *, description: str = "") -> str:
                 notes.append(f"  {key}: pilot verisi yok, token ve ödenmiş-geçersiz payı "
                              "\"estimate\": true varsayımlar (kalibrasyon dosyası, assumptions); "
                              "akıl yürütme 0 varsayıldı: beklenen değer ALT SINIR")
+            if m.get("calibration_note"):
+                notes.append(f"  {key}: {m['calibration_note']}")
             if m["extrapolated_kinds"]:
                 notes.append(f"  {key}: {', '.join(m['extrapolated_kinds'])} pilot v2'de yoktu; "
                              "contribute_N ölçümünden oranla (tahmin)")
