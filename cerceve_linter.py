@@ -175,7 +175,8 @@ def frame_file_hits(raw: dict) -> list[tuple[str, str, str]]:
     """[(JSON yolu, kök, sözcük)] — çerçeve belgesinin tüm metinlerinde (yorumlar
     hariç, yer tutucu adları ayıklanmış) yasak kökler. Koşu başı denetimi
     (pgg_game.story_frame_problems, görev #67) bunu ve render edilmiş istemleri
-    tarar; yalnız "kind": "story" çerçevelere uygulanır."""
+    tarar; görev #73'ten beri varsayılan olarak her çerçeveye uygulanır, yalnız
+    açıkça "kind": "abstract" yazan çerçeve muaftır."""
     return [(p, root, word) for p, text in frame_strings(raw)
             for root, word in find_hits(strip_placeholders(text))]
 

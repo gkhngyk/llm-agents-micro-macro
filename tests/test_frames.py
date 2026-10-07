@@ -488,9 +488,19 @@ class ModelFrameCells(FrameBase):
             Engine(self.fcfg(frames={"abstract_v3": ["deepseek", "mistral"]}, frame_files=None))
         with self.assertRaisesRegex(ValueError, "no isolated question 'repeated'"):
             Engine(self.fcfg(isolated_frame="repeated"))
-        with self.assertRaisesRegex(ValueError, "no comprehension questions"):
+        # task #73: abstract_v2 (frozen, no "kind") is only the default of a config
+        # without frames; named under frames it is refused for its missing kind ...
+        with self.assertRaisesRegex(ValueError, "frame 'abstract_v2' .* has no \"kind\""):
             Engine(self.fcfg(frames={"abstract_v2": ["deepseek", "mistral", "gpt"]},
                              frame_files=None, isolated_frame="repeated"))
+        # ... and a copy with kind abstract has no comprehension questions
+        v2 = json.loads(V2.read_text())
+        v2["kind"] = "abstract"
+        (self.tmp / "v2_kind.json").write_text(json.dumps(v2))
+        with self.assertRaisesRegex(ValueError, "no comprehension questions"):
+            Engine(self.fcfg(frames={"abstract_v2": ["deepseek", "mistral", "gpt"]},
+                             frame_files={"abstract_v2": str(self.tmp / "v2_kind.json")},
+                             isolated_frame="repeated"))
         with self.assertRaisesRegex(ValueError, "placeholder"):
             Engine(self.fcfg(frame_files={"story": "<TBD_PREREG: story file>"}))
         with self.assertRaisesRegex(ValueError, "frame_files needs frames"):
@@ -566,6 +576,7 @@ class FrameResume(FrameBase):
                          {("abstract_v2", pgg_game.default_frame().sha256)})
         raw = json.loads(V2.read_text())
         raw["description"] += " (edited)"
+        raw["kind"] = "abstract"      # task #73: an edited copy is no longer the legacy file
         edited = self.tmp / "abstract_v2.json"
         edited.write_text(json.dumps(raw))
         with mock.patch.object(pgg_game, "default_frame",
@@ -633,7 +644,10 @@ class Comprehension(FrameBase):
         self.assertAlmostEqual(c["q1_correct_rate"], 0.6)
         self.assertAlmostEqual(c["all_correct_rate"], 0.4)
         self.assertEqual(summary["comprehension"]["answer_keys"], {"abstract_v3": {"q1": 28, "q2": -6}})
-        self.assertEqual(summary["per_model"]["v/ds"]["n_invalid"], 3)
+        # task #73: rule-comprehension invalids are counted apart, outside the cap
+        self.assertEqual(summary["per_model"]["v/ds"]["n_invalid"], 0)
+        self.assertEqual(summary["per_model"]["v/ds"]["n_comp_invalid"], 3)
+        self.assertEqual((c["n_invalid"], c["n_missing"]), (3, 0))
 
     def test_asked_once_per_agent_before_round_one_not_in_the_game_context(self):
         self.use(CostAPI())
@@ -695,16 +709,17 @@ class CostGateAndCap(FrameBase):
             Engine(self.fcfg(expected_cost_gate_usd=4.5)).run()
         self.create.assert_not_called()
 
-    def test_hard_cap_six_dollars(self):
+    def test_hard_cap_ten_dollars(self):
+        # EMIR 3 Part 2 (task #73): the hard cap is 10 USD (was 6), the gate 4.5 USD
         raw = json.loads(MINIPILOT_CONFIG.read_text())
-        self.assertEqual(raw["budget_usd"], 6)
+        self.assertEqual(raw["budget_usd"], 10)
         self.assertEqual(raw["expected_cost_gate_usd"], 4.5)
         self.use(CostAPI(cost=1.0))
         engine = Engine(self.known(budget_usd=raw["budget_usd"]))
         with self.assertRaisesRegex(RunStopped, "budget"):
             engine.run()
-        self.assertEqual(len(self.api.calls), 6)               # 6 x 1 USD, then no new call
-        self.assertAlmostEqual(engine.total_cost, 6.0)
+        self.assertEqual(len(self.api.calls), 10)              # 10 x 1 USD, then no new call
+        self.assertAlmostEqual(engine.total_cost, 10.0)
         self.assertEqual(engine.stop_reason, "budget")
 
     def test_prompt_scales(self):
@@ -765,6 +780,7 @@ class CostGateAndCap(FrameBase):
         cfg_path = self.tmp / "mp.json"
         raw = json.loads(MINIPILOT_CONFIG.read_text())
         raw["frame_files"] = {"story": str(self.story)}
+        raw.pop("cards_sha256")        # other cards (v2) on purpose: not the locked file
         cfg_path.write_text(json.dumps(raw))
         code, out, err = _main(
             "--dry-run", "--config", str(cfg_path), "--cards", str(PILOT_CARDS_V2),
@@ -784,7 +800,9 @@ class CostGateAndCap(FrameBase):
         self.assertIn("3000 çağrı", out)
         self.assertIn("istem ölçeği (karakter oranı, tahmin): contribute_N x", out)
         self.assertIn("Beklenti kapısı expected_cost_gate_usd=4.5 USD:", out)
-        self.assertIn("Sert tavan budget_usd=6 USD", out)
+        self.assertIn("Sert tavan budget_usd=10 USD", out)
+        self.assertIn("Kartlar: ", out)
+        self.assertIn("KİLİTSİZ (cards_sha256 yok)", out)
         total = float(re.search(r"^TOPLAM .*?~([0-9.]+) USD \(tahmin", out, re.M).group(1))
         self.assertEqual("GEÇER" in out, total <= 4.5)
         self.create.assert_not_called()
@@ -807,6 +825,7 @@ class CostGateAndCap(FrameBase):
         cfg_path = self.tmp / "mp_unchosen.json"
         raw = json.loads(MINIPILOT_CONFIG.read_text())
         raw["frame_files"]["story"] = "<TBD_PREREG: story frame file chosen by the user>"
+        raw.pop("cards_sha256")        # other cards (v2) on purpose: not the locked file
         cfg_path.write_text(json.dumps(raw))
         code, out, err = _main("--dry-run", "--config", str(cfg_path), "--cards",
                                str(PILOT_CARDS_V2), "--cities", "Boston,Riyadh",

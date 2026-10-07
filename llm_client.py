@@ -15,7 +15,8 @@ Contract (unchanged from the first study):
     error_subkind "deadline" (with the part of the response received so far
     and its usage / cost when known) and retried
   * a response whose reasoning reached max_tokens - REASONING_RESERVE_TOKENS
-    is flagged "reasoning_capped" in the log; it is kept as it is
+    is flagged "reasoning_capped" in the log (per model rule,
+    REASONING_CAP_RULES); it is kept as it is
   * with expected_provider, a response that names another provider, or no
     provider at all (task #68), is no decision: it is logged (content and
     cost, "provider_mismatch": true; "provider_missing": true when no name
@@ -108,6 +109,18 @@ PARTIAL_BODY_MAX_BYTES = 1_000_000
 # provider stops the reasoning 4 096 tokens below max_tokens (room for the
 # answer) and the reply looks normal. reasoning_capped() flags such answers.
 REASONING_RESERVE_TOKENS = 4096
+
+# How reasoning_capped() reads the usage (per model, pgg_game config
+# "reasoning_cap_rule"; task #73):
+#   "reasoning"  reasoning_tokens >= max_tokens - REASONING_RESERVE_TOKENS
+#                (the rule since A2; every model by default);
+#   "max_reasoning_completion"  max(reasoning_tokens, completion_tokens) >= the
+#                same limit. Mistral: in the M1 plumbing measurement 11 of 18
+#                responses reported more reasoning_tokens than completion_tokens,
+#                so neither number alone bounds the output it produced.
+# Cost is always priced from completion_tokens (usage.cost when present).
+REASONING_CAP_RULES = ("reasoning", "max_reasoning_completion")
+DEFAULT_REASONING_CAP_RULE = "reasoning"
 
 # The attempt thread's deadline (time.monotonic()), read by _cut_at_deadline.
 _attempt_local = threading.local()
@@ -452,14 +465,29 @@ def reasoning_tokens(usage) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def reasoning_capped(usage, max_tokens: int) -> bool | None:
+def completion_tokens(usage) -> int | None:
+    """usage.completion_tokens (None when absent)."""
+    value = usage.get("completion_tokens") if isinstance(usage, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def reasoning_capped(usage, max_tokens: int,
+                     rule: str = DEFAULT_REASONING_CAP_RULE) -> bool | None:
     """True when the reasoning reached max_tokens - REASONING_RESERVE_TOKENS.
 
-    None when the response has no reasoning_tokens. Such a response is only
-    flagged: it is neither dropped nor re-requested (that would select on
-    the length of the reasoning).
+    rule (REASONING_CAP_RULES): "reasoning" compares reasoning_tokens (None
+    when the response has none); "max_reasoning_completion" compares
+    max(reasoning_tokens, completion_tokens) of the numbers present (None
+    when both are absent). Such a response is only flagged: it is neither
+    dropped nor re-requested (that would select on the length of the
+    reasoning).
     """
+    if rule not in REASONING_CAP_RULES:
+        raise ValueError(f"reasoning cap rule must be one of {REASONING_CAP_RULES}, got {rule!r}")
     n = reasoning_tokens(usage)
+    if rule == "max_reasoning_completion":
+        present = [x for x in (n, completion_tokens(usage)) if x is not None]
+        n = max(present) if present else None
     if n is None:
         return None
     return n >= max_tokens - REASONING_RESERVE_TOKENS
@@ -683,6 +711,7 @@ def _call_llm_counted(
     attempt_counts: dict | None = None,
     expected_provider: str | None = None,
     signed_numbers: bool = False,
+    reasoning_cap_rule: str = DEFAULT_REASONING_CAP_RULE,
 ) -> tuple[dict, int, int]:
     """call_llm that also returns the parse failures and provider errors it retried.
 
@@ -739,8 +768,9 @@ def _call_llm_counted(
     to it as they happen, also when the call finally fails or a hook raises.
 
     The success record carries elapsed_s (seconds of the successful
-    attempt), max_tokens and reasoning_capped (reasoning_capped(); null
-    without reasoning_tokens); meta gets elapsed_s and reasoning_capped too.
+    attempt), max_tokens and reasoning_capped (reasoning_capped() with
+    reasoning_cap_rule, also recorded; null without the tokens it reads);
+    meta gets elapsed_s and reasoning_capped too.
 
     expected_provider: the provider name a pinned model's responses must
     carry (same_provider). A response that names another provider is not
@@ -910,7 +940,7 @@ def _call_llm_counted(
             continue
         elapsed = round(time.monotonic() - started, 3)
         usage = _usage_dict(getattr(resp, "usage", None))
-        capped = reasoning_capped(usage, max_tokens)
+        capped = reasoning_capped(usage, max_tokens, reasoning_cap_rule)
         provider_name, quantization = _provider_info(resp)
         _append_log({
             "ts": time.time(), "model": model, "session_id": session_id,
@@ -923,7 +953,8 @@ def _call_llm_counted(
             "finish_reason": _finish_reason(resp),
             "reasoning_effort": effort_label,
             "provider": provider_name, "provider_quantization": quantization,
-            "elapsed_s": elapsed, "max_tokens": max_tokens, "reasoning_capped": capped, **tag,
+            "elapsed_s": elapsed, "max_tokens": max_tokens, "reasoning_capped": capped,
+            "reasoning_cap_rule": reasoning_cap_rule, **tag,
         }, log_path)
         if on_response is not None:
             on_response(_response_info(resp))
@@ -1040,6 +1071,7 @@ def call_llm_valid(
     on_deadline=None,
     expected_provider: str | None = None,
     signed_numbers: bool = False,
+    reasoning_cap_rule: str = DEFAULT_REASONING_CAP_RULE,
 ) -> tuple[dict, int] | tuple[dict, int, int]:
     """call_llm, re-requesting payloads for which is_valid(parsed) is False.
 
@@ -1058,7 +1090,7 @@ def call_llm_valid(
     (those without a name), also when the call finally fails or a hook stops it.
 
     reasoning_effort, meta, provider, timeout, request_deadline_s, call_info,
-    expected_provider, signed_numbers and the before_call / on_response /
+    expected_provider, signed_numbers, reasoning_cap_rule and the before_call / on_response /
     on_late_response / on_deadline hooks are passed through to
     the underlying call; meta ends up holding the metadata of the accepted
     (last) response.
@@ -1080,7 +1112,8 @@ def call_llm_valid(
                 provider=provider, timeout=timeout, request_deadline_s=request_deadline_s,
                 on_late_response=on_late_response, call_info=call_info,
                 on_deadline=on_deadline, attempt_counts=counts,
-                expected_provider=expected_provider, signed_numbers=signed_numbers)
+                expected_provider=expected_provider, signed_numbers=signed_numbers,
+                reasoning_cap_rule=reasoning_cap_rule)
         except RuntimeError as e:
             if counts is not None:
                 counts.update(

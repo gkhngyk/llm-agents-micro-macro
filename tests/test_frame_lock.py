@@ -39,7 +39,9 @@ from pgg_game import Engine, FrameError, GameParams  # noqa: E402
 
 STORY_A = ROOT / "frames" / "story_A.json"
 CARDS_V3 = ROOT / "cards" / "pilot_cards_v3.json"
-NEW_SENTENCE = "Give the change as a whole number with its sign, for example +3 or -3."
+# EMIR 3 3b (task #73); task #67's sentence was the K2 one below
+NEW_SENTENCE = "Give the change as a whole number (it can be positive, zero or negative)."
+K2_SENTENCE = "Give the change as a whole number with its sign, for example +3 or -3."
 
 
 def _sha(path) -> str:
@@ -193,12 +195,14 @@ class StoryLinter(FrameBase):
     def test_abstract_frames_are_not_linted(self):
         v3 = pgg_frames.load_frame(V3)
         self.assertEqual(v3.kind, "abstract")
-        self.assertEqual(pgg_frames.load_frame(V2).kind, "abstract")        # no field
+        # abstract_v2 has no field: frozen legacy file (task #73), kind None
+        v2 = pgg_frames.load_frame(V2)
+        self.assertEqual((v2.kind, v2.legacy, v2.lint_exempt), (None, True, False))
         # abstract_v3 says game / player / contribute on purpose ...
         problems = pgg_game.story_frame_problems(v3, GameParams())
         for root in ("game", "player", "contribut", "group project", "public good"):
             self.assertTrue([p for p in problems if f": {root} (" in p], root)
-        # ... and runs (with the story fixture, which has no kind either)
+        # ... and runs (with the story fixture, kind abstract since task #73)
         self.fcfg().validate()
         # the same text as a story frame is refused: the kind decides
         raw = json.loads(V3.read_text(encoding="utf-8"))
@@ -301,15 +305,31 @@ class Q2Sentence(unittest.TestCase):
                     self.assertNotIn("negative number", user)
                     self.assertNotIn("if they go down", user)
                     self.assertNotIn("if it goes down", user)
+                    self.assertNotIn(K2_SENTENCE, user)
+                    self.assertNotIn("+3", user)
+                    self.assertNotIn("for example", user)
                 q2 = f.comprehension_questions()[1]
-                self.assertEqual(q2["answer"], {"kind": "own_change", "delta": 10, "example": 3})
+                self.assertEqual(q2["answer"], {"kind": "own_change", "delta": 10})
         # abstract_v2 (pilot v2) has no rule comprehension: nothing of it changed
         self.assertFalse(pgg_frames.load_frame(V2).has_comprehension)
         self.assertNotIn("comprehension", json.loads(V2.read_text()))
 
     def test_example_is_a_placeholder_with_its_own_checks(self):
-        def broken(edit):
+        # no committed frame uses {example} since task #73; the mechanism keeps its
+        # checks, tested on abstract_v3 with task #67's K2 sentence put back
+        def k2():
             raw = json.loads(V3.read_text())
+            q2 = raw["comprehension"]["questions"][1]
+            q2["text"] = q2["text"].replace(
+                NEW_SENTENCE, "Give the change as a whole number with its sign, for example "
+                              "+{example} or -{example}.")
+            q2["answer"]["example"] = 3
+            return raw
+
+        pgg_frames.validate_frame(k2(), "t")
+
+        def broken(edit):
+            raw = k2()
             edit(raw["comprehension"]["questions"][1])
             with self.assertRaises(pgg_frames.FrameError) as cm:
                 pgg_frames.validate_frame(raw, "t")
@@ -427,6 +447,7 @@ class RunNameTemplate(GuardTestBase):
         raw = json.loads(MINIPILOT_CONFIG.read_text(encoding="utf-8"))
         raw.update({
             "prereg_approved": True, "cards": str(cards), "cities": ["X"],
+            "cards_sha256": _sha(cards),
             "arms": ["group"], "groups_per_cell": 1, "isolated_reps": 1,
             "frames": {"abstract_v3": ["deepseek", "mistral", "gpt"]}, "frame_files": None,
             "budget_usd": 1.0, "invalid_rate_cap": 0.5, "workers": 1, "parallel_units": 1,

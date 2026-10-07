@@ -54,13 +54,20 @@ COMPREHENSION_KINDS = ("round_earnings", "own_change")
 
 TOP_KEYS = {"schema", "name", "description", "kind", "system", "player_label", "you_suffix",
             "rules", "history", "contribute", "punish", "isolated", "comprehension", "response"}
-OPTIONAL_TOP_KEYS = {"description", "kind", "comprehension", "response"}
-# "kind" of a frame (task #67): a "story" frame must hold none of the forbidden
-# roots of the frame linter (cerceve_linter.ROOTS: game, player, contribut,
-# ...), checked at the start of every run; an "abstract" frame (the default)
-# says "game" / "contribute" on purpose and is not linted.
+OPTIONAL_TOP_KEYS = {"description", "comprehension", "response"}
+# "kind" of a frame (task #67; required since task #73): the frame linter
+# (forbidden roots of cerceve_linter.ROOTS: game, player, contribut, ...) runs
+# on every frame at the start of every run, except a frame whose file says
+# "kind": "abstract" explicitly (it says "game" / "contribute" on purpose).
 FRAME_KINDS = ("abstract", "story")
-DEFAULT_KIND = "abstract"
+LINT_EXEMPT_KIND = "abstract"
+# Files that may omit "kind" (sha256 of the bytes -> name): abstract_v2 is
+# frozen (rows of pilot v2 carry this sha256) and was written before "kind"
+# existed. pgg_game accepts it only as the default frame of a config without
+# "frames" (not linted, recorded as exempt with this reason).
+LEGACY_FRAMES_SHA256 = {
+    "02f9e84e686fea126e7a33dab27aa495f7667dee6e809a965e4bb4dd87ab6f71": "abstract_v2",
+}
 HISTORY_KEYS = {"empty", "header", "list_item", "list_separator", "contributions", "round",
                 "round_P", "punish_given_separator", "punish_given_none"}
 RESPONSE_DEFAULTS = {
@@ -198,8 +205,11 @@ class _Checker:
                 self.add(path, "missing placeholder " + " or ".join(f"{{{g}}}" for g in sorted(group)))
 
 
-def validate_frame(raw, where: str = "frame") -> None:
-    """FrameError listing every problem of a frame document (frames/SCHEMA.md)."""
+def validate_frame(raw, where: str = "frame", *, require_kind: bool = True) -> None:
+    """FrameError listing every problem of a frame document (frames/SCHEMA.md).
+
+    require_kind False only for a frozen legacy file (LEGACY_FRAMES_SHA256, load_frame).
+    """
     c = _Checker(where)
     if not isinstance(raw, dict):
         raise FrameError(f"{where}: a frame file must be a JSON object")
@@ -207,6 +217,11 @@ def validate_frame(raw, where: str = "frame") -> None:
     for k in sorted(keys - TOP_KEYS):
         c.add(k, f"unknown key; allowed {sorted(TOP_KEYS)} (and comments starting with _)")
     for k in sorted(TOP_KEYS - OPTIONAL_TOP_KEYS - keys):
+        if k == "kind":
+            if require_kind:
+                c.add(k, f"missing; required, one of {FRAME_KINDS} (only \"abstract\" is exempt "
+                         "from the frame linter)")
+            continue
         c.add(k, "missing")
     if raw.get("schema") != SCHEMA_VERSION:
         c.add("schema", f"must be {SCHEMA_VERSION}")
@@ -420,9 +435,9 @@ def load_frame(path) -> "Frame":
         raw = json.loads(data.decode("utf-8"))
     except ValueError as e:
         raise FrameError(f"frame file {str(path)!r} is not valid JSON ({e})") from None
-    validate_frame(raw, str(path))
-    return Frame(name=raw["name"], path=str(path), sha256=hashlib.sha256(data).hexdigest(),
-                 data=raw)
+    sha = hashlib.sha256(data).hexdigest()
+    validate_frame(raw, str(path), require_kind=sha not in LEGACY_FRAMES_SHA256)
+    return Frame(name=raw["name"], path=str(path), sha256=sha, data=raw)
 
 
 # --------------------------------------------------------------------------
@@ -447,9 +462,19 @@ class Frame:
         return tuple(k for k in ISOLATED_FRAMES if k in self.data["isolated"])
 
     @property
-    def kind(self) -> str:
-        """"story" or "abstract" (FRAME_KINDS); only a story frame is linted."""
-        return self.data.get("kind", DEFAULT_KIND)
+    def kind(self) -> str | None:
+        """The file's "kind" (FRAME_KINDS); None only for a legacy file (LEGACY_FRAMES_SHA256)."""
+        return self.data.get("kind")
+
+    @property
+    def legacy(self) -> bool:
+        """A frozen file written before "kind" existed (abstract_v2)."""
+        return self.sha256 in LEGACY_FRAMES_SHA256
+
+    @property
+    def lint_exempt(self) -> bool:
+        """Only a frame whose file says "kind": "abstract" is not linted (task #73)."""
+        return self.kind == LINT_EXEMPT_KIND
 
     @property
     def has_comprehension(self) -> bool:

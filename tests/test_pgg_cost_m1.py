@@ -31,6 +31,8 @@ import pgg_game  # noqa: E402
 MISTRAL = "mistralai/mistral-large-4-0"
 BASE_FILE = ROOT / "configs" / "cost_calibration_pilot_v2.json"
 M1_FILE = ROOT / "configs" / "cost_calibration_minipilot_m1.json"
+# abstract_v3 as M1 ran it (before task #73's q2 sentence)
+M1_FRAME_SHA256 = "9bdc919a0eebe1991e69212e9144e6ef49622da0f20cd9886bd94ded312bf163"
 MINIPILOT_CONFIG = ROOT / "configs" / "minipilot.json"
 RUNS_DIR = Path(json.loads(PILOT_CONFIG.read_text(encoding="utf-8"))["runs_dir"])
 M1_DIR = RUNS_DIR / "tesisat_olcum_20261007"
@@ -66,7 +68,11 @@ class OverlayFile(unittest.TestCase):
         self.assertEqual(self.cal["overlay_of"], BASE_FILE.name)
         self.assertEqual(self.cal["source"]["run"], "tesisat_olcum_20261007")
         self.assertEqual(self.cal["source"]["n_mistral_rows"], 18)
-        self.assertEqual(self.cal["source"]["frame_sha256"], _sha(ROOT / "frames" / "abstract_v3.json"))
+        # M1 ran abstract_v3 before task #73 changed its q2 text (rule comprehension,
+        # not measured in M1): the source keeps M1's sha256; calibrate_mistral_m1
+        # re-renders every M1 prompt with today's file (test_file_matches_...)
+        self.assertEqual(self.cal["source"]["frame_sha256"], M1_FRAME_SHA256)
+        self.assertNotEqual(_sha(ROOT / "frames" / "abstract_v3.json"), M1_FRAME_SHA256)
         # the pilot v2 calibration (task #60) is the file the overlay was made on, unchanged
         self.assertEqual(self.cal["source"]["base_sha256"], _sha(BASE_FILE))
 
@@ -297,8 +303,9 @@ class CalibrateSyntheticM1(unittest.TestCase):
 
 
 class GateDecision(unittest.TestCase):
-    """EMIR 2 Part 1 item 4: gate 4.5 USD on the mean; over it, Mistral's abstract_v3
-    arm goes first and the dry run is repeated; still over: not run."""
+    """EMIR 3 Part 1-2 (task #73): gate 4.5 USD on the mean. Over it the run is not
+    started and the overrun is reported; no arm is dropped (EMIR 2's fallback, which
+    dropped Mistral's abstract_v3 arm first, is gone)."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -316,24 +323,37 @@ class GateDecision(unittest.TestCase):
         total = float(re.search(r"^TOPLAM .*?~([0-9.]+) USD \(tahmin", text, re.M).group(1))
         return total, text
 
-    def test_committed_config_is_the_fallback_and_passes(self):
+    def test_committed_config_is_the_emir3_design_and_passes(self):
         raw = json.loads(MINIPILOT_CONFIG.read_text(encoding="utf-8"))
-        self.assertEqual(raw["frames"], {"abstract_v3": ["deepseek", "gpt"],
-                                         "story": ["deepseek", "mistral", "gpt"]})
+        self.assertEqual(raw["frames"], {"abstract_v3": ["deepseek", "mistral", "gpt"],
+                                         "story": ["deepseek", "gpt"]})
         self.assertEqual(raw["expected_cost_gate_usd"], GATE)
         self.assertIs(raw["prereg_approved"], False)
-        # the design as decided in task #67 (Mistral in both frames): over the gate
-        first = dict(raw, frames={"abstract_v3": ["deepseek", "mistral", "gpt"],
-                                  "story": ["deepseek", "mistral", "gpt"]})
-        total, text = self.dry(first)
-        self.assertGreater(total, GATE)
-        self.assertIn("AŞILIYOR — gerçek koşu BAŞLAMAZ", text)
-        # the fallback: only Mistral's abstract_v3 arm dropped; under the gate
-        total2, text2 = self.dry(raw)
-        self.assertLessEqual(total2, GATE)
-        self.assertIn("Beklenti kapısı expected_cost_gate_usd=4.5 USD: GEÇER", text2)
-        drop = re.search(r"^abstract_v3\s+mistral\s.*?~([0-9.]+) USD", text, re.M).group(1)
-        self.assertAlmostEqual(total - total2, float(drop), places=3)
+        total, text = self.dry(raw)
+        self.assertLessEqual(total, GATE)
+        self.assertIn("Beklenti kapısı expected_cost_gate_usd=4.5 USD: GEÇER", text)
+        # Mistral only in abstract_v3: its arm is there, its story arm is not
+        self.assertRegex(text, r"(?m)^abstract_v3\s+mistral\s")
+        self.assertNotRegex(text, r"(?m)^story\s+mistral\s")
+        # no fallback text anywhere: EMIR 2's drop rule is gone from config and code
+        for needle in ("pre-specified fallback", "abstract_v3 arm is dropped", "budget_usd = 6",
+                       "mistral 3, deepseek 2", "story = deepseek, mistral"):
+            self.assertNotIn(needle, raw["_notes"])
+        self.assertIn("no arm is dropped", raw["_notes"])
+        self.assertNotIn("fallback", Path(pgg_game.__file__).read_text(encoding="utf-8")
+                         .split("def gate_problem", 1)[1].split("def model_budget_lines", 1)[0])
+
+    def test_over_the_gate_is_reported_not_trimmed(self):
+        raw = json.loads(MINIPILOT_CONFIG.read_text(encoding="utf-8"))
+        total, text = self.dry(dict(raw, expected_cost_gate_usd=1.0))
+        self.assertGreater(total, 1.0)
+        self.assertIn("Beklenti kapısı expected_cost_gate_usd=1 USD: AŞILIYOR — gerçek koşu "
+                      "BAŞLAMAZ", text)
+        self.assertIn("no arm is dropped", text)
+        # every arm of the design is still priced (nothing removed)
+        self.assertEqual(len(re.findall(r"(?m)^(abstract_v3|story)\s+(deepseek|mistral|gpt)\s",
+                                        text)), 5)
+        self.assertIn("3000 çağrı", text)
 
     def test_gate_problem_follows_the_mean(self):
         rows = [{"frame": "f", "model": "m", "cost_usd": 4.4}]
@@ -342,9 +362,9 @@ class GateDecision(unittest.TestCase):
         self.assertIn("above", pgg_game.gate_problem(
             {"unpriced": [], "total_cost_usd": 4.5001, "rows": rows}, GATE))
 
-    def test_mistral_round1_values_would_stop_the_fallback_too(self):
+    def test_mistral_round1_values_would_be_over_the_gate(self):
         # sensitivity (report): with Mistral's round 1 / X = 10 values for every
-        # round the fallback design is still over the gate
+        # round the EMIR 3 design is over the gate (it would not be run)
         entry = json.loads(M1_FILE.read_text(encoding="utf-8"))["models"][MISTRAL]
         alt = json.loads(json.dumps(entry))
         for kind, k in alt["kinds"].items():

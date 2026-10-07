@@ -1,8 +1,9 @@
 {
-  "_notes": "TEST FIXTURE, NOT A STORY. Stands in for the story frame of goal C2 in the mock tests (tests/test_frames.py): it follows frames/SCHEMA.md and carries the marker phrases the mock API recognises ('ROUND {round_no} of', 'You are {me}', 'QUESTION', 'on average, {others_mean} points'). Its words mean nothing; the real story drafts are written by a separate task.",
+  "_notes": "TEST FIXTURE, NOT A STORY. Stands in for the story frame of goal C2 in the mock tests (tests/test_frames.py): it follows frames/SCHEMA.md and carries the marker phrases the mock API recognises ('ROUND {round_no} of', 'You are {me}', 'QUESTION', 'on average, {others_mean} points'). Its words mean nothing; the real story drafts are written by a separate task. kind abstract (required since task #73): it says 'Player', so it is exempt from the frame linter like abstract_v3; story linting is tested with frames/story_A.json.",
   "schema": 1,
   "name": "story_fixture",
   "description": "Placeholder frame for mock tests of the story arm; no story content.",
+  "kind": "abstract",
   "system": "[fixture system] {card}",
   "player_label": "Player {player_no}",
   "you_suffix": " (you)",

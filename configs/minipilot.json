@@ -1,8 +1,9 @@
 {
-  "_notes": "Mini-pilot (task B1+B3, 2026-10-06; filled with the decisions of EMIR 2 Part 1 in task #67, 2026-10-07). prereg_approved stays false until the user approves prereg_minipilot.md: until then a real run (also --resume) does not start; dry runs work. Models: gemini-2.5-flash-lite left after pilot v2 (pilot_v2_degerlendirme.md K5), mistral-large-4-0 added. providers: tag / provider_name from GET /api/v1/models/{id}/endpoints, checked 2026-10-06 (deepinfra/fp8 = DeepInfra fp8, as in pilot v2; mistral = Mistral; openai = OpenAI). Fallback off (allow_fallbacks false) and require_parameters true for all three (pgg_game.provider_routing). temperature and reasoning_effort are not sent (logged \"default\"). runs_dir must exist; outputs go to runs_dir/<run>/. run: the template minipilot_{run_date} gets the local date of the run start (YYYYMMDD) when a new run starts and is written to the summary (run_template); --resume needs the resolved name with --run. cards: cards/pilot_cards_v3.json (sha256 a4f50d0f...a9aa), Boston + Riyadh = 6 cards, styles minimal / value / factual of v3 (prereg name of factual: neutral procedure card, Q5). frames: abstract_v3 and story for all three models (Q2 (a), Q3 (b)); frame_files lock each file by sha256 (task #67 K1: another file stops the run and the dry run); story = frames/story_A.json (draft A, the jar, Q1), kind story: linted for the forbidden roots of cerceve_linter at every run start. Relative paths are relative to the code directory. comprehension = the two rule-comprehension questions of each frame (q2 with the sign sentence of task #67 K2). budget_usd = 6 is the hard cap on accumulated usage.cost; a real run does not start while the dry-run estimate is above expected_cost_gate_usd = 4.5 (Q4). isolated_round_no = 5: 'This is round 5 of 10.' (isolated_frame fixed_round). rationale, max_invalid, invalid_rate_cap, stop_on_length and workers: prereg_minipilot.md settings table (max_invalid 3 as in configs/pilot.json). parallel_units 3 (item 14), check_snapshot true (item 15), seed_namespace pgg-minipilot (item 13). Task #68 (EMIR 2 K3, K4, item 15): model_budget_usd = per-model caps on accumulated usage.cost (mistral 3, deepseek 2, gpt 0.5 USD; Q4): a model over its cap stops alone, the others go on; budget_usd 6 and the 4.5 USD gate stay. snapshot_version_models = [mistral]: check_snapshot compares Mistral's model_version (the dated model of the serving endpoint, openrouter_metadata; its response model has no date, task #59), which every row logs. A response of a pinned model without a provider name is re-requested and counted (n_provider_mismatch, n_provider_missing). Task #71 (EMIR 2 M2a, 2026-10-07): with Mistral calibrated from the M1 plumbing measurement (configs/cost_calibration_minipilot_m1.json) the dry run of the design above (both frames x 3 models) expected ~6.8468 USD (tahmin), above expected_cost_gate_usd 4.5; by the pre-specified fallback of Q4 (Part 1 item 4) Mistral's abstract_v3 arm is dropped: frames abstract_v3 = deepseek, gpt; story = deepseek, mistral, gpt. The repeated dry run is below the gate (gorev raporu #71).",
+  "_notes": "Mini-pilot config, design of EMIR 3 (2026-10-07, task #73; before any data). prereg_approved stays false until the user approves prereg_minipilot.md: until then no real run (also --resume) starts; dry runs work. Models: deepseek-v4.1-flash, mistral-large-4-0, gpt-6-luna. providers: tag / provider_name from GET /api/v1/models/{id}/endpoints, checked 2026-10-06 (deepinfra/fp8 = DeepInfra fp8, as in pilot v2; mistral = Mistral; openai = OpenAI); allow_fallbacks false and require_parameters true for all three (pgg_game.provider_routing). temperature and reasoning_effort are not sent (logged \"default\"). Frames (EMIR 3 Part 1): abstract_v3 = deepseek, mistral, gpt; story = deepseek, gpt. Mistral plays only abstract_v3 (its suitability for the main experiment, E3, is measured in the main frame); the frame comparison abstract_v3 / story is made within DeepSeek and GPT. Calls (accepted answers, re-requests not included): deepseek 1200, gpt 1200, mistral 600, total 3000. frame_files lock each file by sha256 (another file stops the real run and the dry run). story = frames/story_A.json (draft A, the jar). Every frame file declares kind; the frame linter (forbidden roots of cerceve_linter) runs on every frame at every run start except a frame of kind abstract (abstract_v3 is exempt, story_A is linted); the verdict per frame goes to every segment entry (frame_audit). comprehension = the two rule-comprehension questions of each frame; q2 ends 'Give the change as a whole number (it can be positive, zero or negative).' (EMIR 3 3b), answer key 28 / -6. A rule-comprehension call does not stop the run: when max_invalid is used up its row says comp_missing and the game goes on; its invalids are counted apart (n_comp_invalid, n_comp_parse_fail, n_comp_missing per model) and are not in the decisions' invalid-rate cap (invalid_rate_cap 0.05 of the planned decision calls); their cost is in the budget. cards: cards/pilot_cards_v3.json locked by cards_sha256 (another file stops the run and the dry run); Boston + Riyadh = 6 cards, styles minimal / value / factual. Relative paths are relative to the code directory. Budget (EMIR 3 Part 2): budget_usd = 10 is the hard cap on accumulated usage.cost; model_budget_usd = per-model caps (mistral 5, deepseek 5, gpt 0.5 USD): a model over its cap stops alone and is reported, the others go on. expected_cost_gate_usd = 4.5 on the mean dry-run estimate: above it no real run starts and the overrun is reported; no arm is dropped. reasoning_cap_rule: Mistral's reasoning_capped is max(reasoning_tokens, completion_tokens) >= max_tokens - 4096 (EMIR 3 3a; in M1, 11 of 18 responses had reasoning_tokens > completion_tokens); the other models keep reasoning_tokens >= max_tokens - 4096; rows and summaries show both numbers; cost is priced from completion_tokens. snapshot_version_models = [mistral]: check_snapshot compares Mistral's model_version (the dated model of the serving endpoint); a response without it is only counted (n_model_version_unknown), not re-requested. A response of a pinned model without a provider name is re-requested and counted (n_provider_mismatch, n_provider_missing). run: the template minipilot_{run_date} gets the local date of the run start (YYYYMMDD) for a new run; --resume needs the resolved name with --run. runs_dir must exist; outputs go to runs_dir/<run>/. isolated_round_no = 5 ('This is round 5 of 10.', isolated_frame fixed_round). rationale, max_invalid (3), invalid_rate_cap, stop_on_length, workers (4), parallel_units (3), check_snapshot and seed_namespace (pgg-minipilot): prereg_minipilot.md settings table.",
   "prereg_approved": false,
   "run": "minipilot_{run_date}",
   "cards": "cards/pilot_cards_v3.json",
+  "cards_sha256": "a4f50d0f36296c4f38450a78210703c81aeabec1af4f72830c91a00266d7a9aa",
   "cities": ["Boston", "Riyadh"],
   "models": ["deepseek/deepseek-v4.1-flash", "mistralai/mistral-large-4-0", "openai/gpt-6-luna"],
   "conditions": ["N"],
@@ -13,17 +14,17 @@
   "isolated_frame": "fixed_round",
   "isolated_round_no": 5,
   "frames": {
-    "abstract_v3": ["deepseek", "gpt"],
-    "story": ["deepseek", "mistral", "gpt"]
+    "abstract_v3": ["deepseek", "mistral", "gpt"],
+    "story": ["deepseek", "gpt"]
   },
   "frame_files": {
     "abstract_v3": {
       "path": "frames/abstract_v3.json",
-      "sha256": "9bdc919a0eebe1991e69212e9144e6ef49622da0f20cd9886bd94ded312bf163"
+      "sha256": "09b4d67b7b6640e33c0c265bec3324b2572293e61ac5d58bac798757ecb93e5a"
     },
     "story": {
       "path": "frames/story_A.json",
-      "sha256": "4e38eb4891071419659a1b3f26b2c1a80a77fe88e3be74cc559b1f7575e49977"
+      "sha256": "d8face90d927cb4d21ee23e53ace2458937f0e029996f88334441d3ab9190d7d"
     }
   },
   "comprehension": true,
@@ -49,13 +50,14 @@
   "runs_dir": "/Users/karbon/Desktop/Veri Bilimi/complexity-prj/orc/data/projects/PublicGoods/workspace/runs",
   "seed_namespace": "pgg-minipilot",
   "max_invalid": 3,
-  "budget_usd": 6,
-  "model_budget_usd": {"mistral": 3, "deepseek": 2, "gpt": 0.5},
+  "budget_usd": 10,
+  "model_budget_usd": {"mistral": 5, "deepseek": 5, "gpt": 0.5},
   "expected_cost_gate_usd": 4.5,
   "invalid_rate_cap": 0.05,
   "stop_on_length": true,
   "check_snapshot": true,
   "snapshot_version_models": ["mistral"],
+  "reasoning_cap_rule": {"mistral": "max_reasoning_completion"},
   "workers": 4,
   "parallel_units": 3
 }

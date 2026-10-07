@@ -1,5 +1,5 @@
 {
-  "_notes": "Main frame of the mini-pilot (goal C1, task #61). Equal to abstract_v2 except: (a) the system message is the identity card alone (no 'You are a participant in a decision-making experiment. The following describes you:'); (b) the isolated question gives a fixed round ('This is round {round_no} of {rounds}.', round from the config, isolated_round_no, default 5) instead of 'neither the first nor the last round' (isolated_frame fixed_round; one_shot and repeated are not offered by this frame). Rules text unchanged, A2.1 (f) labels included. Adds the two rule-comprehension questions of goal C4 (wording to be approved by the user). Task #67 (K2): the last sentence of q2 is 'Give the change as a whole number with its sign, for example +3 or -3.' (was 'Give a negative number if they go down.'; the 3 comes from answer.example). kind abstract: says game / contribute on purpose, not linted. Format: frames/SCHEMA.md.",
+  "_notes": "Main frame of the mini-pilot (goal C1, task #61). Equal to abstract_v2 except: (a) the system message is the identity card alone (no 'You are a participant in a decision-making experiment. The following describes you:'); (b) the isolated question gives a fixed round ('This is round {round_no} of {rounds}.', round from the config, isolated_round_no, default 5) instead of 'neither the first nor the last round' (isolated_frame fixed_round; one_shot and repeated are not offered by this frame). Rules text unchanged, A2.1 (f) labels included. Adds the two rule-comprehension questions of goal C4 (wording to be approved by the user). Task #67 (K2) made the last sentence of q2 'Give the change as a whole number with its sign, for example +3 or -3.' (was 'Give a negative number if they go down.'). Task #73 (EMIR 3 3b, 2026-10-07, before any data): it is now 'Give the change as a whole number (it can be positive, zero or negative).'; the +3 / -3 example and answer.example are gone; the schema stays integer, the key stays 28 / -6. kind abstract (required since task #73): says game / contribute on purpose, the only kind exempt from the frame linter. Format: frames/SCHEMA.md.",
   "schema": 1,
   "name": "abstract_v3",
   "description": "Abstract public goods frame of the mini-pilot: card as the whole system message, isolated question at a fixed round, two rule-comprehension questions.",
@@ -58,8 +58,8 @@
       },
       {
         "id": "q2",
-        "text": "Suppose that the contributions of the other players stay the same. If you contribute {delta} more points to the group project, by how much do your own total earnings in that round change? Give the change as a whole number with its sign, for example +{example} or -{example}.",
-        "answer": {"kind": "own_change", "delta": 10, "example": 3}
+        "text": "Suppose that the contributions of the other players stay the same. If you contribute {delta} more points to the group project, by how much do your own total earnings in that round change? Give the change as a whole number (it can be positive, zero or negative).",
+        "answer": {"kind": "own_change", "delta": 10}
       }
     ]
   },

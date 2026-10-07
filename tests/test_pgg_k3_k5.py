@@ -162,8 +162,9 @@ class ModelBudget(ResumeBase):
 
     def test_committed_config_has_the_part_one_caps(self):
         raw = json.loads(MINIPILOT.read_text(encoding="utf-8"))
-        self.assertEqual(raw["model_budget_usd"], {"mistral": 3, "deepseek": 2, "gpt": 0.5})
-        self.assertEqual((raw["budget_usd"], raw["expected_cost_gate_usd"]), (6, 4.5))
+        # EMIR 3 Part 2 (task #73): caps raised to meet p95; the gate unchanged
+        self.assertEqual(raw["model_budget_usd"], {"mistral": 5, "deepseek": 5, "gpt": 0.5})
+        self.assertEqual((raw["budget_usd"], raw["expected_cost_gate_usd"]), (10, 4.5))
         self.assertEqual(raw["snapshot_version_models"], ["mistral"])
         self.assertIs(raw["check_snapshot"], True)
         self.assertIs(raw["prereg_approved"], False)
@@ -319,8 +320,8 @@ class DryRunP95(ResumeBase):
             self.assertAlmostEqual(est["per_model"][key]["cost_usd"], mean, places=12)
             self.assertAlmostEqual(est["per_model"][key]["p95_upper_usd"], p95, places=12)
             line = next(x for x in out.splitlines() if x.startswith(f"  {key} "))
-            # Mistral's abstract_v3 arm dropped by the gate fallback (task #71)
-            self.assertIn("600 çağrı (story)" if key == "mistral"
+            # EMIR 3 Part 1 (task #73): Mistral plays abstract_v3 only
+            self.assertIn("600 çağrı (abstract_v3)" if key == "mistral"
                           else "1200 çağrı (abstract_v3, story)", line)
             self.assertIn(f"ortalama ~{mean:.4f} USD", line)
             self.assertIn(f"p95 üst sınır ~{p95:.4f} USD", line)
@@ -332,11 +333,13 @@ class DryRunP95(ResumeBase):
         self.assertLess(est["total_cost_usd"], 4.5)
         self.assertIn("Beklenti kapısı expected_cost_gate_usd=4.5 USD: GEÇER", out)
         self.assertIn("Kapı kararı toplam ORTALAMA beklentiye göre verilir; p95 bilgi amaçlıdır.", out)
-        deepseek = next(x for x in out.splitlines() if x.startswith("  deepseek "))
-        self.assertIn("ortalama altında, p95 AŞIYOR", deepseek)
-        gpt = next(x for x in out.splitlines() if x.startswith("  gpt "))
-        self.assertIn("ortalama altında, p95 altında", gpt)
-        self.assertIn("model_budget_usd={'mistral': 3, 'deepseek': 2, 'gpt': 0.5}", out)
+        # EMIR 3 Part 2: every per-model cap is above its model's p95 (tahmin)
+        for key in ("deepseek", "mistral", "gpt"):
+            line = next(x for x in out.splitlines() if x.startswith(f"  {key} "))
+            self.assertIn("ortalama altında, p95 altında", line)
+            self.assertLess(est["per_model"][key]["p95_upper_usd"], raw["model_budget_usd"][key])
+        self.assertLess(est["total_p95_upper_usd"], raw["budget_usd"])
+        self.assertIn("model_budget_usd={'mistral': 5, 'deepseek': 5, 'gpt': 0.5}", out)
         self.create.assert_not_called()
 
     def test_gate_by_the_mean_when_it_is_above(self):

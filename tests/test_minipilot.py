@@ -45,10 +45,10 @@ DECIDED = {
     "isolated_frame": "fixed_round", "rationale": True, "seed_namespace": "pgg-minipilot",
     "max_invalid": 3, "invalid_rate_cap": 0.05, "stop_on_length": True, "check_snapshot": True,
     "workers": 4, "parallel_units": 3,
-    # Q3 (b) put all three models in both frames; task #71 (EMIR 2 M2a) dropped
-    # Mistral's abstract_v3 arm by the pre-specified fallback of Q4 (the gate)
-    "frames": {"abstract_v3": ["deepseek", "gpt"],
-               "story": ["deepseek", "mistral", "gpt"]},
+    # EMIR 3 Part 1 (task #73): Mistral plays abstract_v3 only (its E3 suitability
+    # is measured in the main frame); the frame comparison is within DeepSeek and GPT
+    "frames": {"abstract_v3": ["deepseek", "mistral", "gpt"],
+               "story": ["deepseek", "gpt"]},
 }
 FRAME_FILES = {"abstract_v3": "frames/abstract_v3.json", "story": "frames/story_A.json"}
 
@@ -64,6 +64,7 @@ def placeholder_config(tmp: Path) -> Path:
     for key in PREREG_SETTINGS:
         raw[key] = f"<TBD_PREREG: {key}>"
     raw["frame_files"] = {"story": "<TBD_PREREG: story frame file>"}
+    raw.pop("cards_sha256")            # task #73's cards lock did not exist then
     path = Path(tmp) / "minipilot_placeholders.json"
     path.write_text(json.dumps(raw), encoding="utf-8")
     return path
@@ -97,7 +98,7 @@ class MiniPilotConfig(unittest.TestCase):
         self.assertIs(raw["prereg_approved"], False)
         self.assertEqual(raw["max_tokens"], 16000)
         self.assertEqual((raw["request_deadline_s"], raw["stall_timeout_s"]), (900, 1800))
-        self.assertEqual((raw["budget_usd"], raw["expected_cost_gate_usd"]), (6, 4.5))
+        self.assertEqual((raw["budget_usd"], raw["expected_cost_gate_usd"]), (10, 4.5))
         self.assertIs(raw["comprehension"], True)
         self.assertEqual(raw["isolated_round_no"], 5)
         self.assertNotIn("temperature", raw)
@@ -124,9 +125,14 @@ class MiniPilotConfig(unittest.TestCase):
         self.assertEqual(
             pgg_game.load_frame_file("abstract_v3", raw["frame_files"]["abstract_v3"]).kind,
             "abstract")
-        # the cards: v3 as checked before the copy (a4f50d0f...a9aa), 6 cards of 2 cities
+        # the cards: v3 as checked before the copy (a4f50d0f...a9aa), 6 cards of 2 cities,
+        # locked by cards_sha256 (task #73, EMIR 3 3e)
         sha = hashlib.sha256((ROOT / raw["cards"]).read_bytes()).hexdigest()
         self.assertTrue(sha.startswith("a4f50d0f") and sha.endswith("a9aa"), sha)
+        self.assertEqual(raw["cards_sha256"], sha)
+        self.assertEqual(pgg_game.check_cards_lock(ROOT / raw["cards"], raw["cards_sha256"]), sha)
+        # Mistral's reasoning_capped rule (task #73, EMIR 3 3a); the others the default
+        self.assertEqual(raw["reasoning_cap_rule"], {"mistral": "max_reasoning_completion"})
         cards = pgg_game.load_cards(ROOT / raw["cards"], raw["cities"])
         self.assertEqual(sorted((c.card_id, c.style) for c in cards),
                          sorted((f"{city}_{style}", style) for city in ("boston", "riyadh")
@@ -195,6 +201,7 @@ class MiniPilotRuns(GuardTestBase):
         raw = _raw()
         raw.update({
             "prereg_approved": True, "run": "mini_mock", "cards": str(cards),
+            "cards_sha256": hashlib.sha256(cards.read_bytes()).hexdigest(),
             "cities": ["X", "Y"], "conditions": ["N"], "arms": ["group", "isolated"],
             "groups_per_cell": 1, "isolated_reps": 1, "isolated_points": [0, 10, 20],
             "isolated_frame": "fixed_round", "rationale": True, "seed_namespace": "pgg-test",
@@ -291,9 +298,10 @@ class MiniPilotRuns(GuardTestBase):
         # 2 x 5 isolated values, comprehension 2 x 4 + 2
         lines = [x for x in out.splitlines()
                  if re.match(r"^(abstract_v3|story)\s+(deepseek|mistral|gpt)\s", x)]
-        # Mistral's abstract_v3 arm dropped by the gate fallback (task #71)
+        # EMIR 3 Part 1 (task #73): Mistral's story arm is out, its abstract_v3 arm in
         self.assertEqual(len(lines), 5)
-        self.assertFalse([x for x in lines if re.match(r"^abstract_v3\s+mistral\s", x)])
+        self.assertFalse([x for x in lines if re.match(r"^story\s+mistral\s", x)])
+        self.assertTrue([x for x in lines if re.match(r"^abstract_v3\s+mistral\s", x)])
         for x in lines:
             self.assertIn("600 çağrı (contribute_N=480, isolated=60, comprehension=60)", x)
         self.assertIn("3000 çağrı", out)
@@ -303,8 +311,13 @@ class MiniPilotRuns(GuardTestBase):
         for label, rel in FRAME_FILES.items():
             sha = hashlib.sha256((ROOT / rel).read_bytes()).hexdigest()
             self.assertIn(f"Çerçeve {label}: {ROOT / rel} (kind "
-                          + ("story, yasaklı kök denetimi temiz" if label == "story"
-                             else "abstract") + f"), sha256 {sha} — kilitli, beklenenle aynı", out)
+                          + ("story; linter: GEÇTİ (kind story; yasaklı kök yok)" if label == "story"
+                             else "abstract; linter: MUAF (kind \"abstract\" declared in the file")
+                          , out)
+            self.assertIn(f"sha256 {sha} — kilitli, beklenenle aynı", out)
+        cards_sha = hashlib.sha256((ROOT / "cards" / "pilot_cards_v3.json").read_bytes()).hexdigest()
+        self.assertIn(f"Kartlar: {ROOT / 'cards' / 'pilot_cards_v3.json'}, sha256 {cards_sha} — "
+                      "kilitli, beklenenle aynı", out)
         self.assertIn("Run adı: şablon minipilot_{run_date} — yeni gerçek koşuda koşu günüyle "
                       f"çözülür (bugün: minipilot_{pgg_game.run_date()})", out)
         self.assertIn("ÖN KAYIT ONAYI YOK", out)

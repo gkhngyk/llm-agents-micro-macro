@@ -9,15 +9,16 @@ in the code.
 
 | File | What |
 |---|---|
-| `frames/abstract_v2.json` | The texts of the engine up to c0b91f5 (pilot v2), character for character. Default of every config without `frames`. Do not edit: earlier rows carry its sha256. |
-| `frames/abstract_v3.json` | Mini-pilot main frame (goal C1): the card alone as system message, isolated question at a fixed round, two rule-comprehension questions (C4). |
-| `tests/fixtures/story_fixture.json` | Test fixture standing in for the story frame (C2). Not a story. |
+| `frames/abstract_v2.json` | The texts of the engine up to c0b91f5 (pilot v2), character for character. Default of every config without `frames`. Do not edit: earlier rows carry its sha256. Written before `kind` existed: the only file accepted without it (legacy, by its sha256), and only as the default frame of a config without `frames`. |
+| `frames/abstract_v3.json` | Mini-pilot main frame (goal C1): the card alone as system message, isolated question at a fixed round, two rule-comprehension questions (C4). `kind` `abstract`. |
+| `frames/story_A.json` | Story draft A (goal C2, the jar). `kind` `story`: linted at every run start. |
+| `tests/fixtures/story_fixture.json` | Test fixture standing in for the story frame (C2). Not a story; `kind` `abstract` (it says "Player"). |
 
 ## Config
 
 ```json
-"frames": {"abstract_v3": ["deepseek", "mistral", "gpt"], "story": ["deepseek", "mistral"]},
-"frame_files": {"story": "/abs/path/workspace/frames/story_a.json"},
+"frames": {"abstract_v3": ["deepseek", "mistral", "gpt"], "story": ["deepseek", "gpt"]},
+"frame_files": {"story": {"path": "frames/story_A.json", "sha256": "<64 hex>"}},
 "isolated_frame": "fixed_round",
 "isolated_round_no": 5,
 "comprehension": true
@@ -28,8 +29,12 @@ in the code.
   label is part of every unit label (`...|0|story`), session id, group id,
   seed key and run-order key. Without `frames` the engine uses `abstract_v2`
   for every model and writes ids and seeds exactly as before (pilot v2 resumes).
-* `frame_files`: label -> path (absolute, or relative to the working directory).
+* `frame_files`: label -> path, or `{"path": ..., "sha256": ...}` (task #67):
+  a file whose bytes have another sha256 stops the real run, `--resume` and the
+  dry run before any call. A relative path is relative to the code directory.
   A label without an entry is `frames/<label>.json` of the code directory.
+  The cards file is locked the same way by the config's `cards_sha256`
+  (task #73).
 * `isolated_frame`: `one_shot`, `repeated` or `fixed_round`; every frame of the
   run must offer it (key under `isolated`). `isolated_round_no` (default 5) is
   the round `fixed_round` names; it must be in 2..rounds.
@@ -50,6 +55,7 @@ Top-level keys (keys starting with `_` are comments and ignored):
 | `schema` | `1` | required |
 | `name` | string `[A-Za-z0-9_.-]+` | written to every row as `frame_id` |
 | `description` | string | optional |
+| `kind` | `"abstract"` or `"story"` | required (task #73; only the frozen `abstract_v2` lacks it, see above). Decides the frame linter, see below |
 | `system` | template | system message; only `{card}` (required) |
 | `player_label` | template | `{player_no}` (1-based, required) |
 | `you_suffix` | template | appended to the player's own label in lists (may be empty) |
@@ -125,10 +131,23 @@ enumeration at the start of a line. A placeholder must be a plain name: no
   (`others` has n - 1 values, all at most the endowment; placeholders `{own}`,
   `{other_1}` ...); `own_change`: `delta x (mpcr - 1)` (placeholder `{delta}`).
   A key that is not a whole number with the run's parameters stops the run.
+* `own_change` may take `example` (a positive integer, placeholder
+  `{example}`); no committed frame uses it since task #73. abstract_v3 and
+  story_A end q2 with "Give the change as a whole number (it can be positive,
+  zero or negative)." (no `+3` / `-3` example).
 * The response is `{"q1": int, "q2": int[, "rationale"]}`. Only a response
   outside this schema is invalid (re-requested, counted). A wrong answer is a
   valid response: recorded (`comp_<id>_answer`, `comp_<id>_key`,
   `comp_<id>_correct`, `comp_n_correct`), never re-requested, the game goes on.
+  A signed answer such as `+3` (or U+2212 `−6`) is parsed and logged as
+  degraded (rule-comprehension calls only).
+* A rule-comprehension call never stops the run (task #73): when its
+  `max_invalid` re-requests are used up (or every attempt fails to parse) the
+  row gets `comp_missing: true` (`comp_missing_reason`, answers and
+  correctness null), a `pgg_comprehension_missing` event is logged and the
+  game goes on. Its invalid / unparseable responses are counted apart
+  (`n_comp_invalid`, `n_comp_parse_fail`, `n_comp_missing` per model) and are
+  not in the decisions' `invalid_rate_cap`; their cost is in the budget.
 * When asked: each agent once before round 1 of a group game (a separate
   call, no history; rows with round 1 and step `comprehension`), and once
   before every isolated schedule (row with round null). The summary has the
@@ -155,6 +174,20 @@ braces, numbers in the text, bad answer specs. `RunConfig.validate` also
 checks that every frame offers the run's isolated wording and, with
 `comprehension`, has questions whose key is a whole number. A real run,
 `--resume` and a dry run with frames stop with the error before any call.
+
+### Frame linter (task #73)
+
+The frame linter runs on every frame by default
+(`pgg_game.story_frame_problems`: the forbidden roots of
+`cerceve_linter.ROOTS` — game, player, contribut, ... — in the frame's texts
+and in its rendered prompts). Only a frame whose file says `"kind":
+"abstract"` explicitly is exempt (it says "game" / "contribute" on purpose).
+A frame without `kind` stops the run, except the frozen `abstract_v2` as the
+default frame of a config without `frames`. A frame with a forbidden root
+stops the real run, `--resume` and the dry run. The verdict per frame
+(`{"frame_id", "kind", "sha256", "lint": "passed" | "exempt", "reason"}`) is
+written to the summary's `frame_audit` and to every segment entry; the dry
+run prints it on the frame line.
 
 ## Cost estimate
 

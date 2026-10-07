@@ -405,10 +405,11 @@ def calibrate_mistral_m1(m1_dir: Path, ratio_run_dir: Path, base_path: Path = DE
         raise ValueError(f"{run}: Mistral usage.cost {billed} != summary "
                          f"{summary['cost_by_model_usd']['mistral']}")
 
-    # the prompts as sent: re-rendered with this code, must equal the logged ones
+    # the prompts as sent: re-rendered with this code, must equal the logged ones.
+    # The frame file's sha256 may differ from M1's (task #73: abstract_v3
+    # changed after M1 only in the q2 text of the rule comprehension, which M1
+    # did not measure); every M1 prompt must still re-render byte for byte.
     frame_file = pgg_frames.frame_path(summary["frame"])
-    if sha256(frame_file) != summary["frame_sha256"]:
-        raise ValueError(f"{frame_file.name}: sha256 differs from the M1 frame")
     frame = pgg_frames.load_frame(frame_file)
     rationale = json.loads((ROOT / "configs" / "minipilot.json").read_text(
         encoding="utf-8"))["rationale"]

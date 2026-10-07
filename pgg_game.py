@@ -669,11 +669,29 @@ def _offline_stable_seed(namespace: str, *parts, base: int = 0) -> int:
     return base + zlib.crc32(key.encode()) % 1_000_000
 
 
-def _offline_reasoning_capped(usage, max_tokens: int) -> bool | None:
+def _usage_int(value) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def usage_tokens(usage) -> tuple[int | None, int | None]:
+    """(reasoning_tokens, completion_tokens) of a usage dict (None when absent)."""
+    if not isinstance(usage, dict):
+        return None, None
+    details = usage.get("completion_tokens_details")
+    reasoning = details.get("reasoning_tokens") if isinstance(details, dict) else None
+    return _usage_int(reasoning), _usage_int(usage.get("completion_tokens"))
+
+
+def _offline_reasoning_capped(usage, max_tokens: int, rule: str = "reasoning") -> bool | None:
     """Copy of llm_client.reasoning_capped for dry runs; a test checks that both agree."""
-    details = usage.get("completion_tokens_details") if isinstance(usage, dict) else None
-    n = details.get("reasoning_tokens") if isinstance(details, dict) else None
-    if not isinstance(n, int) or isinstance(n, bool):
+    if rule not in OfflineLLM.REASONING_CAP_RULES:
+        raise ValueError(f"reasoning cap rule must be one of {OfflineLLM.REASONING_CAP_RULES}, "
+                         f"got {rule!r}")
+    n, completion = usage_tokens(usage)
+    if rule == "max_reasoning_completion":
+        present = [x for x in (n, completion) if x is not None]
+        n = max(present) if present else None
+    if n is None:
         return None
     return n >= max_tokens - OfflineLLM.REASONING_RESERVE_TOKENS
 
@@ -688,6 +706,8 @@ class OfflineLLM:
     DEFAULT_TIMEOUT_S = 300.0
     DEFAULT_REQUEST_DEADLINE_S = 900.0
     REASONING_RESERVE_TOKENS = 4096
+    REASONING_CAP_RULES = ("reasoning", "max_reasoning_completion")
+    DEFAULT_REASONING_CAP_RULE = "reasoning"
     LOG_PATH = None
     stable_seed = staticmethod(_offline_stable_seed)
     reasoning_capped = staticmethod(_offline_reasoning_capped)
@@ -960,6 +980,27 @@ def load_cards(path: str | Path, cities=None) -> list[Card]:
             raise ValueError(f"{path}: card without {sorted(missing)}: {entry!r}")
         cards.append(Card(str(entry["card_id"]), str(entry["style"]), str(entry["text"])))
     return validate_cards(cards)
+
+
+def check_cards_lock(path, sha256) -> str:
+    """sha256 of the cards file; ValueError when the config's "cards_sha256" locks another.
+
+    Task #73 (EMIR 3 3e): the cards file is locked like the frame files
+    (frame_files {"path", "sha256"}): a file with other bytes than the locked
+    ones stops the real run, --resume and the dry run before any call.
+    sha256 None = not locked (configs without the field).
+    """
+    if sha256 is not None and not (isinstance(sha256, str)
+                                   and re.fullmatch(r"[0-9a-f]{64}", sha256)):
+        raise ValueError(f"cards_sha256 must be 64 lower-case hex digits, got {sha256!r}")
+    try:
+        actual = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError as e:
+        raise ValueError(f"cards file {str(path)!r} cannot be read ({e})") from None
+    if sha256 is not None and actual != sha256:
+        raise ValueError(f"cards: sha256 of {path} is {actual}, but cards_sha256 locks {sha256}: "
+                         "the file changed after it was locked; no run starts")
+    return actual
 
 
 def card_length(card: Card) -> dict:
@@ -1308,12 +1349,50 @@ def story_frame_problems(frame: Frame, params: GameParams) -> list[str]:
 
 
 def check_story_frame(label: str, frame: Frame, params: GameParams) -> None:
-    """FrameError when a story frame holds a forbidden root (story_frame_problems)."""
+    """FrameError when a linted frame holds a forbidden root (story_frame_problems)."""
     problems = story_frame_problems(frame, params)
     if problems:
-        raise FrameError(f"story frame {label!r} ({frame.path}) holds forbidden roots of "
+        raise FrameError(f"{frame.kind} frame {label!r} ({frame.path}) holds forbidden roots of "
                          "cerceve_linter (game, player, contribut, ...); no run starts:\n  - "
                          + "\n  - ".join(problems))
+
+
+def frame_audit(label: str, frame: Frame, params: GameParams, *, with_frames: bool) -> dict:
+    """The frame linter's verdict on one frame of a run (task #73, EMIR 3 3d).
+
+    The linter runs on every frame by default (story_frame_problems); only a
+    frame whose file says "kind": "abstract" is exempt. "kind" is required:
+    a frame without it stops the run (FrameError), except the frozen
+    abstract_v2 (pgg_frames.LEGACY_FRAMES_SHA256) as the default frame of a
+    config without "frames" (with_frames False), which is exempt as legacy.
+    A frame with a forbidden root stops the run (FrameError). Returns
+    {"frame_id", "kind", "sha256", "lint": "passed" | "exempt", "reason"}.
+    """
+    out = {"frame_id": frame.name, "kind": frame.kind, "sha256": frame.sha256}
+    if frame.kind is None:
+        if frame.legacy and not with_frames:
+            return {**out, "lint": "exempt",
+                    "reason": f"{frame.name}: frozen frame of pilot v2 (rows carry its sha256), "
+                              "written before \"kind\" existed; default frame of a config "
+                              "without frames"}
+        raise FrameError(f"frame {label!r} ({frame.path}) has no \"kind\": every frame a config "
+                         f"names under \"frames\" must declare one of {pgg_frames.FRAME_KINDS} "
+                         "(only \"abstract\" is exempt from the frame linter); no run starts")
+    if frame.lint_exempt:
+        return {**out, "lint": "exempt",
+                "reason": "kind \"abstract\" declared in the file (says game / contribute on "
+                          "purpose)"}
+    check_story_frame(label, frame, params)
+    return {**out, "lint": "passed",
+            "reason": f"kind {frame.kind!r}: no forbidden root of cerceve_linter in the frame "
+                      "texts and the rendered prompts"}
+
+
+def frame_audit_line(label: str, audit: dict) -> str:
+    """One dry-run / report line of frame_audit (Turkish)."""
+    if audit["lint"] == "passed":
+        return f"linter: GEÇTİ (kind {audit['kind']}; yasaklı kök yok)"
+    return f"linter: MUAF ({audit['reason']})"
 
 
 @dataclass
@@ -1376,9 +1455,10 @@ class RunConfig:
     # seed and order key. A frame's file is frame_files[label], else
     # frames/<label>.json. An entry is a path or {"path": ..., "sha256": ...}
     # (task #67: the file must have that sha256, else no run starts, and a
-    # dry run fails); a relative path is relative to the code directory. A
-    # frame of kind "story" must hold none of cerceve_linter.ROOTS
-    # (story_frame_problems, checked in _validate_frames).
+    # dry run fails); a relative path is relative to the code directory.
+    # Task #73: every frame needs "kind" and is linted for cerceve_linter.ROOTS
+    # (story_frame_problems) unless it says "kind": "abstract" (frame_audit,
+    # checked in _validate_frames; the verdicts go to every segment entry).
     frames: dict | None = None
     frame_files: dict | None = None
     # isolated_frame "fixed_round": the round the isolated question names
@@ -1392,7 +1472,12 @@ class RunConfig:
     # the config's run name template ("minipilot_{run_date}") when run was
     # resolved from it at the start of this (new) run; written to the summary
     run_template: str | None = None
+    # {model key: rule of llm_client.REASONING_CAP_RULES} (task #73, EMIR 3 3a):
+    # how reasoning_capped reads the usage of that model; models missing
+    # from it (and None) use "reasoning" (reasoning_tokens >= max_tokens - 4096)
+    reasoning_cap_rule: dict | None = None
     _frame_cache: dict | None = field(default=None, init=False, repr=False, compare=False)
+    _frame_audit: dict | None = field(default=None, init=False, repr=False, compare=False)
 
     def frame_models(self) -> dict[str, list[str]]:
         """{frame label: model keys}; the default frame for every model when frames is None."""
@@ -1421,6 +1506,18 @@ class RunConfig:
         if isinstance(self.reasoning_effort, dict):
             return self.reasoning_effort.get(model_key)
         return self.reasoning_effort
+
+    def cap_rule_for(self, model_key: str) -> str:
+        """reasoning_capped rule of a model (task #73): config, else "reasoning"."""
+        return (self.reasoning_cap_rule or {}).get(model_key, OfflineLLM.DEFAULT_REASONING_CAP_RULE)
+
+    def frame_audit(self) -> dict:
+        """{frame label: frame_audit verdict} (validated with the frames)."""
+        if self._frame_audit is None:
+            with_frames = self.frames is not None
+            self._frame_audit = {label: frame_audit(label, f, self.params, with_frames=with_frames)
+                                 for label, f in self.load_frames().items()}
+        return self._frame_audit
 
     def provider_for(self, model_key: str) -> dict | None:
         return (self.providers or {}).get(model_key)
@@ -1516,6 +1613,16 @@ class RunConfig:
                         or not value > 0):
                     raise ValueError(f"model_budget_usd[{key}] must be a positive number, "
                                      f"got {value!r}")
+        if self.reasoning_cap_rule is not None:
+            if not isinstance(self.reasoning_cap_rule, dict):
+                raise ValueError("reasoning_cap_rule must be a {model key: rule} object")
+            extra = set(self.reasoning_cap_rule) - set(self.models)
+            if extra:
+                raise ValueError(f"reasoning_cap_rule for models not in the run: {sorted(extra)}")
+            for key, rule in self.reasoning_cap_rule.items():
+                if rule not in OfflineLLM.REASONING_CAP_RULES:
+                    raise ValueError(f"reasoning_cap_rule[{key}] must be one of "
+                                     f"{OfflineLLM.REASONING_CAP_RULES}, got {rule!r}")
         if (not isinstance(self.snapshot_version_models, (list, tuple))
                 or not set(self.snapshot_version_models) <= set(self.models)):
             raise ValueError(f"snapshot_version_models must be a list of the run's models "
@@ -1567,11 +1674,10 @@ class RunConfig:
                              f"(the previous round's mean is given), got {self.isolated_round_no!r}")
         # FrameError (a ValueError) if a file is invalid or not the locked sha256
         frames = self.load_frames()
+        # task #73: "kind" required; every frame linted unless kind "abstract";
+        # a forbidden root stops the run (FrameError)
+        self.frame_audit()
         for label, f in frames.items():
-            # task #67: a story frame with a forbidden root stops the run (abstract
-            # frames say "game" / "contribute" on purpose: not linted)
-            if f.kind == "story":
-                check_story_frame(label, f, self.params)
             if "isolated" in self.arms and self.isolated_frame not in f.isolated_frames:
                 raise ValueError(f"frame {label!r} ({f.path}) has no isolated question "
                                  f"{self.isolated_frame!r}; it offers {list(f.isolated_frames)}")
@@ -1581,27 +1687,37 @@ class RunConfig:
                                      "no comprehension questions")
                 f.comprehension_key(self.params)     # ValueError if not whole numbers
 
-    def planned_calls_per_model(self, model_key: str | None = None) -> int:
-        """Accepted decisions per model of this design (re-requests not included).
+    def planned_calls_per_model(self, model_key: str | None = None, *,
+                                comprehension: bool | None = None) -> int:
+        """Accepted answers per model of this design (re-requests not included).
 
         A model runs len(cards) cells per frame it is in (model_key None: the
-        most of any model).
+        most of any model). comprehension None: as the config (decisions and
+        rule-comprehension calls); False: decisions only.
         """
         if model_key is None:
-            return max(self.planned_calls_per_model(k) for k in self.models)
+            return max(self.planned_calls_per_model(k, comprehension=comprehension)
+                       for k in self.models)
         counts = pgg_cost.call_counts(
             n_cells=len(self.cards) * len(self.frames_of(model_key)),
             conditions=self.conditions,
             groups_per_cell=self.groups_per_cell, isolated_reps=self.isolated_reps,
             n_points=len(self.isolated_points), group_size=self.params.group_size,
-            rounds=self.params.rounds, arms=self.arms, comprehension=self.comprehension)
+            rounds=self.params.rounds, arms=self.arms,
+            comprehension=self.comprehension if comprehension is None else comprehension)
         return sum(counts.values())
 
     def invalid_limit(self, model_key: str | None = None) -> int | None:
-        """Most invalid + parse-failed responses a model may have (None = no cap)."""
+        """Most invalid + parse-failed DECISION responses a model may have (None = no cap).
+
+        Task #73 (EMIR 3 3c): the cap is a fraction of the planned decision
+        calls; rule-comprehension calls are neither in the denominator nor in
+        the count (n_comp_invalid / n_comp_parse_fail are reported apart).
+        """
         if self.invalid_rate_cap is None:
             return None
-        return math.floor(self.invalid_rate_cap * self.planned_calls_per_model(model_key) + 1e-9)
+        return math.floor(self.invalid_rate_cap
+                          * self.planned_calls_per_model(model_key, comprehension=False) + 1e-9)
 
 
 def _count_lines(path: Path) -> int | None:
@@ -1659,6 +1775,12 @@ def _call_key(segment: int, session_id: str, call: dict) -> tuple:
             call.get("others_mean"))
 
 
+def _is_comprehension(rec: dict) -> bool:
+    """A raw-log record of a rule-comprehension call (its "call" says step comprehension)."""
+    call = rec.get("call")
+    return isinstance(call, dict) and call.get("step") == "comprehension"
+
+
 def _call_of_row(row: dict) -> tuple:
     return _call_key(row.get("segment", 0), row.get("session_id"),
                      dict(zip(("step", "round", "agent_id", "others_mean"), _row_key(row))))
@@ -1710,7 +1832,17 @@ def _new_stats() -> dict:
     # every response -> count ("None" = none); n_model_version_unknown:
     # responses of a snapshot_version_models model that check_snapshot could
     # not compare (no model_version).
+    # Task #73 (EMIR 3 3c): n_comp_invalid / n_comp_parse_fail are the invalid
+    # and unparseable responses of rule-comprehension calls (re-requested, not
+    # in n_invalid / n_parse_fail, outside the invalid-rate cap); n_comp_missing
+    # counts rule-comprehension calls given up after max_invalid (row with
+    # comp_missing: true, the game went on). (3a) reasoning_tokens /
+    # completion_tokens: sums over every response with usage, kept apart;
+    # n_reasoning_over_completion: responses whose reasoning_tokens exceed
+    # their completion_tokens (cost is priced from completion_tokens).
     return {"cost_usd": 0.0, "n_responses": 0, "n_accepted": 0,
+            "n_comp_invalid": 0, "n_comp_parse_fail": 0, "n_comp_missing": 0,
+            "reasoning_tokens": 0, "completion_tokens": 0, "n_reasoning_over_completion": 0,
             "n_invalid": 0, "n_parse_fail": 0, "n_provider_error": 0,
             "n_cost_estimated": 0, "n_length": 0, "finish_reasons": {},
             "providers": {}, "n_provider_unknown": 0, "n_discarded": 0,
@@ -1721,10 +1853,12 @@ def _new_stats() -> dict:
             "n_model_version_unknown": 0}
 
 
-# Totals of the summary and of each segment entry (A2, A3, A4, task #68).
+# Totals of the summary and of each segment entry (A2, A3, A4, task #68, #73).
 _SEGMENT_TOTALS = ("n_reasoning_capped", "n_transport", "n_deadline", "n_cost_unknown",
                    "deadline_cost_usd", "n_provider_mismatch", "n_provider_missing",
-                   "n_deadline_cost_estimated", "deadline_cost_estimated_usd")
+                   "n_deadline_cost_estimated", "deadline_cost_estimated_usd",
+                   "n_comp_invalid", "n_comp_parse_fail", "n_comp_missing",
+                   "reasoning_tokens", "completion_tokens", "n_reasoning_over_completion")
 
 
 def _merge_stats(*parts: dict) -> dict:
@@ -1828,6 +1962,9 @@ class Answer:
     n_provider_mismatch: int = 0   # responses from another provider, re-requested (A4)
     n_provider_missing: int = 0    # of those: without a provider name (task #68)
     n_deadline_cost_estimated: int = 0   # deadline attempts priced by the estimate (#68)
+    # task #73: a rule-comprehension call given up after max_invalid ("max_invalid")
+    # or after its attempts all failed to parse ("parse_fail"); parsed is {}
+    comp_missing: str | None = None
 
 
 class _Pending:
@@ -2051,6 +2188,11 @@ class Engine:
         s["cost_usd"] += cost
         s["n_responses"] += 1
         s["n_cost_estimated"] += estimated
+        reasoning, completion = usage_tokens(info.get("usage"))
+        s["reasoning_tokens"] += reasoning or 0
+        s["completion_tokens"] += completion or 0
+        if reasoning is not None and completion is not None and reasoning > completion:
+            s["n_reasoning_over_completion"] += 1
         s["finish_reasons"][str(finish)] = s["finish_reasons"].get(str(finish), 0) + 1
         s["providers"][str(provider)] = s["providers"].get(str(provider), 0) + 1
         s["model_versions"][str(version)] = s["model_versions"].get(str(version), 0) + 1
@@ -2187,14 +2329,32 @@ class Engine:
                        "call": call, "attempt": info.get("attempt"), "cost_estimated": True,
                        **estimate})
 
+    def reasoning_capped(self, model_key: str, usage) -> bool | None:
+        """llm_client.reasoning_capped with the model's rule (cap_rule_for, task #73)."""
+        return self.llm.reasoning_capped(usage, self.max_tokens, self.cfg.cap_rule_for(model_key))
+
     def _count_invalid(self, model_key: str, ans: "Answer") -> None:
+        if ans.call and ans.call.get("step") == "comprehension":
+            # task #73: rule-comprehension invalids are counted apart and never
+            # reach the decisions' invalid-rate cap
+            with self._lock:
+                s = self.stats[model_key]
+                s["n_comp_invalid"] += ans.n_invalid
+                s["n_comp_parse_fail"] += ans.n_parse_fail
+                if ans.comp_missing:
+                    s["n_comp_missing"] += 1
+                else:
+                    s["n_accepted"] += 1
+                    s["n_reasoning_capped"] += bool(
+                        self.reasoning_capped(model_key, ans.meta.get("usage")))
+            return
         with self._lock:
             s = self.stats[model_key]
             s["n_accepted"] += 1
             s["n_invalid"] += ans.n_invalid
             s["n_parse_fail"] += ans.n_parse_fail
             s["n_reasoning_capped"] += bool(
-                self.llm.reasoning_capped(ans.meta.get("usage"), self.max_tokens))
+                self.reasoning_capped(model_key, ans.meta.get("usage")))
             prior = self.prior_stats[model_key]          # earlier segments (resume)
             n_invalid = s["n_invalid"] + prior["n_invalid"]
             n_parse_fail = s["n_parse_fail"] + prior["n_parse_fail"]
@@ -2286,10 +2446,33 @@ class Engine:
                 request_deadline_s=self.deadline, on_late_response=on_late_response,
                 call_info=call, on_deadline=on_deadline,
                 expected_provider=pinned["name"] if pinned else None,
-                # task #67: q2 asks for the change "with its sign, for example +3";
-                # a rule-comprehension answer {"q2": +3} is parsed (decisions: as before)
+                reasoning_cap_rule=self.cfg.cap_rule_for(model_key),
+                # task #67: a rule-comprehension answer {"q2": +3} is parsed and
+                # logged as degraded (decisions: as before); kept in task #73,
+                # where q2 asks for "a whole number (it can be positive, zero or
+                # negative)" without a +3 example
                 **({"signed_numbers": True} if ctx.get("step") == "comprehension" else {}))
         except RuntimeError as e:
+            missing = self._comprehension_missing(e, counts, ctx)
+            if missing is not None:
+                # task #73 (EMIR 3 3c): the rule-comprehension call does not stop
+                # the run; its row says comp_missing, the game goes on (transport /
+                # deadline counts: the finally below)
+                self._log({"ts": time.time(), "event": "pgg_comprehension_missing",
+                           "comp_missing": True, "reason": missing, "run": self.cfg.run,
+                           "segment": self.segment, "model": self.cfg.models[model_key],
+                           "session_id": session_id, "call": call, "error": str(e),
+                           "n_invalid": counts.get("n_invalid", 0),
+                           "n_parse_fail": counts.get("n_parse_fail", 0)})
+                ans = Answer({}, counts.get("n_invalid", 0), counts.get("n_parse_fail", 0), {},
+                             n_provider_error=counts.get("n_provider_error", 0), call=call,
+                             n_transport=counts.get("n_transport", 0),
+                             n_deadline=counts.get("n_deadline", 0),
+                             n_provider_mismatch=counts.get("n_provider_mismatch", 0),
+                             n_provider_missing=counts.get("n_provider_missing", 0),
+                             n_deadline_cost_estimated=n_estimated[0], comp_missing=missing)
+                self._count_invalid(model_key, ans)
+                return ans
             mismatch = getattr(e, "last_error_kind", None) == "provider_mismatch"
             reason = "provider_mismatch_limit" if mismatch else "run_aborted"
             self.llm._append_log({
@@ -2323,11 +2506,30 @@ class Engine:
         self._count_invalid(model_key, ans)
         return ans
 
+    def _comprehension_missing(self, e: RuntimeError, counts: dict, ctx: dict) -> str | None:
+        """Why a failed rule-comprehension call is given up without stopping (None: it stops).
+
+        Task #73 (EMIR 3 3c): "max_invalid" when every payload of the call was
+        outside the schema (max_invalid + 1 of them), "parse_fail" when its
+        attempts all failed to parse. Other failures (provider mismatches,
+        transport / HTTP errors up to the attempt limit) stop the run as for
+        a decision: they are not about the answer.
+        """
+        if ctx.get("step") != "comprehension":
+            return None
+        if counts.get("n_invalid", 0) > self.cfg.max_invalid:
+            return "max_invalid"
+        if getattr(e, "last_error_kind", None) == "parse":
+            return "parse_fail"
+        return None
+
     def _row(self, *, condition, arm, model_key, card, session_id, group_id, agent_id,
              round_no, step, ans: Answer, seed: int, unit: str, frame: str = DEFAULT_FRAME,
              **fields) -> dict:
         rationale = ans.parsed.get("rationale")
         f = self.frames[frame]
+        usage = ans.meta.get("usage")
+        reasoning_tokens, completion_tokens = usage_tokens(usage)
         return {
             "run": self.cfg.run, "segment": self.segment, "unit": unit, "condition": condition, "arm": arm, "step": step,
             "model": self.cfg.models[model_key], "model_key": model_key,
@@ -2349,7 +2551,11 @@ class Engine:
             "cost_estimated": ans.n_deadline_cost_estimated > 0,
             "n_deadline_cost_estimated": ans.n_deadline_cost_estimated,
             "elapsed_s": ans.meta.get("elapsed_s"),
-            "reasoning_capped": self.llm.reasoning_capped(ans.meta.get("usage"), self.max_tokens),
+            "reasoning_capped": self.reasoning_capped(model_key, usage),
+            # task #73 (3a): the two numbers apart (Mistral may report more
+            # reasoning than completion tokens); cost is from completion_tokens
+            "reasoning_cap_rule": self.cfg.cap_rule_for(model_key),
+            "reasoning_tokens": reasoning_tokens, "completion_tokens": completion_tokens,
             "provider": ans.meta.get("provider"),
             "provider_quantization": ans.meta.get("provider_quantization"),
             "finish_reason": ans.meta.get("finish_reason"), "usage": ans.meta.get("usage"),
@@ -2385,18 +2591,33 @@ class Engine:
         """Answers, answer key and correctness of a rule-comprehension response.
 
         A wrong answer is a valid response (only the schema is validated); it
-        is recorded, never re-requested.
+        is recorded, never re-requested. A call given up (task #73, comp_missing)
+        has no answers: answers, correctness and comp_n_correct are null.
         """
         key = self.comprehension_keys[frame]
+        missing = ans.comp_missing is not None
         out = {}
         for qid, want in key.items():
             got = ans.parsed.get(qid)
             out[f"comp_{qid}_answer"] = got
             out[f"comp_{qid}_key"] = want
-            out[f"comp_{qid}_correct"] = got == want
-        out["comp_n_correct"] = sum(out[f"comp_{qid}_correct"] for qid in key)
+            out[f"comp_{qid}_correct"] = None if missing else got == want
+        out["comp_n_correct"] = None if missing else sum(out[f"comp_{qid}_correct"] for qid in key)
         out["comp_n_questions"] = len(key)
+        out["comp_missing"] = missing
+        out["comp_missing_reason"] = ans.comp_missing
         return out
+
+    def _write_comprehension(self, pending: "_Pending", ans: Answer, row: dict) -> None:
+        """Write a rule-comprehension row; a comp_missing one was never accepted (no pending)."""
+        if ans.comp_missing is not None:
+            self._write(row)
+        else:
+            pending.done(ans, self._write(row))
+
+    def _add_comprehension(self, pending: "_Pending", ans: Answer) -> Answer:
+        """pending.add for an accepted rule-comprehension answer (not for comp_missing)."""
+        return ans if ans.comp_missing is not None else pending.add(ans)
 
     def _ask_comprehension(self, model_key, frame: str, card: Card, condition: str,
                            single_round: bool, session_id: str, ctx: dict) -> Answer:
@@ -2439,7 +2660,7 @@ class Engine:
             pending = _Pending(self, model_key, session_id)
 
             def comprehend(i):
-                return pending.add(self._ask_comprehension(
+                return self._add_comprehension(pending, self._ask_comprehension(
                     model_key, frame, cards[i], condition, False, session_id,
                     {**ctx, "agent_id": i + 1}))
 
@@ -2482,13 +2703,13 @@ class Engine:
                         p, earnings, rec.punishment)
 
                 for i, ans in enumerate(comp_answers or []):
-                    pending.done(ans, self._write(self._row(
+                    self._write_comprehension(pending, ans, self._row(
                         condition=condition, arm="group", model_key=model_key, card=cards[i],
                         session_id=session_id, group_id=group_id, agent_id=i + 1, round_no=r,
                         step="comprehension", ans=ans, unit=unit, frame=frame,
                         seed=self.seed_for(model_key, *fp, cards[i].card_id, cards[i].style,
                                            condition, "group", idx, i + 1, r, "comprehension"),
-                        **self._comprehension_fields(frame, ans))))
+                        **self._comprehension_fields(frame, ans)))
                 for i in range(p.group_size):
                     pending.done(answers[i], self._write(self._row(
                         condition=condition, arm="group", model_key=model_key, card=cards[i],
@@ -2555,18 +2776,18 @@ class Engine:
             comp = None
             if self.cfg.comprehension:
                 single = f.data["isolated"][iso]["rules"] == "single_round"
-                comp = pending.add(self._ask_comprehension(
+                comp = self._add_comprehension(pending, self._ask_comprehension(
                     model_key, frame, card, condition, single, session_id,
                     {**base_ctx, "others_mean": None}))
             answers = self._map(ask_point, points)
             if comp is not None:
-                pending.done(comp, self._write(self._row(
+                self._write_comprehension(pending, comp, self._row(
                     condition=condition, arm="isolated", model_key=model_key, card=card,
                     session_id=session_id, group_id=group_id, agent_id=1, round_no=None,
                     step="comprehension", ans=comp, unit=unit, frame=frame,
                     seed=self.seed_for(model_key, *fp, card.card_id, card.style, condition,
                                        "isolated", rep, 1, "comprehension"),
-                    **self._comprehension_fields(frame, comp), **extra)))
+                    **self._comprehension_fields(frame, comp), **extra))
             for x, ans in zip(points, answers):
                 pending.done(ans, self._write(self._row(
                     condition=condition, arm="isolated", model_key=model_key, card=card,
@@ -2741,6 +2962,9 @@ class Engine:
                if cfg.model_budget_usd is not None else {}),
             **({"snapshot_version_models": list(cfg.snapshot_version_models)}
                if cfg.snapshot_version_models else {}),
+            # task #73, only when set
+            **({"reasoning_cap_rule": dict(cfg.reasoning_cap_rule)}
+               if cfg.reasoning_cap_rule is not None else {}),
         })
 
     def frames_summary(self) -> dict:
@@ -3106,8 +3330,12 @@ class Engine:
                 if seg in replaced_after_summary:
                     replaced_after_summary[seg] += usd
                 continue
+            if event == "pgg_comprehension_missing":       # task #73
+                s["n_comp_missing"] += 1
+                continue
             if event == "invalid_payload":
-                s["n_invalid"] += 1
+                # task #73: rule-comprehension invalids apart (outside the cap)
+                s["n_comp_invalid" if _is_comprehension(rec) else "n_invalid"] += 1
                 s["n_accepted"] -= 1            # its success record was counted below
                 if isinstance(rec.get("call"), dict):
                     ck = _call_key(rec["call"].get("segment", seg), spec.session_id, rec["call"])
@@ -3170,7 +3398,7 @@ class Engine:
                     accepted[ck] = accepted.get(ck, 0) + 1
                     capped[ck] = bool(is_capped)
             elif rec.get("retrying") and rec.get("error_kind") == "parse":
-                s["n_parse_fail"] += 1
+                s["n_comp_parse_fail" if _is_comprehension(rec) else "n_parse_fail"] += 1
         for session_id, text in system_text.items():
             spec = sessions[session_id]
             card = spec.card
@@ -3355,7 +3583,7 @@ class Engine:
             # (summary entry, else its start / resume event; absent before #46)
             for k in ("stalled", "request_deadline_s", "stall_timeout_s", "code_version", "lock",
                       "resume_points", "n_discarded", "timeout_change", "code_change",
-                      "provider_policy", "run_template", "model_stops"):
+                      "provider_policy", "run_template", "model_stops", "frame_audit"):
                 if k in entry:
                     item[k] = entry[k]
                 elif k in started_by_seg.get(seg, {}):
@@ -3550,6 +3778,8 @@ class Engine:
             "lock": lock, "resume_points": resume_points,
             "run_template": self.cfg.run_template,
             "model_stops": {k: dict(v) for k, v in self.model_stops.items()},
+            # task #73 (3d): the frame linter's verdict per frame (passed / exempt + reason)
+            "frame_audit": self.cfg.frame_audit(),
         }
         segments = [*(self.plan.segments if self.plan else []), current]
         # per model, the latest stop of any segment (reason and moment)
@@ -3594,9 +3824,14 @@ class Engine:
             **{k: sum(s[k] for s in per_model.values()) for k in _SEGMENT_TOTALS},
             "reasoning_capped_rule": (
                 "reasoning_tokens >= max_tokens - "
-                f"{self.llm.REASONING_RESERVE_TOKENS} (llm_client.REASONING_RESERVE_TOKENS): "
-                "flagged on the row (reasoning_capped), kept as a decision, not re-requested; "
-                "n_reasoning_capped counts such accepted decisions"),
+                f"{self.llm.REASONING_RESERVE_TOKENS} (llm_client.REASONING_RESERVE_TOKENS); for "
+                "a model whose reasoning_cap_rules entry is max_reasoning_completion (task #73): "
+                "max(reasoning_tokens, completion_tokens) >= the same limit. Flagged on the row "
+                "(reasoning_capped, with reasoning_tokens and completion_tokens apart), kept as a "
+                "decision, not re-requested; n_reasoning_capped counts such accepted answers. "
+                "reasoning_tokens / completion_tokens / n_reasoning_over_completion: sums over "
+                "every response with usage; cost is priced from completion_tokens"),
+            "reasoning_cap_rules": {k: self.cfg.cap_rule_for(k) for k in self.cfg.models},
             "timeout_changes": [s["timeout_change"] for s in segments if s.get("timeout_change")],
             "code_changes": [{"segment": s["segment"], **s["code_change"]}
                              for s in segments if s.get("code_change")],
@@ -3653,7 +3888,15 @@ class Engine:
                 if row.get("step") != "comprehension":
                     continue
                 c = counts.setdefault(row["model_key"], {}).setdefault(
-                    row.get("frame", DEFAULT_FRAME), {"n": 0, "n_all_correct": 0})
+                    row.get("frame", DEFAULT_FRAME),
+                    {"n": 0, "n_all_correct": 0, "n_missing": 0, "n_invalid": 0,
+                     "n_parse_fail": 0})
+                # task #73: invalid / unparseable responses of these calls (rows)
+                c["n_invalid"] += row.get("n_invalid") or 0
+                c["n_parse_fail"] += row.get("n_parse_fail") or 0
+                if row.get("comp_missing"):              # given up: no answer, not in n
+                    c["n_missing"] += 1
+                    continue
                 c["n"] += 1
                 c["n_all_correct"] += row.get("comp_n_correct") == row.get("comp_n_questions")
                 for qid in self.comprehension_keys.get(row.get("frame"), {}):
@@ -3669,7 +3912,13 @@ class Engine:
                 "rule": ("a wrong answer is valid (recorded, not re-requested, the game goes on); "
                          "only a response outside the schema (not an integer per question) is "
                          "invalid and re-requested; group: every agent once before round 1, "
-                         "isolated: once per schedule")}
+                         "isolated: once per schedule. Task #73: when max_invalid is used up "
+                         "(or every attempt fails to parse) the call is given up without "
+                         "stopping the run: its row has comp_missing true (n_missing, not in n "
+                         "or the rates), a pgg_comprehension_missing event is logged, the game "
+                         "goes on; these invalids are counted apart (n_comp_invalid, "
+                         "n_comp_parse_fail per model) and not in the decisions' invalid-rate "
+                         "cap; their cost is in the budget")}
 
     def _write_summary(self, started, path, summary_path, log_path, event: str) -> dict:
         summary = self.summary(started, path)
@@ -3701,7 +3950,7 @@ class Engine:
                  "code_version": self.code_version,
                  "code_change": self.plan.code_change if self.plan else None,
                  "provider_policy": dict(PROVIDER_POLICY), "lock": self.lock,
-                 "frames": self.frames_summary(),
+                 "frames": self.frames_summary(), "frame_audit": self.cfg.frame_audit(),
                  "unit_order": self.unit_order, "config": self.config_record()}
         if self.plan:
             p = self.plan
@@ -4089,8 +4338,8 @@ def gate_problem(est: dict, gate: float | None) -> str | None:
     if est["total_cost_usd"] > gate:
         per = "; ".join(f"{r['frame']}/{r['model']} ~{r['cost_usd']:.4f}" for r in est["rows"])
         return (f"the dry-run estimate ~{est['total_cost_usd']:.4f} USD (tahmin) is above "
-                f"expected_cost_gate_usd={gate:g} USD ({per}); the run is not started, "
-                "change the design or the gate in the pre-registration")
+                f"expected_cost_gate_usd={gate:g} USD ({per}); the run is not started and the "
+                "overrun is reported (EMIR 3: no arm is dropped to pass the gate)")
     return None
 
 
@@ -4345,8 +4594,9 @@ def dry_run_frames(frame_models: dict, frame_files, params: GameParams | None = 
     """{label: Frame} for a dry run; None for a file that is still a placeholder.
 
     FrameError (a ValueError) when a chosen file is missing or invalid, when its
-    sha256 is not the one frame_files locks, or (with params) when a story frame
-    holds a forbidden root: the dry run fails as the real run would.
+    sha256 is not the one frame_files locks, or (with params) when a frame has
+    no "kind" or a frame not of kind "abstract" holds a forbidden root
+    (frame_audit, task #73): the dry run fails as the real run would.
     """
     files = frame_files if isinstance(frame_files, dict) else {}
     out = {}
@@ -4358,24 +4608,32 @@ def dry_run_frames(frame_models: dict, frame_files, params: GameParams | None = 
             out[label] = default_frame()
         else:
             out[label] = load_frame_file(label, value)
-            if params is not None and out[label].kind == "story":
-                check_story_frame(label, out[label], params)
+        if params is not None and out[label] is not None:
+            frame_audit(label, out[label], params, with_frames=True)
     return out
 
 
-def frame_lock_lines(frames: dict, frame_files) -> list[str]:
-    """One dry-run line per frame: file, kind, sha256 and whether frame_files locks it."""
+def frame_lock_lines(frames: dict, frame_files, params: GameParams | None = None) -> list[str]:
+    """One dry-run line per frame: file, kind, linter verdict (with params), sha256 and
+    whether frame_files locks it."""
     files = frame_files if isinstance(frame_files, dict) else {}
     lines = []
     for label, f in frames.items():
         if f is None:
             continue
         sha = frame_file_spec(label, files.get(label))[1]
-        lines.append(f"Çerçeve {label}: {f.path} (kind {f.kind}"
-                     + (", yasaklı kök denetimi temiz" if f.kind == "story" else "")
-                     + f"), sha256 {f.sha256} — "
+        lint = ("; " + frame_audit_line(label, frame_audit(label, f, params, with_frames=True))
+                if params is not None else "")
+        lines.append(f"Çerçeve {label}: {f.path} (kind {f.kind}{lint}), sha256 {f.sha256} — "
                      + ("kilitli, beklenenle aynı" if sha else "KİLİTSİZ (frame_files'ta sha256 yok)"))
     return lines
+
+
+def cards_lock_line(path, sha256) -> str:
+    """Dry-run line of the cards file and its lock (task #73; check_cards_lock passed)."""
+    actual = check_cards_lock(path, sha256)
+    return (f"Kartlar: {path}, sha256 {actual} — "
+            + ("kilitli, beklenenle aynı" if sha256 else "KİLİTSİZ (cards_sha256 yok)"))
 
 
 def _parse_effort(value: str):
@@ -4503,7 +4761,13 @@ def settings_from_args(args) -> dict:
 
 
 def run_config(run: str, s: dict, models: dict[str, str], output: dict) -> RunConfig:
-    """RunConfig of a real (or resumed) run from settings_from_args."""
+    """RunConfig of a real (or resumed) run from settings_from_args.
+
+    ValueError (no run starts) when "cards_sha256" locks another cards file
+    (task #73, check_cards_lock).
+    """
+    if "cards_sha256" in s:
+        check_cards_lock(s["cards"], s["cards_sha256"])
     return RunConfig(
         run=run, cards=load_cards(s["cards"], s.get("cities")),
         models=models, params=s["params"], conditions=tuple(s.get("conditions", ("N",))),
@@ -4531,6 +4795,8 @@ def run_config(run: str, s: dict, models: dict[str, str], output: dict) -> RunCo
         isolated_round_no=s.get("isolated_round_no", 5),
         comprehension=s.get("comprehension", False),
         expected_cost_gate_usd=s.get("expected_cost_gate_usd"),
+        reasoning_cap_rule=resolve_model_keyed(s.get("reasoning_cap_rule"), models,
+                                               "reasoning_cap_rule"),
         **output)
 
 
@@ -4615,11 +4881,18 @@ def resume_report(engine: Engine, plan: ResumePlan) -> str:
         + (" — geçersiz tavanı aşılmış, koşulmaz"
            if limits[k] is not None and s["n_invalid"] + s["n_parse_fail"] > limits[k] else "")
         for k, s in plan.prior_stats.items()) + (f" (geçersiz sınırı {limit})" if limit else ""))
+    if cfg.comprehension:
+        lines.append("Kural anlama (ayrı sayılır, geçersiz tavanına girmez): " + "; ".join(
+            f"{k}: geçersiz {s.get('n_comp_invalid', 0)}, parse {s.get('n_comp_parse_fail', 0)}, "
+            f"comp_missing {s.get('n_comp_missing', 0)}" for k, s in plan.prior_stats.items()))
     reserve = engine.llm.REASONING_RESERVE_TOKENS
+    rules = {k: cfg.cap_rule_for(k) for k in cfg.models}
     lines.append(
         f"Akıl yürütme tavanı (reasoning_tokens >= max_tokens - {reserve} = "
         f"{engine.max_tokens - reserve}; işaretlenir, atılmaz) — kabul edilen kararlarda: "
-        + ", ".join(f"{k} {s['n_reasoning_capped']}" for k, s in plan.prior_stats.items()))
+        + ", ".join(f"{k} {s['n_reasoning_capped']}" for k, s in plan.prior_stats.items())
+        + ("; kural: " + ", ".join(f"{k} {r}" for k, r in rules.items())
+           if set(rules.values()) != {OfflineLLM.DEFAULT_REASONING_CAP_RULE} else ""))
     lines.append(
         "Bağlantı hatası / süre aşımı (yeniden denenmiş denemeler): " + ", ".join(
             f"{k} {s['n_transport']} / {s['n_deadline']}" for k, s in plan.prior_stats.items())
@@ -4775,6 +5048,11 @@ def main(argv=None) -> int:
         else:
             cards = None
             if s.get("cards") and not is_placeholder(s["cards"]):
+                try:                         # task #73: the cards lock fails the dry run too
+                    cards_line = cards_lock_line(s["cards"], s.get("cards_sha256"))
+                except ValueError as e:
+                    print(f"HATA: kartlar: {e}", file=sys.stderr)
+                    return 1
                 cards = load_cards(s["cards"], cities)
                 n_cells = len(cards)
             else:
@@ -4815,8 +5093,10 @@ def main(argv=None) -> int:
                         f"{len(points)} değer, kural anlama "
                         + ("açık (ajan başına grup öncesi 1, izole çizelge başına 1 çağrı)"
                            if s.get("comprehension") else "kapalı") + ".")))
-                for line in frame_lock_lines(frames, s.get("frame_files")):
+                for line in frame_lock_lines(frames, s.get("frame_files"), params):
                     print(line)
+                if cards is not None:
+                    print(cards_line)
             else:
                 print(dry_run_report(
                     models=models, n_cells=n_cells, params=params, conditions=conditions,
@@ -4836,7 +5116,7 @@ def main(argv=None) -> int:
                                     "stall_timeout_s", "budget_usd", "model_budget_usd",
                                     "expected_cost_gate_usd",
                                     "invalid_rate_cap", "stop_on_length", "check_snapshot",
-                                    "snapshot_version_models",
+                                    "snapshot_version_models", "reasoning_cap_rule",
                                     "seed_namespace", "parallel_units", "workers",
                                     "isolated_frame", "isolated_round_no", "comprehension")
                   if s.get(k) is not None}

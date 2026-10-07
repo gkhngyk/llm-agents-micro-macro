@@ -1,5 +1,5 @@
 {
-  "_notes": "Story draft A (task #62, goal C2): a phone app's 'jar'. System message = the card alone (as abstract_v3); the story starts in the user message. Windfall: the app adds the credits free of charge; no effort, no 'earn' / 'earnings' wording. Equal split is the jar's explicit rule. Same numbers as abstract_v3 via placeholders (endowment, multiplier, mpcr, n, rounds). Punishment step (condition P, not in the mini-pilot) written neutrally as 'reductions' of a balance: no complaint, court, sanction or institution. Rule-comprehension questions measure the same as abstract_v3 (q1 own 8, others 4/12/16 -> 28; q2 delta 10 -> -6, keys computed by the engine). Format: frames/SCHEMA.md of commit 8616997. Do not change after data has been seen. Task #67 (before any data): copied from workspace/frames_story_A.json into the repository; kind story (linted for the forbidden roots at every run start); the last sentence of q2 is 'Give the change as a whole number with its sign, for example +3 or -3.' (was 'Use a negative number if it goes down.'; the 3 comes from answer.example).",
+  "_notes": "Story draft A (task #62, goal C2): a phone app's 'jar'. System message = the card alone (as abstract_v3); the story starts in the user message. Windfall: the app adds the credits free of charge; no effort, no 'earn' / 'earnings' wording. Equal split is the jar's explicit rule. Same numbers as abstract_v3 via placeholders (endowment, multiplier, mpcr, n, rounds). Punishment step (condition P, not in the mini-pilot) written neutrally as 'reductions' of a balance: no complaint, court, sanction or institution. Rule-comprehension questions measure the same as abstract_v3 (q1 own 8, others 4/12/16 -> 28; q2 delta 10 -> -6, keys computed by the engine). Format: frames/SCHEMA.md of commit 8616997. Do not change after data has been seen. Task #67 (before any data): copied from workspace/frames_story_A.json into the repository; kind story (linted for the forbidden roots at every run start); the last sentence of q2 was made 'Give the change as a whole number with its sign, for example +3 or -3.' (was 'Use a negative number if it goes down.'). Task #73 (EMIR 3 3b, 2026-10-07, before any data): it is now 'Give the change as a whole number (it can be positive, zero or negative).'; the +3 / -3 example and answer.example are gone; the schema stays integer, the key stays 28 / -6.",
   "schema": 1,
   "name": "story_A_jar",
   "description": "Story frame draft A: credits that a phone app adds every day, and a jar of strangers whose contents grow and are always divided equally.",
@@ -58,8 +58,8 @@
       },
       {
         "id": "q2",
-        "text": "Suppose that the other users put the same amounts into the jar. If you put {delta} more credits into the jar, by how much does what you end that day with change? Give the change as a whole number with its sign, for example +{example} or -{example}.",
-        "answer": {"kind": "own_change", "delta": 10, "example": 3}
+        "text": "Suppose that the other users put the same amounts into the jar. If you put {delta} more credits into the jar, by how much does what you end that day with change? Give the change as a whole number (it can be positive, zero or negative).",
+        "answer": {"kind": "own_change", "delta": 10}
       }
     ]
   },
