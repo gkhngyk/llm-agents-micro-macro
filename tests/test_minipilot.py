@@ -65,7 +65,21 @@ def placeholder_config(tmp: Path) -> Path:
         raw[key] = f"<TBD_PREREG: {key}>"
     raw["frame_files"] = {"story": "<TBD_PREREG: story frame file>"}
     raw.pop("cards_sha256")            # task #73's cards lock did not exist then
+    raw["prereg_approved"] = False     # nor the approval (task #75)
     path = Path(tmp) / "minipilot_placeholders.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    return path
+
+
+def committed_copy(tmp: Path, **overrides) -> Path:
+    """A copy of the committed config with only `overrides` changed and runs_dir always
+    in `tmp`: since the approval (task #75) a real run of the committed config itself
+    would start and write to the real runs_dir, so tests run copies."""
+    raw = _raw()
+    (Path(tmp) / "runs").mkdir(exist_ok=True)
+    raw["runs_dir"] = str(Path(tmp) / "runs")
+    raw.update(overrides)
+    path = Path(tmp) / "minipilot_copy.json"
     path.write_text(json.dumps(raw), encoding="utf-8")
     return path
 
@@ -95,7 +109,7 @@ class MiniPilotConfig(unittest.TestCase):
 
     def test_fixed_settings(self):
         raw = _raw()
-        self.assertIs(raw["prereg_approved"], False)
+        self.assertIs(raw["prereg_approved"], True)        # approved 2026-10-07 (task #75)
         self.assertEqual(raw["max_tokens"], 16000)
         self.assertEqual((raw["request_deadline_s"], raw["stall_timeout_s"]), (900, 1800))
         self.assertEqual((raw["budget_usd"], raw["expected_cost_gate_usd"]), (10, 4.5))
@@ -111,8 +125,9 @@ class MiniPilotConfig(unittest.TestCase):
             self.assertEqual(raw[key], value, key)
         self.assertEqual(pgg_game.open_choices(raw), [])           # no TBD_PREREG left
         self.assertNotIn("TBD", json.dumps({k: v for k, v in raw.items() if k != "_notes"}))
-        self.assertIs(raw["prereg_approved"], False)                # ... but not approved
-        self.assertIsNotNone(pgg_game.prereg_problem(raw))
+        # ... and approved by the user (prereg_minipilot.md, 2026-10-07, EMIR 3; task #75)
+        self.assertIs(raw["prereg_approved"], True)
+        self.assertIsNone(pgg_game.prereg_problem(raw))
         # every frame file is locked with the sha256 of the committed file
         self.assertEqual(set(raw["frame_files"]), set(FRAME_FILES))
         for label, rel in FRAME_FILES.items():
@@ -264,11 +279,13 @@ class MiniPilotRuns(GuardTestBase):
 
     def test_unapproved_prereg_refuses_a_real_run(self):
         self.use(CostAPI())
-        # the committed config: refused by the lock before anything else
-        code, _, err = self.main("--config", str(MINIPILOT_CONFIG))
+        # the committed config with the approval taken back: refused by the lock before
+        # anything else (the committed config itself is approved since task #75)
+        code, _, err = self.main("--config", str(committed_copy(self.tmp, prereg_approved=False)))
         self.assertEqual(code, 1)
         self.assertIn("prereg_approved is false", err)
         self.assertIn("çağrı yapılmadı", err)
+        self.assertEqual(list((self.tmp / "runs").iterdir()), [])
         # every placeholder filled, but not approved; also with --resume
         for value in (False, "true", None):
             path = self.filled_config(prereg_approved=value)
@@ -278,6 +295,40 @@ class MiniPilotRuns(GuardTestBase):
                 self.assertIn("not true", err)
         self.create.assert_not_called()
         self.assertFalse((self.tmp / "runs" / "mini_mock").exists())
+
+    def test_approved_committed_config_passes_the_lock(self):
+        # task #75: the committed config is approved, so the lock lets a real run start.
+        # Shown on a copy (mock client, runs_dir in tmp, a small design); the approval,
+        # frames, frame and cards locks, providers and budgets are the committed ones.
+        class AnyFrameAPI(CostAPI):
+            # story_A names no "Player n" / "ROUND n": any valid answer will do here
+            @staticmethod
+            def parse(kwargs):
+                kind, agent, rnd, others = CostAPI.parse(kwargs)
+                return kind, agent or 1, rnd or 1, 10 if others is None else others
+
+        names = {model: name for _, model, name, _ in MINIPILOT_PROVIDERS.values()}
+        self.use(AnyFrameAPI(cost=0.0001, provider_fn=lambda k: names[k["model"]]))
+        raw = _raw()
+        self.assertIs(raw["prereg_approved"], True)
+        path = committed_copy(
+            self.tmp, run="mini_open", cities=["Boston"], groups_per_cell=1, isolated_reps=1,
+            isolated_points=[0], params={"rounds": 2}, isolated_round_no=2, workers=1,
+            parallel_units=1)
+        copy = json.loads(path.read_text(encoding="utf-8"))
+        for key in ("prereg_approved", "frames", "frame_files", "cards", "cards_sha256",
+                    "providers", "budget_usd", "model_budget_usd", "expected_cost_gate_usd"):
+            self.assertEqual(copy[key], raw[key], key)
+        code, _, err = self.main("--config", str(path))
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("prereg_approved", err)
+        self.assertTrue(self.api.calls)
+        self.assertEqual({k["model"] for k in self.api.calls}, set(names))
+        run_dir = self.tmp / "runs" / "mini_open"
+        rows = [json.loads(x) for x in (run_dir / "mini_open.jsonl").read_text().splitlines()]
+        self.assertEqual({(r["frame"], r["model"]) for r in rows},
+                         {("abstract_v3", m) for m in names}
+                         | {("story", m) for m in names if m != MISTRAL})
 
     def test_approved_but_placeholder_left_refuses(self):
         self.use(CostAPI())
@@ -320,7 +371,8 @@ class MiniPilotRuns(GuardTestBase):
                       "kilitli, beklenenle aynı", out)
         self.assertIn("Run adı: şablon minipilot_{run_date} — yeni gerçek koşuda koşu günüyle "
                       f"çözülür (bugün: minipilot_{pgg_game.run_date()})", out)
-        self.assertIn("ÖN KAYIT ONAYI YOK", out)
+        self.assertIn("Ön kayıt: onaylı (prereg_approved=true)", out)      # task #75
+        self.assertNotIn("ÖN KAYIT ONAYI YOK", out)
         self.assertIn("reasoning_effort=gönderilmez", out)
         self.assertIn("max_tokens=16000", out)
         self.assertIn("request_deadline_s=900", out)

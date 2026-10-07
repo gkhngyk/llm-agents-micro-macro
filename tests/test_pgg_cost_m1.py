@@ -328,7 +328,7 @@ class GateDecision(unittest.TestCase):
         self.assertEqual(raw["frames"], {"abstract_v3": ["deepseek", "mistral", "gpt"],
                                          "story": ["deepseek", "gpt"]})
         self.assertEqual(raw["expected_cost_gate_usd"], GATE)
-        self.assertIs(raw["prereg_approved"], False)
+        self.assertIs(raw["prereg_approved"], True)          # approved 2026-10-07 (task #75)
         total, text = self.dry(raw)
         self.assertLessEqual(total, GATE)
         self.assertIn("Beklenti kapısı expected_cost_gate_usd=4.5 USD: GEÇER", text)

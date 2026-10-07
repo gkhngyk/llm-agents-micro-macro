@@ -515,7 +515,13 @@ class RunNameTemplate(GuardTestBase):
         self.assertEqual(len(self.api.calls), n_calls)
 
     def test_unapproved_committed_config_is_refused_before_the_name(self):
-        code, _, err = _main("--config", str(MINIPILOT_CONFIG))
+        # the committed config is approved since task #75: a copy with the approval
+        # taken back (runs_dir in tmp, so a slip cannot write to the real one)
+        raw = json.loads(MINIPILOT_CONFIG.read_text(encoding="utf-8"))
+        raw.update(prereg_approved=False, runs_dir=str(self.tmp / "runs"))
+        path = self.tmp / "mp_unapproved.json"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        code, _, err = _main("--config", str(path))
         self.assertEqual(code, 1)
         self.assertIn("prereg_approved is false", err)
         self.create.assert_not_called()

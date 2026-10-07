@@ -167,7 +167,7 @@ class ModelBudget(ResumeBase):
         self.assertEqual((raw["budget_usd"], raw["expected_cost_gate_usd"]), (10, 4.5))
         self.assertEqual(raw["snapshot_version_models"], ["mistral"])
         self.assertIs(raw["check_snapshot"], True)
-        self.assertIs(raw["prereg_approved"], False)
+        self.assertIs(raw["prereg_approved"], True)          # approved 2026-10-07 (task #75)
 
 
 # --------------------------------------------------------------------------
