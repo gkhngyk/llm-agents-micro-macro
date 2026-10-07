@@ -137,7 +137,8 @@ class RequestDeadline(LoggingTestBase):
                                       is_valid=lambda c: True, counts=counts,
                                       request_deadline_s=0.05)
         self.assertEqual(counts, {"n_invalid": 0, "n_parse_fail": 0, "n_provider_error": 0,
-                                  "n_transport": 0, "n_deadline": 4, "n_provider_mismatch": 0})
+                                  "n_transport": 0, "n_deadline": 4, "n_provider_mismatch": 0,
+                                  "n_provider_missing": 0})
         # released: every abandoned thread ends; an error after the deadline logs nothing
         n = len(self.records())
         hang.release()

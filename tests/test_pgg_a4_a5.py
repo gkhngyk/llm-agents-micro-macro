@@ -80,13 +80,32 @@ class MismatchInClient(LoggingTestBase):
         self.assertEqual([i.get("provider_mismatch", False) for i in seen], [True, False])
         self.assertEqual([i["usage"]["cost"] for i in seen], [0.01, 0.02])
 
-    def test_no_provider_name_or_no_expected_provider_is_no_mismatch(self):
-        self.replies(None)
-        out, counts, _ = self.call_valid(expected_provider="Prov A")
-        self.assertEqual((out[0], counts["n_provider_mismatch"]), ({"action": 0}, 0))
-        self.replies("Prov B")
-        out, counts, _ = self.call_valid()
-        self.assertEqual((out[0], counts["n_provider_mismatch"]), ({"action": 0}, 0))
+    def test_no_provider_name_is_a_mismatch_no_expected_provider_is_none(self):
+        # task #68 (K4): without a provider name the response is no decision either
+        self.replies(None, "Prov A")
+        out, counts, seen = self.call_valid(expected_provider="Prov A")
+        self.assertEqual(out, ({"action": 1}, 0, 0))
+        self.assertEqual(self.create.call_count, 2)
+        self.assertEqual((counts["n_provider_mismatch"], counts["n_provider_missing"]), (1, 1))
+        bad, ok = self.records()
+        self.assertEqual((bad["error_kind"], bad["provider_mismatch"], bad["provider_missing"],
+                          bad["provider"], bad["retrying"]),
+                         ("provider_mismatch", True, True, None, True))
+        self.assertIn("without a provider name", bad["error"])
+        self.assertEqual(bad["usage"]["cost"], 0.01)                     # billed
+        self.assertNotIn("provider_missing", ok)
+        self.assertEqual([(i.get("provider_mismatch", False), i.get("provider_missing", False))
+                          for i in seen], [(True, True), (False, False)])
+        # another name: a mismatch, not a missing name
+        self.replies("Prov B", "Prov A")
+        _, counts, _ = self.call_valid(expected_provider="Prov A")
+        self.assertEqual((counts["n_provider_mismatch"], counts["n_provider_missing"]), (1, 0))
+        # no expected provider: nothing is checked
+        for name in ("Prov B", None):
+            self.replies(name)
+            out, counts, _ = self.call_valid()
+            self.assertEqual((out[0], counts["n_provider_mismatch"],
+                              counts["n_provider_missing"]), ({"action": 0}, 0, 0))
 
     def test_attempt_limit_carries_the_last_error_kind(self):
         self.replies(*["Prov B"] * 4)

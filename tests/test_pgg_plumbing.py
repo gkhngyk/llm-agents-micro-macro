@@ -244,13 +244,19 @@ class ProviderPinning(GuardTestBase):
     def test_name_match_ignores_case_and_punctuation_and_unknown_is_counted(self):
         self.assertTrue(pgg_game.same_provider("Google AI Studio", "google-ai-studio"))
         self.assertFalse(pgg_game.same_provider("Google", "Google AI Studio"))
+        # task #68: only an unpinned model's response without a name is accepted
+        # and counted as n_provider_unknown (a pinned one is re-requested, below)
         self.use(CostAPI(provider_fn=lambda k: None))
-        Engine(self.cfg(params=GameParams(rounds=1), providers=PINNED)).run()
+        Engine(self.cfg(params=GameParams(rounds=1))).run()
         self.assertEqual(self.summary()["per_model"]["vendor/model-1"]["n_provider_unknown"], 4)
+        self.assertEqual(len(self.api.calls), 4)
 
-    def test_missing_provider_name_does_not_stop_and_is_summed(self):
-        # some responses carry no provider name: the run goes on (no stop, no
-        # event), they are counted per model and in total; the rows say null
+    def test_missing_provider_name_is_re_requested_and_summed(self):
+        # task #68 (K4; pilot v2 counted these as n_provider_unknown and kept
+        # them): a pinned model's response without a provider name is no
+        # decision; it is re-requested and counted as a mismatch, with its own
+        # sub-count n_provider_missing; the run does not stop and every row
+        # names the pinned provider
         pinned = PINNED | {"m2": {"slug": "prov-b", "name": "Prov B"}}
         names = {"v/m1": "Prov A", "v/m2": "Prov B"}
         self.use(CostAPI(provider_fn=lambda k: None if len(self.api.calls) % 3 == 0
@@ -258,21 +264,34 @@ class ProviderPinning(GuardTestBase):
         rows = self.run_engine(params=GameParams(rounds=3), providers=pinned,
                                models={"m1": "v/m1", "m2": "v/m2"})
         self.assertEqual(len(rows), 24)
+        self.assertEqual(len(self.api.calls), 35)            # first T = 24 + T // 3
         s = self.summary()
         self.assertIsNone(s["stop_reason"])
         self.assertEqual(self.events("pgg_run_stopped"), [])
-        per = {m: v["n_provider_unknown"] for m, v in s["per_model"].items()}
-        self.assertEqual(sum(per.values()), 8)               # every 3rd of 24 calls
+        per = {m: v["n_provider_missing"] for m, v in s["per_model"].items()}
+        self.assertEqual(sum(per.values()), 11)              # every 3rd of 35 calls
         self.assertTrue(all(v > 0 for v in per.values()))
-        self.assertEqual(s["n_provider_unknown"], 8)
-        self.assertEqual(sum(r["provider"] is None for r in rows), 8)
+        self.assertEqual((s["n_provider_missing"], s["n_provider_mismatch"],
+                          s["n_provider_unknown"]), (11, 11, 0))
+        self.assertTrue(all(r["provider"] is not None for r in rows))
+        self.assertEqual(sum(r["n_provider_missing"] for r in rows), 11)
+        self.assertEqual(sum(r["n_provider_mismatch"] for r in rows), 11)
         for m, v in s["per_model"].items():
             self.assertEqual(v["providers"].get("None"), per[m])
+            self.assertEqual(v["n_provider_mismatch"], per[m])
+        missing = [r for r in self.raw_log() if r.get("provider_missing")]
+        self.assertEqual(len(missing), 11)
+        self.assertTrue(all(r["provider_mismatch"] and r["error_kind"] == "provider_mismatch"
+                            and r["provider"] is None and r["retrying"] for r in missing))
 
-    def test_unpinned_models_do_not_count_provider_unknown(self):
+    def test_unpinned_models_count_provider_unknown(self):
+        # task #68: n_provider_unknown stays only for unpinned models (no check)
         self.use(CostAPI(provider_fn=lambda k: None))
-        self.run_engine(params=GameParams(rounds=1))
-        self.assertEqual(self.summary()["n_provider_unknown"], 0)
+        rows = self.run_engine(params=GameParams(rounds=1))
+        self.assertEqual(self.summary()["n_provider_unknown"], 4)
+        self.assertEqual(self.summary()["n_provider_missing"], 0)
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(len(self.api.calls), 4)             # not re-requested
 
     def test_placeholder_or_incomplete_providers_do_not_start(self):
         for bad in ({"m1": {"slug": "<SEÇİLECEK>", "name": "X"}},
@@ -354,7 +373,8 @@ class ProviderErrors(GuardTestBase):
             counts=counts)
         self.assertEqual(out, ({"x": 1}, 0, 0))                 # n_parse_fail stays 0
         self.assertEqual(counts, {"n_invalid": 0, "n_parse_fail": 0, "n_provider_error": 2,
-                                  "n_transport": 0, "n_deadline": 0, "n_provider_mismatch": 0})
+                                  "n_transport": 0, "n_deadline": 0, "n_provider_mismatch": 0,
+                                  "n_provider_missing": 0})
         kinds = [r.get("error_kind") for r in self.raw_log()]
         self.assertEqual(kinds, ["provider", "provider", None])
 
@@ -385,7 +405,8 @@ class ProviderErrors(GuardTestBase):
                                       schema={"type": "object"}, session_id="s",
                                       is_valid=lambda c: True, counts=counts)
         self.assertEqual(counts, {"n_invalid": 0, "n_parse_fail": 0, "n_provider_error": 4,
-                                  "n_transport": 0, "n_deadline": 0, "n_provider_mismatch": 0})
+                                  "n_transport": 0, "n_deadline": 0, "n_provider_mismatch": 0,
+                                  "n_provider_missing": 0})
 
     def test_engine_counts_them_apart_and_not_in_the_invalid_cap(self):
         n = []

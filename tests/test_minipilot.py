@@ -339,7 +339,8 @@ class MiniPilotRuns(GuardTestBase):
             "--arms", "group", "--groups-per-cell", "1", "--isolated-reps", "1", "--points", "0",
             "--frames", "abstract_v3=deepseek,mistral,gpt")
         self.assertEqual(code, 0)
-        self.assertEqual(out.count("88 çağrı"), 3)              # 2 cells x 1 group x 4 x (10 + 1)
+        # one line per frame x model (the per-model lines of task #68 name the frames)
+        self.assertEqual(out.count("88 çağrı (contribute_N"), 3)  # 2 cells x 1 group x 4 x (10 + 1)
         self.create.assert_not_called()
 
     def test_dry_run_subprocess_needs_no_key(self):

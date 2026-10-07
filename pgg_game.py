@@ -110,28 +110,57 @@ llm_client's before_call / on_response hooks:
                     cost (keep parallel_units x workers small). A response
                     without usage.cost is priced from its tokens with
                     pgg_cost.PRICES_USD_PER_M and counted (n_cost_estimated).
+  model_budget_usd  per model {model key: USD} (task #68): when the
+                    accumulated usage.cost of one model (all segments, the
+                    same responses as budget_usd) reaches its cap, that model
+                    alone stops ("pgg_model_stopped", reason "model_budget"):
+                    no new call of it is sent, its units in progress end and
+                    its units not started are skipped; the other models go on.
+                    The summary has the reason and the moment per model
+                    ("model_stops": ts, segment, cost, cap, responses; also
+                    in the segment entry). On --resume the caps count the
+                    earlier segments; a model already over its cap stays
+                    stopped ("at_resume": true).
   invalid_rate_cap  per model: n_invalid + n_parse_fail above this fraction of
                     the planned calls (540 x 0.05 = 27 in the pilot) stops that
                     model only ("pgg_model_stopped"); the others go on.
   stop_on_length    the first finish_reason "length" stops the run.
   check_snapshot    a response whose model differs from the requested slug
-                    (other than a "-<suffix>") stops the run.
+                    (other than a "-<suffix>") stops the run. For the models
+                    in snapshot_version_models (task #68: mistral, whose
+                    response "model" has no date) the check uses
+                    model_version instead, the dated model of the endpoint
+                    that served the response (openrouter_metadata; on every
+                    row and raw-log record, for every model): it must fit the
+                    slug the same way ("model_snapshot_mismatch"), and every
+                    later response of the run (all segments) must carry the
+                    model_version of the model's first response, else the run
+                    stops ("model_version_changed"). A response without
+                    model_version is not compared; it is counted
+                    (n_model_version_unknown). Responses rejected for their
+                    provider are not compared.
   providers         per model {"slug", "name"[, "quantizations"]}: sent as
                     OpenRouter provider routing (order + only = [slug],
                     allow_fallbacks false, require_parameters true: the
                     provider must support every parameter of the request).
                     Every response's provider name (and quantization, if the
                     response has one) goes to the raw log and the row.
-                    A response without a provider name does not stop the
-                    run; it is counted as n_provider_unknown (per model and
-                    in total in the summary).
-  provider mismatch (A4) a response whose provider name is not "name" is NOT
-                    a decision: llm_client logs it as a failed attempt
-                    (error_kind "provider_mismatch", "provider_mismatch":
-                    true, its content and usage), its cost goes into the cost
-                    and the budget, and the same decision is re-requested.
-                    Counted as n_provider_mismatch on the row (re-requests of
-                    that decision), per model, per segment and in total.
+                    A response of a pinned model without a provider name is
+                    handled as a mismatch (task #68, below). n_provider_unknown
+                    counts responses without a provider name that were not
+                    rejected for it: those of unpinned models, and those of
+                    pinned models in raw logs of the code before #68 (pilot
+                    v2: counted, not re-requested).
+  provider mismatch (A4) a response whose provider name is not "name", or
+                    (task #68) that names no provider, is NOT a decision:
+                    llm_client logs it as a failed attempt (error_kind
+                    "provider_mismatch", "provider_mismatch": true, plus
+                    "provider_missing": true without a name, its content and
+                    usage), its cost goes into the cost and the budget, and
+                    the same decision is re-requested. Counted as
+                    n_provider_mismatch on the row (re-requests of that
+                    decision), per model, per segment and in total; its
+                    sub-count n_provider_missing holds those without a name.
                     Outside the invalid-rate cap. Limit: the attempt limit of
                     one llm_client call (max_retries = 4 attempts, shared with
                     parse failures, provider errors and transport errors);
@@ -256,8 +285,18 @@ Hangs. Every HTTP attempt has a wall-clock deadline, request_deadline_s
 error with error_subkind "deadline" and retried. Its record holds what had
 arrived of the response ("response_partial"; usage, content and cost when the
 body was whole) and "cost_unknown"; a known cost goes into the cost and the
-budget (deadline_cost_usd), an unknown one is counted (n_cost_unknown); such a
-response is never a decision. Units run in a thread pool (parallel_units
+budget (deadline_cost_usd), an unknown one is counted (n_cost_unknown) and,
+since task #68, priced as the worst case: the prompt (characters of the
+request / DEADLINE_CHARS_PER_TOKEN, listed input price) plus a full
+max_tokens completion (listed output price, pgg_cost.PRICES_USD_PER_M). That
+estimate goes into the cost, the budget and the model's cap; a
+"pgg_deadline_cost_estimated" event records it ("cost_estimated": true),
+the decision's row says "cost_estimated": true with n_deadline_cost_estimated,
+and the summary counts n_deadline_cost_estimated and
+deadline_cost_estimated_usd (per model, per segment, in total). When the
+abandoned attempt's response arrives later after all (a late_response with
+its real cost), the estimate is taken back ("pgg_deadline_estimate_replaced").
+Such a response is never a decision. Units run in a thread pool (parallel_units
 threads, also when it is 1) while the main thread watches the run's raw log:
 when no record (response, error or event) has been written to it for
 stall_timeout_s (default DEFAULT_STALL_TIMEOUT_S = 1800 s; config / CLI
@@ -353,6 +392,11 @@ DEFAULT_STALL_TIMEOUT_S = 1800.0
 # Operational limits compared with the previous segment on --resume (a
 # difference needs allow_timeout_change / --allow-timeout-change).
 TIMEOUT_SETTINGS = ("request_deadline_s", "stall_timeout_s")
+# Prompt tokens of an attempt abandoned at its deadline without usage
+# (task #68): characters of the request / this, rounded up. Deliberately
+# fewer characters per token than the usual ~4 for English: the estimate is
+# a worst case (tahmin); next to the max_tokens completion it is small.
+DEADLINE_CHARS_PER_TOKEN = 3
 # Files whose sha256 goes into code_version().
 CODE_FILES = ("pgg_game.py", "llm_client.py", "pgg_cost.py", "pgg_frames.py", "cerceve_linter.py")
 # Tracked files whose change makes the code dirty (git pathspecs, A5; frames,
@@ -1294,9 +1338,14 @@ class RunConfig:
     seed_namespace: str = "pgg"                # first part of every stable_seed key
     # Run guards (module docstring); None / False = off.
     budget_usd: float | None = None
+    # {model key: USD}: a model alone stops at its accumulated cost (task #68)
+    model_budget_usd: dict | None = None
     invalid_rate_cap: float | None = None
     stop_on_length: bool = False
     check_snapshot: bool = False
+    # model keys whose check_snapshot compares model_version (the dated model
+    # of the serving endpoint) instead of the response's model (task #68)
+    snapshot_version_models: tuple[str, ...] = ()
     # Output location: exactly one of the two, both absolute and outside the
     # git worktree. runs_dir (must exist) -> runs_dir/<run>/ holds the results,
     # the summary and the raw log. results_dir (created; its parent must
@@ -1456,6 +1505,21 @@ class RunConfig:
             raise ValueError(f"seed_namespace must be [A-Za-z0-9_.-]+, got {self.seed_namespace!r}")
         if self.budget_usd is not None and not self.budget_usd > 0:
             raise ValueError("budget_usd must be positive")
+        if self.model_budget_usd is not None:
+            if not isinstance(self.model_budget_usd, dict) or not self.model_budget_usd:
+                raise ValueError("model_budget_usd must be a non-empty {model key: USD} object")
+            extra = set(self.model_budget_usd) - set(self.models)
+            if extra:
+                raise ValueError(f"model_budget_usd for models not in the run: {sorted(extra)}")
+            for key, value in self.model_budget_usd.items():
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not value > 0):
+                    raise ValueError(f"model_budget_usd[{key}] must be a positive number, "
+                                     f"got {value!r}")
+        if (not isinstance(self.snapshot_version_models, (list, tuple))
+                or not set(self.snapshot_version_models) <= set(self.models)):
+            raise ValueError(f"snapshot_version_models must be a list of the run's models "
+                             f"{sorted(self.models)}, got {self.snapshot_version_models!r}")
         if self.invalid_rate_cap is not None and not 0 < self.invalid_rate_cap <= 1:
             raise ValueError("invalid_rate_cap must be in (0, 1]")
 
@@ -1638,18 +1702,29 @@ def _new_stats() -> dict:
     # is in cost_usd (also in deadline_cost_usd) when its usage arrived, else
     # it is counted in n_cost_unknown (not priced).
     # n_provider_mismatch: responses of a pinned model from another provider
-    # (billed, never a decision, re-requested; A4).
+    # or without a provider name (billed, never a decision, re-requested; A4,
+    # task #68); n_provider_missing: those without a name (a sub-count).
+    # n_deadline_cost_estimated / deadline_cost_estimated_usd: attempts past
+    # their deadline whose unknown cost is in cost_usd (and deadline_cost_usd)
+    # as the max_tokens estimate (task #68). model_versions: model_version of
+    # every response -> count ("None" = none); n_model_version_unknown:
+    # responses of a snapshot_version_models model that check_snapshot could
+    # not compare (no model_version).
     return {"cost_usd": 0.0, "n_responses": 0, "n_accepted": 0,
             "n_invalid": 0, "n_parse_fail": 0, "n_provider_error": 0,
             "n_cost_estimated": 0, "n_length": 0, "finish_reasons": {},
             "providers": {}, "n_provider_unknown": 0, "n_discarded": 0,
             "n_reasoning_capped": 0, "n_transport": 0, "n_deadline": 0,
-            "n_cost_unknown": 0, "deadline_cost_usd": 0.0, "n_provider_mismatch": 0}
+            "n_cost_unknown": 0, "deadline_cost_usd": 0.0, "n_provider_mismatch": 0,
+            "n_provider_missing": 0, "n_deadline_cost_estimated": 0,
+            "deadline_cost_estimated_usd": 0.0, "model_versions": {},
+            "n_model_version_unknown": 0}
 
 
-# Totals of the summary and of each segment entry (A2, A3, A4).
+# Totals of the summary and of each segment entry (A2, A3, A4, task #68).
 _SEGMENT_TOTALS = ("n_reasoning_capped", "n_transport", "n_deadline", "n_cost_unknown",
-                   "deadline_cost_usd", "n_provider_mismatch")
+                   "deadline_cost_usd", "n_provider_mismatch", "n_provider_missing",
+                   "n_deadline_cost_estimated", "deadline_cost_estimated_usd")
 
 
 def _merge_stats(*parts: dict) -> dict:
@@ -1727,6 +1802,9 @@ class ResumePlan:
     # "pgg_discarded" event yet: [(model key, session_id, call)]
     unmarked_discarded: list = field(default_factory=list)
     lock: dict | None = None           # read_run_lock of the run's lock file
+    # model key -> model_version of its first response in the earlier
+    # segments (check_snapshot of snapshot_version_models, task #68)
+    model_version_reference: dict = field(default_factory=dict)
 
     @property
     def prior_cost_usd(self) -> float:
@@ -1748,6 +1826,8 @@ class Answer:
     n_transport: int = 0           # connection errors while this decision was obtained
     n_deadline: int = 0            # attempts past their deadline while it was obtained
     n_provider_mismatch: int = 0   # responses from another provider, re-requested (A4)
+    n_provider_missing: int = 0    # of those: without a provider name (task #68)
+    n_deadline_cost_estimated: int = 0   # deadline attempts priced by the estimate (#68)
 
 
 class _Pending:
@@ -1818,6 +1898,11 @@ class Engine:
         self.stop_reason: str | None = None        # set once; stops every unit
         self.aborted: RunAborted | None = None
         self.stopped_models: dict[str, str] = {}   # model key -> reason
+        # model key -> when and why it stopped in this segment (_stop_model)
+        self.model_stops: dict[str, dict] = {}
+        # model key -> model_version of its first response (check_snapshot of
+        # snapshot_version_models; from the earlier segments on resume)
+        self.model_version_reference: dict[str, str] = {}
         self.unit_order: list[str] = []
         self.files: dict | None = None             # output files and line counts (run)
         self.stats = {key: _new_stats() for key in cfg.models}    # this segment
@@ -1894,6 +1979,30 @@ class Engine:
         self.llm._append_log({"ts": time.time(), "event": "pgg_run_stopped", "run": self.cfg.run,
                               "reason": reason, "total_cost_usd": self.total_cost, **detail})
 
+    def model_cost(self, model_key: str) -> float:
+        """Accumulated cost of one model: this segment and the earlier ones."""
+        return self.stats[model_key]["cost_usd"] + self.prior_stats[model_key]["cost_usd"]
+
+    def _stop_record(self, model_key: str, reason: str, **detail) -> dict:
+        """When and why a model stopped (summary "model_stops")."""
+        return {"reason": reason, "ts": time.time(), "segment": self.segment,
+                "cost_usd": self.model_cost(model_key),
+                "n_responses": (self.stats[model_key]["n_responses"]
+                                + self.prior_stats[model_key]["n_responses"]),
+                **detail}
+
+    def _stop_model(self, model_key: str, reason: str, **detail) -> None:
+        """Stop one model (first reason wins); the others go on. Logged once."""
+        with self._lock:
+            if model_key in self.stopped_models:
+                return
+            self.stopped_models[model_key] = reason
+            record = self._stop_record(model_key, reason, **detail)
+            self.model_stops[model_key] = record
+        self.llm._append_log({"ts": record["ts"], "event": "pgg_model_stopped",
+                              "run": self.cfg.run, "model": self.cfg.models[model_key],
+                              **{k: v for k, v in record.items() if k != "ts"}})
+
     def _before_call(self, model_key: str) -> None:
         """Runs before every attempt: raises instead of sending when a guard is hit."""
         budget = self.cfg.budget_usd
@@ -1901,6 +2010,10 @@ class Engine:
             self._stop("budget", budget_usd=budget)
         if self.stop_reason is not None or self._interrupted is not None or self.stalled:
             raise RunStopped(self.stop_reason or ("stalled" if self.stalled else "interrupted"))
+        cap = (self.cfg.model_budget_usd or {}).get(model_key)
+        if (cap is not None and model_key not in self.stopped_models
+                and self.model_cost(model_key) >= cap):
+            self._stop_model(model_key, "model_budget", model_budget_usd=cap)
         if model_key in self.stopped_models:
             raise ModelStopped(self.stopped_models[model_key])
 
@@ -1919,32 +2032,65 @@ class Engine:
             tokens_out = self.max_tokens
         return (tokens_in * price_in + tokens_out * price_out) / 1e6, True
 
+    def _version_checked(self, model_key: str) -> bool:
+        """check_snapshot compares this model's model_version (not its model_snapshot)."""
+        return self.cfg.check_snapshot and model_key in self.cfg.snapshot_version_models
+
     def _count_response(self, s: dict, model_key: str, info: dict) -> None:
-        """Add one response (info as in llm_client._response_info) to counters s."""
+        """Add one response (info as in llm_client._response_info) to counters s.
+
+        n_provider_unknown: no provider name, and the response was not
+        rejected for it (unpinned models; pinned ones in logs of the code
+        before #68). info["late"]: a response after its attempt was abandoned.
+        """
         cost, estimated = self._response_cost(model_key, info.get("usage"))
         finish = info.get("finish_reason")
         provider = info.get("provider")
+        version = info.get("model_version")
+        mismatch = bool(info.get("provider_mismatch"))
         s["cost_usd"] += cost
         s["n_responses"] += 1
         s["n_cost_estimated"] += estimated
         s["finish_reasons"][str(finish)] = s["finish_reasons"].get(str(finish), 0) + 1
         s["providers"][str(provider)] = s["providers"].get(str(provider), 0) + 1
+        s["model_versions"][str(version)] = s["model_versions"].get(str(version), 0) + 1
         if finish == "length":
             s["n_length"] += 1
         if info.get("provider_error"):
             s["n_provider_error"] += 1
-        if info.get("provider_mismatch"):
+        if mismatch:
             s["n_provider_mismatch"] += 1
-        if self.cfg.provider_for(model_key) and provider is None:
+        if info.get("provider_missing"):
+            s["n_provider_missing"] += 1
+        if provider is None and not mismatch and not info.get("late"):
             s["n_provider_unknown"] += 1
+        if (version is None and not mismatch and not info.get("late")
+                and self._version_checked(model_key)):
+            s["n_model_version_unknown"] += 1
+
+    def _check_version(self, model_key: str, info: dict) -> None:
+        """check_snapshot of a snapshot_version_models model, on its model_version."""
+        version = info.get("model_version")
+        if version is None or info.get("provider_mismatch"):
+            return                      # not comparable (counted) / not a decision
+        slug = self.cfg.models[model_key]
+        if version != slug and not version.startswith(slug + "-"):
+            self._stop("model_snapshot_mismatch", model=slug, model_version=version,
+                       compared="model_version")
+            return
+        with self._lock:
+            first = self.model_version_reference.setdefault(model_key, version)
+        if version != first:
+            self._stop("model_version_changed", model=slug, model_version=version,
+                       expected_model_version=first, compared="model_version")
 
     def _on_response(self, model_key: str, info: dict) -> None:
         """Runs for every response that arrived (billed): cost, finish_reason, model, provider.
 
-        A response from another provider than the pinned one does not stop
-        the run any more (A4, it changes prereg §8.2 item 5): llm_client
-        re-requests it (expected_provider) and it is counted here
-        (n_provider_mismatch).
+        A response from another provider than the pinned one, or without a
+        provider name (task #68), does not stop the run (A4, it changes prereg
+        §8.2 item 5): llm_client re-requests it (expected_provider) and it is
+        counted here (n_provider_mismatch, n_provider_missing).
         """
         finish = info.get("finish_reason")
         with self._lock:
@@ -1953,14 +2099,53 @@ class Engine:
         snapshot = info.get("model_snapshot")
         if self.cfg.stop_on_length and finish == "length":
             self._stop("finish_reason_length", model=slug)
-        if (self.cfg.check_snapshot and snapshot is not None and snapshot != slug
+        if self._version_checked(model_key):
+            self._check_version(model_key, info)
+        elif (self.cfg.check_snapshot and snapshot is not None and snapshot != slug
                 and not snapshot.startswith(slug + "-")):
             self._stop("model_snapshot_mismatch", model=slug, model_snapshot=snapshot)
 
-    def _on_late_response(self, model_key: str, info: dict) -> None:
-        """A response that came after its attempt was abandoned: billed, counted, not a decision."""
+    def _on_late_response(self, model_key: str, info: dict, *, replaced_estimate: float | None = None,
+                          session_id: str | None = None, call: dict | None = None) -> None:
+        """A response that came after its attempt was abandoned: billed, counted, not a decision.
+
+        replaced_estimate: the max_tokens estimate that was counted for its
+        attempt (_on_deadline); its real cost replaces it.
+        """
         with self._lock:
-            self._count_response(self.stats[model_key], model_key, info)
+            s = self.stats[model_key]
+            self._count_response(s, model_key, {**info, "late": True})
+            if replaced_estimate is not None:
+                self._add_deadline_estimate(s, -replaced_estimate, -1)
+        if replaced_estimate is not None:
+            self._log({"ts": time.time(), "event": "pgg_deadline_estimate_replaced",
+                       "run": self.cfg.run, "segment": self.segment,
+                       "model": self.cfg.models[model_key], "session_id": session_id,
+                       "call": call, "attempt": info.get("attempt"),
+                       "estimated_cost_usd": replaced_estimate})
+
+    @staticmethod
+    def _add_deadline_estimate(s: dict, usd: float, n: int = 1) -> None:
+        """A max_tokens estimate of a deadline attempt into counters s (negative: taken back)."""
+        s["cost_usd"] += usd
+        s["deadline_cost_usd"] += usd
+        s["deadline_cost_estimated_usd"] += usd
+        s["n_deadline_cost_estimated"] += n
+
+    def deadline_estimate(self, model_key: str, prompt_chars: int) -> dict:
+        """Worst-case cost of an attempt abandoned without usage (task #68, tahmin).
+
+        Prompt tokens = ceil(prompt_chars / DEADLINE_CHARS_PER_TOKEN) at the
+        listed input price, plus max_tokens at the listed output price
+        (pgg_cost.PRICES_USD_PER_M; a model without a listed price gets the
+        highest one, as _response_cost).
+        """
+        prices = pgg_cost.PRICES_USD_PER_M
+        price_in, price_out = prices.get(self.cfg.models[model_key], max(prices.values()))
+        tokens_in = -(-prompt_chars // DEADLINE_CHARS_PER_TOKEN)
+        return {"estimated_cost_usd": (tokens_in * price_in + self.max_tokens * price_out) / 1e6,
+                "prompt_chars": prompt_chars, "prompt_tokens_estimated": tokens_in,
+                "max_tokens": self.max_tokens, "price_usd_per_m": [price_in, price_out]}
 
     def _count_deadline_cost(self, s: dict, model_key: str, usage, cost_unknown: bool,
                              late_response: bool) -> None:
@@ -1968,7 +2153,8 @@ class Engine:
 
         Its usage arrived: priced like any response (usage.cost, else from its
         tokens) into cost_usd and deadline_cost_usd. A late response is counted
-        when it arrives (_on_late_response). Otherwise n_cost_unknown.
+        when it arrives (_on_late_response). Otherwise n_cost_unknown (its
+        max_tokens estimate is added apart, _add_deadline_estimate).
         """
         if late_response:
             return
@@ -1980,12 +2166,26 @@ class Engine:
         elif cost_unknown:
             s["n_cost_unknown"] += 1
 
-    def _on_deadline(self, model_key: str, info: dict) -> None:
-        """An attempt passed its deadline: what arrived of it counts in the budget."""
+    def _on_deadline(self, model_key: str, info: dict, *, estimate: dict | None = None,
+                     session_id: str | None = None, call: dict | None = None) -> None:
+        """An attempt passed its deadline: what arrived of it counts in the budget.
+
+        estimate (deadline_estimate): its cost did not arrive; the estimate
+        goes into the cost, the budget and the model's cap, and is logged.
+        """
         with self._lock:
-            self._count_deadline_cost(self.stats[model_key], model_key, info.get("usage"),
+            s = self.stats[model_key]
+            self._count_deadline_cost(s, model_key, info.get("usage"),
                                       info.get("cost_unknown", True),
                                       info.get("late_response", False))
+            if estimate is not None:
+                self._add_deadline_estimate(s, estimate["estimated_cost_usd"])
+        if estimate is not None:
+            self._log({"ts": time.time(), "event": "pgg_deadline_cost_estimated",
+                       "run": self.cfg.run, "segment": self.segment,
+                       "model": self.cfg.models[model_key], "session_id": session_id,
+                       "call": call, "attempt": info.get("attempt"), "cost_estimated": True,
+                       **estimate})
 
     def _count_invalid(self, model_key: str, ans: "Answer") -> None:
         with self._lock:
@@ -2001,14 +2201,9 @@ class Engine:
             limit = self.invalid_limits[model_key]
             hit = (limit is not None and n_invalid + n_parse_fail > limit
                    and model_key not in self.stopped_models)
-            if hit:
-                self.stopped_models[model_key] = "invalid_rate_cap"
         if hit:
-            self.llm._append_log({
-                "ts": time.time(), "event": "pgg_model_stopped", "run": self.cfg.run,
-                "model": self.cfg.models[model_key], "reason": "invalid_rate_cap",
-                "n_invalid": n_invalid, "n_parse_fail": n_parse_fail,
-                "limit": self.invalid_limits[model_key]})
+            self._stop_model(model_key, "invalid_rate_cap", n_invalid=n_invalid,
+                             n_parse_fail=n_parse_fail, limit=limit)
 
     def _pool(self, max_workers: int) -> ThreadPoolExecutor:
         pool = ThreadPoolExecutor(max_workers=max_workers)
@@ -2050,6 +2245,36 @@ class Engine:
         # written as "call" into every raw-log record of this decision
         call = {"segment": self.segment, "step": ctx.get("step"), "round": ctx.get("round"),
                 "agent_id": ctx.get("agent_id"), "others_mean": ctx.get("others_mean")}
+        # task #68: an attempt abandoned at its deadline without usage is priced
+        # by deadline_estimate; a late response of that attempt replaces it. The
+        # two hooks may come in either order (the late one runs in the
+        # abandoned attempt's thread).
+        guard = threading.Lock()
+        estimates: dict = {}            # attempt -> estimated USD still counted
+        late_first: set = set()         # attempts whose late response came first
+        n_estimated = [0]
+
+        def on_deadline(info):
+            estimate = None
+            with guard:
+                attempt = info.get("attempt")
+                if (info.get("cost_unknown", True) and info.get("usage") is None
+                        and not info.get("late_response") and attempt not in late_first):
+                    estimate = self.deadline_estimate(model_key, _prompt_chars(messages, schema))
+                    estimates[attempt] = estimate["estimated_cost_usd"]
+                    n_estimated[0] += 1
+            self._on_deadline(model_key, info, estimate=estimate, session_id=session_id,
+                              call=call)
+
+        def on_late_response(info):
+            with guard:
+                attempt = info.get("attempt")
+                replaced = estimates.pop(attempt, None)
+                if replaced is None:
+                    late_first.add(attempt)
+            self._on_late_response(model_key, info, replaced_estimate=replaced,
+                                   session_id=session_id, call=call)
+
         try:
             parsed, n_invalid, n_parse_fail = self.llm.call_llm_valid(
                 self.cfg.models[model_key], messages, schema=schema, session_id=session_id,
@@ -2058,9 +2283,8 @@ class Engine:
                 meta=meta, before_call=lambda: self._before_call(model_key),
                 on_response=on_response, timeout=self.timeout, counts=counts,
                 provider=provider_routing(pinned) if pinned else None,
-                request_deadline_s=self.deadline,
-                on_late_response=lambda info: self._on_late_response(model_key, info),
-                call_info=call, on_deadline=lambda info: self._on_deadline(model_key, info),
+                request_deadline_s=self.deadline, on_late_response=on_late_response,
+                call_info=call, on_deadline=on_deadline,
                 expected_provider=pinned["name"] if pinned else None,
                 # task #67: q2 asks for the change "with its sign, for example +3";
                 # a rule-comprehension answer {"q2": +3} is parsed (decisions: as before)
@@ -2072,13 +2296,15 @@ class Engine:
                 "ts": time.time(), "event": "pgg_run_aborted", "run": self.cfg.run,
                 "model": self.cfg.models[model_key], "session_id": session_id,
                 "error": str(e), "reason": reason,
-                "n_provider_mismatch": counts.get("n_provider_mismatch", 0), **ctx,
+                "n_provider_mismatch": counts.get("n_provider_mismatch", 0),
+                "n_provider_missing": counts.get("n_provider_missing", 0), **ctx,
             })
             raise RunAborted(
                 f"run {self.cfg.run!r} stopped: no valid decision for {ctx} "
                 f"(model {model_key}): {e}"
                 + (f" [{counts.get('n_provider_mismatch', 0)} response(s) from another provider "
-                   f"than {pinned['name']!r}; attempt limit reached]" if mismatch else ""),
+                   f"than {pinned['name']!r}, {counts.get('n_provider_missing', 0)} of them "
+                   "without a provider name; attempt limit reached]" if mismatch else ""),
                 reason=reason) from e
         finally:
             # connection errors and deadlines also when the call failed or was stopped
@@ -2091,7 +2317,9 @@ class Engine:
                      n_provider_error=counts.get("n_provider_error", 0), call=call,
                      n_transport=counts.get("n_transport", 0),
                      n_deadline=counts.get("n_deadline", 0),
-                     n_provider_mismatch=counts.get("n_provider_mismatch", 0))
+                     n_provider_mismatch=counts.get("n_provider_mismatch", 0),
+                     n_provider_missing=counts.get("n_provider_missing", 0),
+                     n_deadline_cost_estimated=n_estimated[0])
         self._count_invalid(model_key, ans)
         return ans
 
@@ -2104,6 +2332,8 @@ class Engine:
             "run": self.cfg.run, "segment": self.segment, "unit": unit, "condition": condition, "arm": arm, "step": step,
             "model": self.cfg.models[model_key], "model_key": model_key,
             "model_snapshot": ans.meta.get("model_snapshot"),
+            # the serving endpoint's (dated) model, openrouter_metadata (task #68)
+            "model_version": ans.meta.get("model_version"),
             "session_id": session_id, "group_id": group_id, "agent_id": agent_id,
             "round": round_no, "card_id": card.card_id, "style": card.style,
             **card_length(card),
@@ -2112,7 +2342,12 @@ class Engine:
             "n_invalid": ans.n_invalid, "n_parse_fail": ans.n_parse_fail,
             "n_provider_error": ans.n_provider_error,
             "n_provider_mismatch": ans.n_provider_mismatch,
+            "n_provider_missing": ans.n_provider_missing,
             "n_transport": ans.n_transport, "n_deadline": ans.n_deadline,
+            # task #68: a deadline attempt of this decision is in the budget as
+            # the max_tokens estimate (pgg_deadline_cost_estimated)
+            "cost_estimated": ans.n_deadline_cost_estimated > 0,
+            "n_deadline_cost_estimated": ans.n_deadline_cost_estimated,
             "elapsed_s": ans.meta.get("elapsed_s"),
             "reasoning_capped": self.llm.reasoning_capped(ans.meta.get("usage"), self.max_tokens),
             "provider": ans.meta.get("provider"),
@@ -2501,6 +2736,11 @@ class Engine:
             **({"frame_setup": self.frame_setup()} if cfg.frames is not None else {}),
             **({"expected_cost_gate_usd": cfg.expected_cost_gate_usd}
                if cfg.expected_cost_gate_usd is not None else {}),
+            # task #68, only when set (earlier runs resume with their record)
+            **({"model_budget_usd": dict(cfg.model_budget_usd)}
+               if cfg.model_budget_usd is not None else {}),
+            **({"snapshot_version_models": list(cfg.snapshot_version_models)}
+               if cfg.snapshot_version_models else {}),
         })
 
     def frames_summary(self) -> dict:
@@ -2803,7 +3043,13 @@ class Engine:
         error_kind "transport" (error_subkind "deadline"). An attempt past its
         deadline adds its cost when its usage was logged; otherwise (also every
         such record of the code before A3, which logged nothing of the
-        response) it is counted in n_cost_unknown.
+        response) it is counted in n_cost_unknown, and its max_tokens estimate
+        (task #68) comes from its "pgg_deadline_cost_estimated" event (taken
+        back by a "pgg_deadline_estimate_replaced" event).
+
+        Also "model_version_reference": model key -> model_version of its
+        first response not rejected for its provider (check_snapshot of
+        snapshot_version_models goes on comparing with it).
         """
         sessions = {s.session_id: s for s in specs}
         per_segment: dict[int, dict] = {}
@@ -2813,6 +3059,10 @@ class Engine:
         marked: set = set()
         recent: dict[str, list] = {}           # session -> [(call key, parsed)] (older logs)
         capped: dict[tuple, bool] = {}         # call key -> its last success record was capped
+        first_version: dict[str, str] = {}
+        # segment -> estimates taken back after its last summary was written
+        # (that summary still holds them; resume_plan's cost check adds them)
+        replaced_after_summary: dict[int, float] = {}
         n_unparsed = 0
         seg = 0
         lines, ends_with_newline = _read_jsonl(path)
@@ -2825,6 +3075,10 @@ class Engine:
                 seg = rec.get("segment", 0)
                 events.append(rec)
                 per_segment.setdefault(seg, {k: _new_stats() for k in self.cfg.models})
+                continue
+            if (event in ("pgg_run_end", "pgg_run_summary_updated")
+                    and rec.get("run") == self.cfg.run):
+                replaced_after_summary[seg] = 0.0          # this summary holds them
                 continue
             spec = sessions.get(rec.get("session_id"))
             if spec is None:
@@ -2840,7 +3094,17 @@ class Engine:
                 if "usage" in rec:
                     self._count_response(s, key, {
                         "usage": rec.get("usage"), "finish_reason": rec.get("finish_reason"),
-                        "provider": rec.get("provider"), "provider_error": False})
+                        "provider": rec.get("provider"), "provider_error": False,
+                        "model_version": rec.get("model_version"), "late": True})
+                continue
+            if event == "pgg_deadline_cost_estimated":
+                self._add_deadline_estimate(s, rec.get("estimated_cost_usd") or 0.0)
+                continue
+            if event == "pgg_deadline_estimate_replaced":
+                usd = rec.get("estimated_cost_usd") or 0.0
+                self._add_deadline_estimate(s, -usd, -1)
+                if seg in replaced_after_summary:
+                    replaced_after_summary[seg] += usd
                 continue
             if event == "invalid_payload":
                 s["n_invalid"] += 1
@@ -2880,7 +3144,12 @@ class Engine:
                     "usage": rec.get("usage"), "finish_reason": rec.get("finish_reason"),
                     "provider": rec.get("provider"),
                     "provider_error": rec.get("error_kind") == "provider",
-                    "provider_mismatch": rec.get("provider_mismatch") is True})
+                    "provider_mismatch": rec.get("provider_mismatch") is True,
+                    "provider_missing": rec.get("provider_missing") is True,
+                    "model_version": rec.get("model_version")})
+                if (isinstance(rec.get("model_version"), str)
+                        and rec.get("provider_mismatch") is not True):
+                    first_version.setdefault(key, rec["model_version"])
             if "response_parsed" in rec:
                 s["n_accepted"] += 1
                 call = rec.get("call") if isinstance(rec.get("call"), dict) else None
@@ -2911,6 +3180,8 @@ class Engine:
         return {"per_segment": per_segment, "events": events, "started": started,
                 "n_sessions_checked": len(system_text), "accepted": accepted, "marked": marked,
                 "n_unparsed_lines": n_unparsed, "ends_with_newline": ends_with_newline,
+                "model_version_reference": first_version,
+                "replaced_after_summary": replaced_after_summary,
                 "problems": list(dict.fromkeys(problems))}
 
     def resume_plan(self) -> ResumePlan:
@@ -3041,10 +3312,16 @@ class Engine:
                 covered = previous.get("segment", 0)
                 raw_covered = sum(st["cost_usd"] for seg, by_model in log["per_segment"].items()
                                   if seg <= covered for st in by_model.values())
-                diff = summary_cost - raw_covered
+                # task #68: a deadline estimate taken back after the summary was
+                # written is still in that summary (not a cost the log misses)
+                late_back = sum(v for seg, v in log["replaced_after_summary"].items()
+                                if seg <= covered)
+                diff = summary_cost - raw_covered - late_back
                 cost_check.update(summary_segment=covered, summary_total_cost_usd=summary_cost,
                                   raw_log_cost_usd_same_segments=raw_covered,
                                   match=abs(diff) < 1e-9)
+                if late_back:
+                    cost_check["estimates_replaced_after_summary_usd"] = late_back
                 # the summary saw more than the log holds: count the larger
                 extra = diff if diff >= 1e-9 else 0.0
         elif previous is not None:
@@ -3078,7 +3355,7 @@ class Engine:
             # (summary entry, else its start / resume event; absent before #46)
             for k in ("stalled", "request_deadline_s", "stall_timeout_s", "code_version", "lock",
                       "resume_points", "n_discarded", "timeout_change", "code_change",
-                      "provider_policy", "run_template"):
+                      "provider_policy", "run_template", "model_stops"):
                 if k in entry:
                     item[k] = entry[k]
                 elif k in started_by_seg.get(seg, {}):
@@ -3154,7 +3431,8 @@ class Engine:
             histories=histories, unmarked_discarded=unmarked,
             lock=read_run_lock(self._lock_path()),
             timeout_change=timeout_change, timeout_check=timeout_check,
-            code_change=code_change)
+            code_change=code_change,
+            model_version_reference=dict(log["model_version_reference"]) if log else {})
 
     def _lock_path(self) -> Path:
         return self.cfg.output_dir() / f"{self.cfg.run}.lock"
@@ -3169,10 +3447,21 @@ class Engine:
         self.prior_stats = {k: _merge_stats(s) for k, s in plan.prior_stats.items()}
         self.prior_extra_cost = plan.prior_extra_cost
         self._histories = dict(plan.histories)
+        self.model_version_reference = {k: v for k, v in plan.model_version_reference.items()
+                                        if k in self.cfg.snapshot_version_models}
+        caps = self.cfg.model_budget_usd or {}
         for key, s in self.prior_stats.items():
             limit = self.invalid_limits[key]
             if limit is not None and s["n_invalid"] + s["n_parse_fail"] > limit:
                 self.stopped_models[key] = "invalid_rate_cap"
+                self.model_stops[key] = self._stop_record(
+                    key, "invalid_rate_cap", at_resume=True, n_invalid=s["n_invalid"],
+                    n_parse_fail=s["n_parse_fail"], limit=limit)
+            elif key in caps and s["cost_usd"] >= caps[key]:
+                # task #68: the cap counts the earlier segments; no call of this model
+                self.stopped_models[key] = "model_budget"
+                self.model_stops[key] = self._stop_record(
+                    key, "model_budget", at_resume=True, model_budget_usd=caps[key])
 
     def _backup_summary(self, summary_path: Path) -> Path | None:
         """Copy the previous summary before it is replaced (never overwrites a copy)."""
@@ -3260,8 +3549,14 @@ class Engine:
             "provider_policy": dict(PROVIDER_POLICY),
             "lock": lock, "resume_points": resume_points,
             "run_template": self.cfg.run_template,
+            "model_stops": {k: dict(v) for k, v in self.model_stops.items()},
         }
         segments = [*(self.plan.segments if self.plan else []), current]
+        # per model, the latest stop of any segment (reason and moment)
+        model_stops: dict = {}
+        for seg in segments:
+            model_stops.update(seg.get("model_stops") or {})
+        caps = self.cfg.model_budget_usd or {}
         out = {
             "run": self.cfg.run,
             # the config's run name template, resolved in the first segment
@@ -3270,7 +3565,14 @@ class Engine:
             "seed_namespace": self.cfg.seed_namespace,
             "segment": self.segment, "resumed": self.segment > 0,
             "stop_reason": self.stop_reason, "stopped_models": dict(self.stopped_models),
-            "budget_usd": self.cfg.budget_usd, "invalid_rate_cap": self.cfg.invalid_rate_cap,
+            "model_stops": model_stops,
+            "budget_usd": self.cfg.budget_usd,
+            "model_budget_usd": dict(caps) if self.cfg.model_budget_usd is not None else None,
+            "model_budget_status": {
+                k: {"model_budget_usd": cap, "cost_usd": self.model_cost(k),
+                    "stopped": self.stopped_models.get(k) == "model_budget"}
+                for k, cap in caps.items()},
+            "invalid_rate_cap": self.cfg.invalid_rate_cap,
             "invalid_limit_per_model": self.invalid_limit,
             "planned_calls_per_model": self.cfg.planned_calls_per_model(),
             "max_tokens": self.max_tokens, "request_timeout_s": self.timeout,
@@ -3299,11 +3601,23 @@ class Engine:
             "code_changes": [{"segment": s["segment"], **s["code_change"]}
                              for s in segments if s.get("code_change")],
             "provider_mismatch_rule": (
-                "a response of a pinned model from another provider is not a decision: logged "
+                "a response of a pinned model from another provider, or without a provider name "
+                "(task #68: provider_missing: true, n_provider_missing; before it was accepted and "
+                "counted as n_provider_unknown), is not a decision: logged "
                 "(provider_mismatch: true, content and cost), billed, re-requested within "
                 "llm_client's attempt limit (max_retries = 4 per call); a call whose last attempt "
                 "is a mismatch stops the run (provider_mismatch_limit). Changes prereg_pilot.md "
-                "§8.2 item 5 (stop at the first mismatch)"),
+                "§8.2 item 5 (stop at the first mismatch). n_provider_unknown: responses without "
+                "a provider name not rejected for it (unpinned models)"),
+            "deadline_cost_rule": (
+                "an attempt past request_deadline_s without usage is priced as the worst case "
+                f"(task #68): prompt characters / {DEADLINE_CHARS_PER_TOKEN} tokens at the listed "
+                "input price plus max_tokens at the listed output price (pgg_cost.PRICES_USD_PER_M); "
+                "in cost_usd, the budget and the model's cap; n_deadline_cost_estimated / "
+                "deadline_cost_estimated_usd; its row says cost_estimated: true. A late response "
+                "of that attempt replaces the estimate with its real cost"),
+            "snapshot_version_models": list(self.cfg.snapshot_version_models),
+            "model_version_reference": dict(self.model_version_reference),
             "per_model": per_model,
             "units": units,
             "resume_points": resume_points,
@@ -3745,9 +4059,23 @@ def design_estimate(*, models: dict[str, str], frame_models: dict[str, list[str]
                          "calls_by_kind": {k: v for k, v in counts.items() if v},
                          "prompt_scale": scales, "frame_known": f is not None, **cost})
     priced = [r for r in rows if r["cost_usd"] is not None]
+    per_model: dict = {}
+    for r in rows:                          # task #68: over the model's frames
+        m = per_model.setdefault(r["model"], {"slug": r["slug"], "frames": [], "calls": 0,
+                                              "cost_usd": 0.0, "p95_upper_usd": 0.0,
+                                              "lower_bound": False})
+        m["frames"].append(r["frame"])
+        m["calls"] += r["calls"]
+        if r["cost_usd"] is None or m["cost_usd"] is None:
+            m["cost_usd"] = m["p95_upper_usd"] = None
+        else:
+            m["cost_usd"] += r["cost_usd"]
+            m["p95_upper_usd"] += r["p95_upper_usd"]
+            m["lower_bound"] = m["lower_bound"] or bool(r.get("lower_bound"))
     return {"rows": rows, "counts": counts, "total_calls": sum(r["calls"] for r in rows),
             "total_cost_usd": sum(r["cost_usd"] for r in priced),
             "total_p95_upper_usd": sum(r["p95_upper_usd"] for r in priced),
+            "per_model": per_model,
             "unpriced": [f"{r['model']}/{r['frame']}" for r in rows if r["cost_usd"] is None]}
 
 
@@ -3766,8 +4094,37 @@ def gate_problem(est: dict, gate: float | None) -> str | None:
     return None
 
 
+def model_budget_lines(est: dict, model_budget: dict | None) -> list[str]:
+    """Dry-run lines per model over its frames: mean and p95 (task #68), against its cap.
+
+    The gate is decided on the mean total (gate_problem); p95 and the caps
+    are for information.
+    """
+    caps = model_budget or {}
+    lines = ["Model başına (çerçeveleri toplamı; ortalama beklenti ve p95 üst sınır, tahmin):"]
+    for key, m in est["per_model"].items():
+        head = (f"  {key:<9} {m['slug']:<30} {m['calls']:>6} çağrı ({', '.join(m['frames'])})  ")
+        if m["cost_usd"] is None:
+            lines.append(head + "maliyet tahmini yok (kalibrasyon yok)")
+            continue
+        text = (f"ortalama ~{m['cost_usd']:.4f} USD" + (" (ALT SINIR)" if m["lower_bound"] else "")
+                + f"; p95 üst sınır ~{m['p95_upper_usd']:.4f} USD")
+        cap = caps.get(key)
+        if cap is not None:
+            text += (f"; alt tavan model_budget_usd={cap:g} USD: ortalama "
+                     + ("altında" if m["cost_usd"] < cap else "AŞIYOR") + ", p95 "
+                     + ("altında" if m["p95_upper_usd"] < cap else "AŞIYOR")
+                     + " (aşılırsa yalnız bu model durur)")
+        lines.append(head + text)
+    if caps:
+        lines.append(f"  alt tavanlar toplamı {sum(caps.values()):g} USD (bilgi)")
+    lines.append("  Kapı kararı toplam ORTALAMA beklentiye göre verilir; p95 bilgi amaçlıdır.")
+    return lines
+
+
 def format_design_report(est: dict, *, description: str = "", gate: float | None = None,
-                         budget: float | None = None, max_tokens: int | None = None) -> str:
+                         budget: float | None = None, max_tokens: int | None = None,
+                         model_budget: dict | None = None) -> str:
     """Dry-run report per frame x model (configs with frames); every cost (tahmin)."""
     lines = ["KURU ÇALIŞTIRMA — API çağrısı yapılmadı.", description,
              "Hücre = kart x model x çerçeve; her satır bir çerçeve x model.", ""]
@@ -3795,6 +4152,7 @@ def format_design_report(est: dict, *, description: str = "", gate: float | None
                  f"~{est['total_cost_usd']:.4f} USD (tahmin"
                  + (f"; {', '.join(est['unpriced'])} HARİÇ — eksik toplam" if est["unpriced"] else "")
                  + f"); p95 üst sınır ~{est['total_p95_upper_usd']:.4f} USD")
+    lines += model_budget_lines(est, model_budget)
     if max_tokens:
         lines.append(f"Tavan (her çağrı max_tokens={max_tokens} çıktıyı doldurursa; beklenen değil): "
                      f"~{ceiling:.2f} USD (tahmin)")
@@ -3954,6 +4312,31 @@ def resolve_frames(frames, models: dict[str, str]) -> dict | None:
             keys.append(key)
         out[label] = keys
     return out
+
+
+def _model_key(name, models: dict[str, str], what: str) -> str:
+    """A model key or slug of the run -> its key (ValueError otherwise)."""
+    by_slug = {slug: key for key, slug in models.items()}
+    key = name if name in models else by_slug.get(name)
+    if key is None:
+        raise ValueError(f"{what}: {name!r} is not one of the run's models {sorted(models)}")
+    return key
+
+
+def resolve_model_keyed(value, models: dict[str, str], what: str) -> dict | None:
+    """Config {model key or slug: value} (e.g. model_budget_usd) -> {model key: value}."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"{what} must be a {{model: value}} object")
+    return {_model_key(name, models, what): v for name, v in value.items()}
+
+
+def resolve_model_list(value, models: dict[str, str], what: str) -> list[str]:
+    """Config [model key or slug] (e.g. snapshot_version_models) -> [model key]."""
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{what} must be a list of models")
+    return [_model_key(name, models, what) for name in value]
 
 
 def dry_run_frames(frame_models: dict, frame_files, params: GameParams | None = None) -> dict:
@@ -4131,8 +4514,12 @@ def run_config(run: str, s: dict, models: dict[str, str], output: dict) -> RunCo
         parallel_units=s.get("parallel_units", 1),
         seed_namespace=s.get("seed_namespace", "pgg"),
         budget_usd=s.get("budget_usd"), invalid_rate_cap=s.get("invalid_rate_cap"),
+        model_budget_usd=resolve_model_keyed(s.get("model_budget_usd"), models,
+                                             "model_budget_usd"),
         stop_on_length=bool(s.get("stop_on_length", False)),
         check_snapshot=bool(s.get("check_snapshot", False)),
+        snapshot_version_models=tuple(resolve_model_list(s.get("snapshot_version_models", []),
+                                                         models, "snapshot_version_models")),
         request_timeout_s=s.get("request_timeout_s"),
         request_deadline_s=s.get("request_deadline_s"), stall_timeout_s=s.get("stall_timeout_s"),
         allow_timeout_change=bool(s.get("allow_timeout_change", False)),
@@ -4236,11 +4623,26 @@ def resume_report(engine: Engine, plan: ResumePlan) -> str:
             f"{k} {s['n_transport']} / {s['n_deadline']}" for k, s in plan.prior_stats.items())
         + "; süre aşımında maliyeti bilinmeyen: " + ", ".join(
             f"{k} {s['n_cost_unknown']}" for k, s in plan.prior_stats.items())
+        + " (max_tokens tahminiyle fiyatlanan: " + ", ".join(
+            f"{k} {s.get('n_deadline_cost_estimated', 0)}" for k, s in plan.prior_stats.items())
+        + f", {sum(s.get('deadline_cost_estimated_usd', 0.0) for s in plan.prior_stats.values()):.6f}"
+        " USD)"
         + "; süre aşımı maliyeti (bütçede): "
         f"{sum(s['deadline_cost_usd'] for s in plan.prior_stats.values()):.6f} USD")
     lines.append(
         "Sağlayıcı uyuşmazlığı (karar sayılmadı, yeniden istendi, maliyeti bütçede): " + ", ".join(
-            f"{k} {s['n_provider_mismatch']}" for k, s in plan.prior_stats.items()))
+            f"{k} {s['n_provider_mismatch']} (sağlayıcı adı yok: {s.get('n_provider_missing', 0)})"
+            for k, s in plan.prior_stats.items()))
+    caps = cfg.model_budget_usd or {}
+    if caps:
+        lines.append("Model alt tavanları (önceki segmentlerin maliyeti / tavan): " + "; ".join(
+            f"{k} {plan.prior_stats[k]['cost_usd']:.6f} / {cap:g} USD"
+            + (" — aşılmış, bu model koşulmaz" if plan.prior_stats[k]["cost_usd"] >= cap else "")
+            for k, cap in caps.items()))
+    if plan.model_version_reference and cfg.snapshot_version_models:
+        lines.append("Tarihli sürüm referansı (check_snapshot, model_version): " + ", ".join(
+            f"{k} {v}" for k, v in plan.model_version_reference.items()
+            if k in cfg.snapshot_version_models))
     calls: dict[tuple, dict[str, int]] = {(k, label): {} for label, keys in
                                           cfg.frame_models().items() for k in keys}
     rounds = cfg.params.rounds
@@ -4377,6 +4779,12 @@ def main(argv=None) -> int:
                 n_cells = s.get("cells", 6)
             gate = s.get("expected_cost_gate_usd")
             gate = None if is_placeholder(gate) else gate
+            try:
+                model_budget = resolve_model_keyed(s.get("model_budget_usd"), models,
+                                                   "model_budget_usd")
+            except ValueError as e:
+                print(f"HATA: {e}", file=sys.stderr)
+                return 1
             if s.get("frames") is not None:
                 try:
                     frame_models = resolve_frames(s["frames"], models)
@@ -4396,7 +4804,7 @@ def main(argv=None) -> int:
                     rationale=True if is_placeholder(rationale) else rationale, cards=cards)
                 print(format_design_report(
                     est, gate=gate, budget=s.get("budget_usd"), max_tokens=s.get("max_tokens"),
-                    description=(
+                    model_budget=model_budget, description=(
                         f"Tasarım: {n_cells} kart x stil hücresi, çerçeveler "
                         + "; ".join(f"{k}: {', '.join(v)}" for k, v in frame_models.items())
                         + f", koşul {'+'.join(conditions)}, kollar {'+'.join(arms)}, hücre "
@@ -4423,8 +4831,10 @@ def main(argv=None) -> int:
                           + ("GEÇER" if problem is None else
                              f"AŞILIYOR — gerçek koşu BAŞLAMAZ: {problem}"))
         guards = {k: s[k] for k in ("max_tokens", "request_timeout_s", "request_deadline_s",
-                                    "stall_timeout_s", "budget_usd", "expected_cost_gate_usd",
+                                    "stall_timeout_s", "budget_usd", "model_budget_usd",
+                                    "expected_cost_gate_usd",
                                     "invalid_rate_cap", "stop_on_length", "check_snapshot",
+                                    "snapshot_version_models",
                                     "seed_namespace", "parallel_units", "workers",
                                     "isolated_frame", "isolated_round_no", "comprehension")
                   if s.get(k) is not None}

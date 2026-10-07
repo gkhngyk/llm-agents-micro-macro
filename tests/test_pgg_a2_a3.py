@@ -223,14 +223,31 @@ class RowCounts(ResumeBase):
         self.assertNotIn("usage", rec[0])
         summary = self.summary_now()
         stats = summary["per_model"][GEMINI["gemini"]]
-        self.assertEqual((stats["n_deadline"], stats["n_cost_unknown"], stats["deadline_cost_usd"]),
-                         (1, 1, 0.0))
-        self.assertEqual((summary["n_deadline"], summary["n_cost_unknown"]), (1, 1))
+        # task #68: the unknown cost is in the budget as the max_tokens estimate
+        est = self.raw_events("pgg_deadline_cost_estimated")
+        self.assertEqual(len(est), 1)
+        usd = est[0]["estimated_cost_usd"]
+        price_in, price_out = pgg_game.pgg_cost.PRICES_USD_PER_M[GEMINI["gemini"]]
+        self.assertAlmostEqual(usd, (est[0]["prompt_tokens_estimated"] * price_in
+                                     + llm_client.DEFAULT_MAX_TOKENS * price_out) / 1e6, places=15)
+        self.assertEqual((est[0]["call"]["agent_id"], est[0]["cost_estimated"]),
+                         (hit[0]["agent_id"], True))
+        self.assertEqual((stats["n_deadline"], stats["n_cost_unknown"],
+                          stats["n_deadline_cost_estimated"]), (1, 1, 1))
+        self.assertAlmostEqual(stats["deadline_cost_usd"], usd, places=15)
+        self.assertAlmostEqual(stats["deadline_cost_estimated_usd"], usd, places=15)
+        self.assertAlmostEqual(stats["cost_usd"], 13 * 0.0001 + usd, places=12)
+        self.assertEqual((summary["n_deadline"], summary["n_cost_unknown"],
+                          summary["n_deadline_cost_estimated"]), (1, 1, 1))
+        self.assertEqual((hit[0]["cost_estimated"], hit[0]["n_deadline_cost_estimated"]), (True, 1))
+        self.assertEqual(sum(r["cost_estimated"] for r in rows), 1)
         self.assertEqual(stats["n_responses"], 13)                # not counted as a response
         plan = Engine(self.cfg1(request_deadline_s=0.2, stall_timeout_s=30),
                       llm=pgg_game.OfflineLLM()).resume_plan()
         st = plan.prior_stats["gemini"]
-        self.assertEqual((st["n_deadline"], st["n_cost_unknown"], st["n_transport"]), (1, 1, 0))
+        self.assertEqual((st["n_deadline"], st["n_cost_unknown"], st["n_transport"],
+                          st["n_deadline_cost_estimated"]), (1, 1, 0, 1))
+        self.assertAlmostEqual(plan.prior_cost_usd, 13 * 0.0001 + usd, places=12)
         self.assertEqual(plan.problems, [])
 
 
@@ -352,7 +369,8 @@ class DeadlineThroughHttpx(HttpPathMixin, LoggingTestBase):
                          ('{"action": 7}', "stop", "FakeProv", "vendor/model-1", 200))
         self.assertNotIn("response_parsed", cut)
         self.assertEqual(seen, [{"usage": cut["usage"], "cost_unknown": False,
-                                 "late_response": False, "n_bytes": len(body)}])
+                                 "late_response": False, "n_bytes": len(body),
+                                 "attempt": 0}])
         self.assertEqual(len(responses), 1)                 # only the accepted one
         self.assertEqual(ok["response_parsed"], {"action": 1})
         self.assertGreaterEqual(ok["elapsed_s"], 0)
@@ -428,7 +446,7 @@ class LateWithinGrace(LoggingTestBase):
         self.assertNotIn("usage", recs["deadline"])
         self.assertEqual(recs["late_response"]["usage"]["cost"], 0.5)
         self.assertEqual(seen, [{"usage": None, "cost_unknown": False, "late_response": True,
-                                 "n_bytes": 0}])
+                                 "n_bytes": 0, "attempt": 0}])
         self.assertEqual(len(late_seen), 1)
         # the engine adds nothing for the deadline record (the late response is counted)
         s = pgg_game._new_stats()

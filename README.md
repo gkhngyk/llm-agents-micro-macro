@@ -65,8 +65,15 @@ tested. Design choices are in the module docstring; the main ones:
   sent. Output: `<runs-dir>/<run>/<run>.jsonl`, one row per decision.
 
 - Run guards (off by default): `--budget-usd` (hard cap on accumulated
-  `usage.cost`, no new call once reached), `--invalid-rate-cap` (per model,
-  stops that model), `--stop-on-length`, `--check-snapshot`. `--cities` keeps
+  `usage.cost`, no new call once reached), config `model_budget_usd`
+  (per-model caps, e.g. mini-pilot mistral 3 / deepseek 2 / gpt 0.5 USD: a
+  model over its cap stops alone, reason and moment in the summary's
+  `model_stops`; counted across `--resume` segments), `--invalid-rate-cap`
+  (per model, stops that model), `--stop-on-length`, `--check-snapshot`
+  (config `snapshot_version_models`: compare the dated `model_version` of the
+  serving endpoint instead of the undated response model, e.g. Mistral; every
+  row logs `model_version`). The dry run prints mean and p95 per model and in
+  total; the expected-cost gate goes by the mean. `--cities` keeps
   only some cards of a file; `--parallel-units` runs several group games at
   once. Per-model cost and counts go to `<runs-dir>/<run>/<run>_summary.json`.
 - The pilot (prereg_pilot.md) is `configs/pilot.json`: cards
@@ -108,7 +115,11 @@ tested. Design choices are in the module docstring; the main ones:
   each read). Past it the attempt is abandoned, logged as `error_kind`
   "transport" / `error_subkind` "deadline" with what had arrived of the
   response (`response_partial`, usage and cost when known, else
-  `"cost_unknown": true`) and retried; a known cost counts in the budget. If
+  `"cost_unknown": true`) and retried; a known cost counts in the budget, an
+  unknown one as the worst case (prompt + `max_tokens` at listed prices;
+  `pgg_deadline_cost_estimated`, row `"cost_estimated": true`, summary
+  `n_deadline_cost_estimated`), replaced by the real cost if the response
+  still arrives. If
   the run's raw log gets no record for `--stall-timeout` seconds (default
   1800), the run stops with stop_reason "stalled" and can go on with
   `--resume`. `--resume` compares both with the previous segment and stops on
@@ -122,13 +133,16 @@ tested. Design choices are in the module docstring; the main ones:
   (`n_reasoning_capped`, `n_transport`, `n_deadline`, `n_cost_unknown`,
   `deadline_cost_usd`).
 - **Provider mismatch (A4):** a response of a pinned model from another
-  provider is not a decision. It is logged (`"provider_mismatch": true`,
-  content and cost), counts in the budget and is re-requested, within the
-  same attempt limit as other failures (4 attempts per call); the run stops
-  with stop_reason "provider_mismatch_limit" when that limit ends on a
-  mismatch. Counted as `n_provider_mismatch` per row, model, segment and in
-  total. This replaces the "stop at the first mismatch" rule of
-  prereg_pilot.md §8.2 item 5 (amendment written separately).
+  provider, or (task #68) without a provider name, is not a decision. It is
+  logged (`"provider_mismatch": true`, plus `"provider_missing": true`
+  without a name; content and cost), counts in the budget and is
+  re-requested, within the same attempt limit as other failures (4 attempts
+  per call); the run stops with stop_reason "provider_mismatch_limit" when
+  that limit ends on a mismatch. Counted as `n_provider_mismatch` (sub-count
+  `n_provider_missing`) per row, model, segment and in total. This replaces
+  the "stop at the first mismatch" rule of prereg_pilot.md §8.2 item 5
+  (amendment written separately). `n_provider_unknown` (no name, accepted)
+  now applies only to unpinned models; pilot v2 counted pinned ones there.
 - **Code version (A5):** every segment records `code_version` with a
   `git_commit`. In a git checkout it is HEAD; a code copy outside git (e.g.
   unpacked with git archive into `workspace/_kod_<sha>/`) needs

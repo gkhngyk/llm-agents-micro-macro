@@ -16,9 +16,13 @@ Contract (unchanged from the first study):
     and its usage / cost when known) and retried
   * a response whose reasoning reached max_tokens - REASONING_RESERVE_TOKENS
     is flagged "reasoning_capped" in the log; it is kept as it is
-  * with expected_provider, a response that names another provider is no
-    decision: it is logged (content and cost, "provider_mismatch": true),
-    billed and re-requested within the same attempt limit (max_retries)
+  * with expected_provider, a response that names another provider, or no
+    provider at all (task #68), is no decision: it is logged (content and
+    cost, "provider_mismatch": true; "provider_missing": true when no name
+    came), billed and re-requested within the same attempt limit (max_retries)
+  * every record with a response carries model_version: the model of the
+    endpoint that served it (openrouter_metadata), which holds the dated
+    version where the response's "model" has none (Mistral, task #59)
 
 The API key is read from ../.env (OPENROUTER_API_KEY), shared with the other
 projects in this folder; it is not copied here.
@@ -356,6 +360,26 @@ def _extra_field(resp, name: str):
     return value if isinstance(value, (str, dict, list)) else None
 
 
+def _selected_endpoint(meta) -> dict:
+    """openrouter_metadata.endpoints.available[selected=true] ({} when absent)."""
+    if not isinstance(meta, dict):
+        return {}
+    available = (meta.get("endpoints") or {}).get("available") or []
+    selected = [e for e in available if isinstance(e, dict) and e.get("selected") is True]
+    return selected[0] if selected else {}
+
+
+def _model_version(resp) -> str | None:
+    """Model of the endpoint that served the response (openrouter_metadata), else None.
+
+    tesisat_mistral_20261006: the response's "model" was
+    "mistralai/mistral-large-4-0", the selected endpoint's model
+    "mistralai/mistral-large-4-0-20261006" (the dated version).
+    """
+    value = _selected_endpoint(_extra_field(resp, "openrouter_metadata")).get("model")
+    return value if isinstance(value, str) else None
+
+
 def _provider_info(resp) -> tuple[str | None, str | None]:
     """(provider name, quantization) of the endpoint that served the response.
 
@@ -365,14 +389,8 @@ def _provider_info(resp) -> tuple[str | None, str | None]:
     is taken only when the response carries one (the documented schema has
     none); otherwise None.
     """
-    provider, quantization = None, None
-    meta = _extra_field(resp, "openrouter_metadata")
-    if isinstance(meta, dict):
-        available = (meta.get("endpoints") or {}).get("available") or []
-        selected = [e for e in available if isinstance(e, dict) and e.get("selected") is True]
-        if selected:
-            provider = selected[0].get("provider")
-            quantization = selected[0].get("quantization")
+    selected = _selected_endpoint(_extra_field(resp, "openrouter_metadata"))
+    provider, quantization = selected.get("provider"), selected.get("quantization")
     if provider is None:
         provider = _extra_field(resp, "provider")
     if quantization is None:
@@ -391,15 +409,17 @@ def same_provider(got: str, expected: str) -> bool:
 def _response_info(resp) -> dict:
     """What on_response hooks receive.
 
-    usage, finish_reason, model_snapshot, provider, provider_quantization and
-    provider_error (True for a provider-error response, see
-    _is_provider_error; such a response is retried, never parsed).
+    usage, finish_reason, model_snapshot, model_version (_model_version),
+    provider, provider_quantization and provider_error (True for a
+    provider-error response, see _is_provider_error; such a response is
+    retried, never parsed).
     """
     provider, quantization = _provider_info(resp)
     return {
         "usage": _usage_dict(getattr(resp, "usage", None)),
         "finish_reason": _finish_reason(resp),
         "model_snapshot": getattr(resp, "model", None),
+        "model_version": _model_version(resp),
         "provider": provider,
         "provider_quantization": quantization,
         "provider_error": _is_provider_error(resp),
@@ -459,7 +479,15 @@ class _ProviderErrorResponse(Exception):
 
 
 class _ProviderMismatch(Exception):
-    """A response from another provider than expected_provider: billed, never a decision."""
+    """A response from another provider than expected_provider: billed, never a decision.
+
+    missing: the response named no provider at all (task #68: handled as a
+    mismatch, counted apart as n_provider_missing).
+    """
+
+    def __init__(self, message: str, missing: bool = False):
+        super().__init__(message)
+        self.missing = missing
 
 
 class RequestDeadlineExceeded(Exception):
@@ -607,6 +635,8 @@ def _partial_record(partial: dict | None) -> tuple[dict, dict | None]:
         except (KeyError, IndexError, TypeError):
             pass
         rec["model_snapshot"] = data.get("model")
+        version = _selected_endpoint(data.get("openrouter_metadata")).get("model")
+        rec["model_version"] = version if isinstance(version, str) else None
         rec["provider"] = data.get("provider") if isinstance(data.get("provider"), str) else None
     if usage is not None:
         rec["usage"] = usage
@@ -699,8 +729,10 @@ def _call_llm_counted(
     An attempt past its deadline is logged with what had arrived
     (_partial_record: response_partial, and usage when the body was whole)
     and "cost_unknown"; on_deadline(info) then runs with info = {"usage"
-    (None = unknown), "cost_unknown", "late_response", "n_bytes"}. Such a
-    response is never used as a decision.
+    (None = unknown), "cost_unknown", "late_response", "n_bytes", "attempt"}.
+    Such a response is never used as a decision. on_late_response's info
+    carries "attempt" too, so that a caller can match a late response to the
+    deadline record of its attempt.
 
     attempt_counts: when a dict, "n_transport" (transport errors other than
     the deadline) and "n_deadline" (attempts past their deadline) are added
@@ -718,9 +750,14 @@ def _call_llm_counted(
     provider, passed to on_response with "provider_mismatch": true (it is
     billed) and re-requested within the same max_retries attempts as every
     other failure; attempt_counts["n_provider_mismatch"] counts it. A
-    response without a provider name is not a mismatch. When every attempt
-    fails, the RuntimeError carries last_error_kind (e.g.
-    "provider_mismatch").
+    response without a provider name is handled the same way (task #68; it
+    was accepted and only counted before): logged with "provider_mismatch":
+    true and "provider_missing": true, re-requested, counted in
+    n_provider_mismatch and in its sub-count n_provider_missing. When every
+    attempt fails, the RuntimeError carries last_error_kind (e.g.
+    "provider_mismatch") and last_provider_missing.
+
+    Every record with a response carries model_version (_model_version).
     """
     deadline_s = DEFAULT_REQUEST_DEADLINE_S if request_deadline_s is None else request_deadline_s
     if not deadline_s > 0:
@@ -771,12 +808,13 @@ def _call_llm_counted(
                 "response_raw": raw if isinstance(raw, str) else None,
                 "usage": _usage_dict(getattr(late_resp, "usage", None)),
                 "model_snapshot": getattr(late_resp, "model", None),
+                "model_version": _model_version(late_resp),
                 "finish_reason": _finish_reason(late_resp),
                 "reasoning_effort": effort_label,
                 "provider": provider_name, "provider_quantization": quantization, **tag,
             }, log_path)
             if on_late_response is not None:
-                on_late_response(_response_info(late_resp))
+                on_late_response({**_response_info(late_resp), "attempt": attempt})
         return log_late
 
     for attempt in range(max_retries):
@@ -794,7 +832,11 @@ def _call_llm_counted(
                     f"usage={_usage_dict(getattr(resp, 'usage', None))!r})")
             if expected_provider is not None:
                 got = _provider_info(resp)[0]
-                if got is not None and not same_provider(got, expected_provider):
+                if got is None:
+                    raise _ProviderMismatch(
+                        f"response without a provider name, expected {expected_provider!r}; "
+                        "not a decision, re-requested", missing=True)
+                if not same_provider(got, expected_provider):
                     raise _ProviderMismatch(
                         f"response from provider {got!r}, expected {expected_provider!r}; "
                         "not a decision, re-requested")
@@ -830,8 +872,10 @@ def _call_llm_counted(
             if resp is not None:
                 record["usage"] = _usage_dict(getattr(resp, "usage", None))
                 record["model_snapshot"] = getattr(resp, "model", None)
+                record["model_version"] = _model_version(resp)
                 record["provider"], record["provider_quantization"] = _provider_info(resp)
             mismatch = kind == "provider_mismatch"
+            missing = mismatch and e.missing
             if mismatch:
                 try:
                     content = resp.choices[0].message.content
@@ -840,20 +884,28 @@ def _call_llm_counted(
                 record.update(provider_mismatch=True, expected_provider=expected_provider,
                               response_raw=content if isinstance(content, str) else None,
                               reasoning=_reasoning_text(resp))
+                if missing:
+                    record["provider_missing"] = True
             if attempt_counts is not None and kind in ("transport", "provider_mismatch"):
                 name = ("n_provider_mismatch" if mismatch else
                         "n_deadline" if isinstance(e, RequestDeadlineExceeded) else "n_transport")
                 attempt_counts[name] = attempt_counts.get(name, 0) + 1
+                if missing:
+                    attempt_counts["n_provider_missing"] = (
+                        attempt_counts.get("n_provider_missing", 0) + 1)
             _append_log(record, log_path)
             if resp is not None and on_response is not None:
                 info = _response_info(resp)
                 if mismatch:
                     info["provider_mismatch"] = True
+                if missing:
+                    info["provider_missing"] = True
                 on_response(info)
             if isinstance(e, RequestDeadlineExceeded) and on_deadline is not None:
                 on_deadline({"usage": deadline_usage, "cost_unknown": record["cost_unknown"],
                              "late_response": record["late_response"],
-                             "n_bytes": record["response_partial_n_bytes"]})
+                             "n_bytes": record["response_partial_n_bytes"],
+                             "attempt": attempt})
             time.sleep(1.5 * (attempt + 1))
             continue
         elapsed = round(time.monotonic() - started, 3)
@@ -866,6 +918,7 @@ def _call_llm_counted(
             "response_raw": raw, "response_parsed": parsed,
             "usage": usage,
             "model_snapshot": getattr(resp, "model", None),
+            "model_version": _model_version(resp),
             "attempt": attempt, "degraded": degraded,
             "finish_reason": _finish_reason(resp),
             "reasoning_effort": effort_label,
@@ -877,6 +930,7 @@ def _call_llm_counted(
         if meta is not None:
             meta.update({
                 "model_snapshot": getattr(resp, "model", None),
+                "model_version": _model_version(resp),
                 "finish_reason": _finish_reason(resp),
                 "usage": usage,
                 "reasoning": _reasoning_text(resp),
@@ -897,11 +951,14 @@ def _call_llm_counted(
         final.update(error_subkind="deadline", request_deadline_s=deadline_s)
     if isinstance(last_err, _ProviderMismatch):
         final.update(expected_provider=expected_provider)
+        if last_err.missing:
+            final["provider_missing"] = True
     _append_log(final, log_path)
     err = RuntimeError(f"LLM call failed after {max_retries} attempts: {last_err}")
     err.n_parse_fail = n_parse_fail
     err.n_provider_error = n_provider_error
     err.last_error_kind = _error_kind(last_err)
+    err.last_provider_missing = isinstance(last_err, _ProviderMismatch) and last_err.missing
     raise err
 
 
@@ -996,8 +1053,9 @@ def call_llm_valid(
     "n_parse_fail" and "n_provider_error" (provider-error responses retried;
     a third separate count), "n_transport" (connection errors) and
     "n_deadline" (attempts past their deadline) and "n_provider_mismatch"
-    (responses from another provider than expected_provider, re-requested),
-    also when the call finally fails or a hook stops it.
+    (responses from another provider than expected_provider, or without a
+    provider name, re-requested) with its sub-count "n_provider_missing"
+    (those without a name), also when the call finally fails or a hook stops it.
 
     reasoning_effort, meta, provider, timeout, request_deadline_s, call_info,
     expected_provider, signed_numbers and the before_call / on_response /
@@ -1011,7 +1069,7 @@ def call_llm_valid(
     n_provider_error = 0
     if counts is not None:
         counts.update(n_invalid=0, n_parse_fail=0, n_provider_error=0, n_transport=0,
-                      n_deadline=0, n_provider_mismatch=0)
+                      n_deadline=0, n_provider_mismatch=0, n_provider_missing=0)
     for n_invalid in range(max_invalid + 1):
         try:
             call, n_pf, n_pe = _call_llm_counted(

@@ -70,7 +70,8 @@ class ReasoningEffortAndMeta(unittest.TestCase):
         out = self.valid(return_parse_fail=True, meta=meta)
         self.assertEqual(out, ({"action": 3}, 1, 0))
         self.assertGreaterEqual(meta.pop("elapsed_s"), 0)       # seconds of the accepted attempt
-        self.assertEqual(meta, {"model_snapshot": "snap-2", "finish_reason": "stop",
+        self.assertEqual(meta, {"model_snapshot": "snap-2", "model_version": None,
+                                "finish_reason": "stop",
                                 "usage": {"completion_tokens": 7}, "reasoning": "second",
                                 "reasoning_capped": None})
 
