@@ -670,7 +670,8 @@ class Comprehension(FrameBase):
         self.use(CostAPI())
         engine = Engine(self.one(arms=("group",)))
         engine.run(resume=True)
-        self.assertEqual([FakeAPI.parse(c)[0] for c in self.api.calls], ["contribute"] * 4)
+        # task #79: round 2's agent 1 was accepted before the cut and is reused
+        self.assertEqual([FakeAPI.parse(c)[0] for c in self.api.calls], ["contribute"] * 3)
         valid = engine.valid_rows()
         self.assertEqual(len([r for r in valid if r["step"] == "comprehension"]), 4)
         self.assertEqual(len(valid), 12)

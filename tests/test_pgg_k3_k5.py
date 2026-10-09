@@ -654,17 +654,21 @@ class CutResumeSamePrompts(K5Config, ResumeBase):
         self.assertEqual(sorted((r["arm"], r["round"]) for r in comp),
                          [("group", 1)] * 4 + [("isolated", None)])
 
+    # Task #79: rule-comprehension rows are written one by one: a cut in round
+    # 1's comprehension (at 3: agents 1-2 written, agent 3 cut off) asks agents
+    # 3-4 only; a cut in round 2 keeps the comprehension; a cut in the schedule
+    # after its comprehension row (at 22) does not ask it again (before #79:
+    # 4 / 0 / 1 group, 1 / 1 / 1 isolated).
+    AGAIN = ((3, {"group": 2, "isolated": 1}), (10, {"group": 0, "isolated": 1}),
+             (22, {"group": 0, "isolated": 0}))
+
     def test_abstract_v3(self):
-        # cut in round 1's comprehension (the unit starts again), in round 2 (goes
-        # on from round 2, comprehension kept), in the schedule (run again whole)
-        for at, again in ((3, {"group": 4, "isolated": 1}), (10, {"group": 0, "isolated": 1}),
-                          (22, {"group": 0, "isolated": 1})):
+        for at, again in self.AGAIN:
             with self.subTest(at=at):
                 self.check("abstract_v3", at, again)
 
     def test_story_A(self):
-        for at, again in ((3, {"group": 4, "isolated": 1}), (10, {"group": 0, "isolated": 1}),
-                          (22, {"group": 0, "isolated": 1})):
+        for at, again in self.AGAIN:
             with self.subTest(at=at):
                 self.check("story_A", at, again)
 

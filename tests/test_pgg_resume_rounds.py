@@ -61,9 +61,12 @@ def _decision_keys(calls) -> list:
 
 
 def _comparable(rows) -> dict:
-    """Rows by decision, without the fields that differ between runs (ts, segment)."""
+    """Rows by decision, without the fields that differ between runs (ts, segment;
+    task #79: answer_segment and reused, the segment that asked the decision)."""
     return {(r["unit"], r["step"], r["round"], r["agent_id"], r.get("others_mean")):
-            {k: v for k, v in r.items() if k not in ("ts", "segment", "elapsed_s")} for r in rows}
+            {k: v for k, v in r.items()
+             if k not in ("ts", "segment", "elapsed_s", "answer_segment", "reused")}
+            for r in rows}
 
 
 def _raw(path: Path) -> list[dict]:
@@ -116,7 +119,7 @@ class CutResumeEqualsUninterrupted(RoundBase):
     """The same mock answers (a function of the prompt) in both runs: equal prompts
     can only come from an equal history, equal rows only from equal prompts."""
 
-    def check(self, condition, at, n_calls, cut_round, n_discarded):
+    def check(self, condition, at, n_calls, cut_round, n_reused):
         a, b = self.dirs(f"A{condition}{at}", f"B{condition}{at}")
         api_a, rows_a = self.uninterrupted(a, conditions=(condition,))
         self.assertEqual(len(api_a.calls), n_calls)
@@ -125,10 +128,13 @@ class CutResumeEqualsUninterrupted(RoundBase):
         # prompts: the last call per decision equals the uninterrupted run's call
         both = api0.calls + api1.calls
         self.assertEqual(_prompts(both), _prompts(api_a.calls))
-        # decisions asked twice: only those of the cut round
+        # decisions asked twice: only the cut-off call (task #79: the answers
+        # accepted before it in its round are reused, not asked again)
         keys = _decision_keys(both)
         twice = {k for k in keys if keys.count(k) > 1}
-        self.assertTrue(twice and {k[2] for k in twice} == {cut_round}, twice)
+        self.assertEqual(len(twice), 1, twice)
+        self.assertEqual({k[2] for k in twice}, {cut_round})
+        self.assertEqual(len(api0.calls) + len(api1.calls), n_calls + 1)
         # segment 1 starts at the cut round: earlier rounds are not asked again
         self.assertEqual(min(k[2] for k in _decision_keys(api1.calls)), cut_round)
 
@@ -145,20 +151,24 @@ class CutResumeEqualsUninterrupted(RoundBase):
                 "rounds_kept": cut_round - 1, "kept_from_segments": [0]}])
         else:                                     # no row yet: the unit starts again
             self.assertEqual(summary["resume_points"], [])
-        self.assertEqual(summary["n_discarded"], n_discarded)
-        self.assertEqual(summary["per_model"]["v/m1"]["n_discarded"], n_discarded)
+        # task #79: the answers of the cut round are reused, none discarded
+        # (before #79 these were the n_discarded of the same cuts)
+        self.assertEqual(summary["n_discarded"], 0)
+        self.assertEqual(summary["per_model"]["v/m1"]["n_discarded"], 0)
+        self.assertEqual(summary["n_answers_reused"], n_reused)
+        self.assertEqual(sum(r["reused"] for r in valid), n_reused)
 
     def test_condition_N(self):
         # at = killed call; 4 calls per round
-        for at, cut_round, n_discarded in ((6, 2, 1), (9, 3, 0), (16, 4, 3)):
+        for at, cut_round, n_reused in ((6, 2, 1), (9, 3, 0), (16, 4, 3)):
             with self.subTest(at=at):
-                self.check("N", at, 16, cut_round, n_discarded)
+                self.check("N", at, 16, cut_round, n_reused)
 
     def test_condition_P_history_with_punishment(self):
         # 8 calls per round: 4 contribute, then 4 punish; rows only for whole rounds
-        for at, cut_round, n_discarded in ((7, 1, 6), (12, 2, 3), (21, 3, 4)):
+        for at, cut_round, n_reused in ((7, 1, 6), (12, 2, 3), (21, 3, 4)):
             with self.subTest(at=at):
-                self.check("P", at, 32, cut_round, n_discarded)
+                self.check("P", at, 32, cut_round, n_reused)
 
 
 # --------------------------------------------------------------------------
@@ -167,7 +177,14 @@ class CutResumeEqualsUninterrupted(RoundBase):
 
 class PartialRounds(RoundBase):
     def test_partly_written_round_is_superseded_and_played_again(self):
-        a, b = self.dirs("A", "B")
+        # task #79: with eq.accepted.jsonl the round's 4 answers are reused (no
+        # call); without it (a directory of the earlier code) as before #79
+        for journal in (True, False):
+            with self.subTest(journal=journal):
+                self.partly_written_round(journal)
+
+    def partly_written_round(self, journal):
+        a, b = self.dirs(f"A{journal}", f"B{journal}")
         _, rows_a = self.uninterrupted(a)
         # segment 0 cut off at call 13 (rounds 1-3 complete); then the last two
         # rows (round 3, agents 3 and 4) are lost, as if killed while writing
@@ -181,6 +198,8 @@ class PartialRounds(RoundBase):
         lines = results.read_text().splitlines(keepends=True)
         self.assertEqual(len(lines), 12)
         results.write_text("".join(lines[:10]))
+        if not journal:
+            (b / "eq" / "eq.accepted.jsonl").unlink()
         unit = Engine(self.gcfg(b), llm=pgg_game.OfflineLLM()).unit_specs()[0].label
 
         plan = Engine(self.gcfg(b), llm=pgg_game.OfflineLLM()).resume_plan()
@@ -188,24 +207,29 @@ class PartialRounds(RoundBase):
         self.assertEqual(plan.superseded, [{"unit": unit, "segment": 0, "rounds": [3],
                                             "n_rows": 2}])
         self.assertEqual(plan.resume_points[0]["from_round"], 3)
-        self.assertEqual([c["agent_id"] for _, _, c in plan.unmarked_discarded], [3, 4])
+        self.assertEqual([c["agent_id"] for _, _, c in plan.unmarked_discarded],
+                         [] if journal else [3, 4])
+        self.assertEqual(sorted(plan.reuse.get(unit, {})),
+                         [("contribute", 3, a, None) for a in range(1, 5)] if journal else [])
 
         api1 = CostAPI(content_fn=_history_reply)
         self.use(api1)
         engine = Engine(self.gcfg(b))
         engine.run(resume=True)
-        self.assertEqual(len(api1.calls), 8)                      # rounds 3 and 4 only
+        # round 4 only (round 3 reused) / rounds 3 and 4
+        self.assertEqual(len(api1.calls), 4 if journal else 8)
         self.assertEqual(_comparable(engine.valid_rows()), _comparable(rows_a))
         summary = json.loads((b / "eq" / "eq_summary.json").read_text())
         self.assertEqual(summary["superseded_rows"], plan.superseded)
         self.assertEqual(summary["n_superseded_rows"], 2)
-        self.assertEqual(summary["n_discarded"], 2)
+        self.assertEqual(summary["n_discarded"], 0 if journal else 2)
+        self.assertEqual(summary["n_answers_reused"], 4 if journal else 0)
         found = [e for e in _raw(b / "eq" / "raw_calls.jsonl")
                  if e.get("event") == "pgg_discarded"]
         self.assertEqual([(e["reason"], e["segment"], e["call"]["segment"], e["call"]["round"],
                            e["call"]["agent_id"], e["discarded"]) for e in found],
-                         [("found_on_resume", 1, 0, 3, 3, True),
-                          ("found_on_resume", 1, 0, 3, 4, True)])
+                         [] if journal else [("found_on_resume", 1, 0, 3, 3, True),
+                                             ("found_on_resume", 1, 0, 3, 4, True)])
 
     def test_last_row_cut_in_the_middle(self):
         a, b = self.dirs("A", "B")
@@ -233,29 +257,55 @@ class PartialRounds(RoundBase):
         self.assertEqual(_comparable(engine.valid_rows()), _comparable(rows_a))
         summary = json.loads((b / "eq" / "eq_summary.json").read_text())
         self.assertEqual(summary["n_truncated_lines"], 1)
-        self.assertEqual(summary["n_discarded"], 1)               # the cut row's answer
+        # task #79: the cut row's answer (and its round's) is reused, not discarded
+        self.assertEqual(summary["n_discarded"], 0)
+        self.assertEqual(summary["n_answers_reused"], 4)
+        self.assertEqual(len(api1.calls), 4)
         self.assertEqual(results.read_bytes()[:last_start + 40], data[:last_start + 40])
 
-    def test_partly_written_schedule_runs_again_whole(self):
+    def test_partly_written_schedule_asks_only_the_missing_values(self):
+        # task #79: isolated rows stand alone. The last schedule loses 2 of its 5
+        # rows: with their answers in r1.accepted.jsonl no call; without them
+        # (journal records removed) exactly the 2 missing values are asked; the
+        # 3 rows that stayed are kept (pending, then accepted), not superseded
+        for journal in (True, False):
+            with self.subTest(journal=journal):
+                self.partly_written_schedule(journal)
+
+    def partly_written_schedule(self, journal):
+        runs = self.tmp / f"runs{journal}"
+        runs.mkdir()
+        results = runs / "r1" / "r1.jsonl"
         self.use(CostAPI())
-        Engine(self.rcfg()).run()
-        rows = _rows(self.results)
+        Engine(self.rcfg(runs_dir=runs)).run()
+        rows = _rows(results)
         iso = [i for i, r in enumerate(rows) if r["arm"] == "isolated"]
         drop = set(iso[-2:])                       # the last schedule loses 2 of its 5 rows
         unit = rows[iso[-1]]["unit"]
-        self.results.write_text("".join(json.dumps(r) + "\n" for i, r in enumerate(rows)
-                                        if i not in drop))
-        engine, api = self.resume()
+        lost = {rows[i]["others_mean"] for i in drop}
+        results.write_text("".join(json.dumps(r) + "\n" for i, r in enumerate(rows)
+                                   if i not in drop))
+        if not journal:
+            jpath = runs / "r1" / "r1.accepted.jsonl"
+            kept = [x for x in _raw(jpath) if not (x["unit"] == unit and x["key"][3] in lost)]
+            jpath.write_text("".join(json.dumps(x) + "\n" for x in kept))
+        engine, api = self.resume(runs_dir=runs)
         engine.run(resume=True)
-        self.assertEqual(len(api.calls), 5)
-        summary = self.summary_now()
-        self.assertEqual(summary["superseded_rows"], [{"unit": unit, "segment": 0, "rounds": None,
-                                                       "n_rows": 3}])
+        self.assertEqual(sorted(FakeAPI.parse(c)[3] for c in api.calls),
+                         [] if journal else sorted(lost))
+        summary = json.loads((runs / "r1" / "r1_summary.json").read_text())
+        self.assertEqual(summary["superseded_rows"], [])
         self.assertEqual(summary["resume_points"], [{"unit": unit, "from_round": None,
                                                      "rounds_kept": 0, "kept_from_segments": []}])
-        self.assertEqual(summary["n_discarded"], 2)
+        self.assertEqual(summary["n_discarded"], 0 if journal else 2)
+        self.assertEqual(summary["n_answers_reused"], 2 if journal else 0)
         self.assertEqual(summary["units"]["n_complete"], 8)
-        self.assertEqual(len(engine.valid_rows()), 52)
+        valid = engine.valid_rows()
+        self.assertEqual(len(valid), 52)
+        self.assertEqual(sorted((r["segment"], r["others_mean"]) for r in valid
+                                if r["unit"] == unit),
+                         sorted([(0, x) for x in (0, 5, 10, 15, 20) if x not in lost]
+                                + [(1, x) for x in lost]))
 
     def test_rows_of_the_code_before_A1_rerun_from_round_1(self):
         """pilot_v2_20261005: a partial unit was run again from round 1 in a later segment."""
@@ -300,8 +350,39 @@ class PartialRounds(RoundBase):
 # --------------------------------------------------------------------------
 
 class Discarded(RoundBase):
-    def test_answer_of_a_given_up_round_is_marked_live(self):
+    def test_answer_of_a_given_up_round_is_journaled_not_discarded(self):
+        """Task #79: the accepted answer of a round given up is in r1.accepted.jsonl and
+        reused; only an answer that could not be journaled is discarded (as before)."""
         first, _ = self.interrupted_run(cost=0.01)
+        u2 = first.unit_specs()[2]
+        slug = MODELS2[u2.model_key]
+        self.assertEqual(self.raw_events("pgg_discarded"), [])
+        self.assertEqual(self.summary_now()["per_model"][slug]["n_discarded"], 0)
+        self.assertEqual(self.summary_now()["accepted_answers"]["n_pending"], 1)
+        # every raw-log record of a decision carries its "call"
+        success = [r for r in _raw(self.raw) if "response_parsed" in r and "event" not in r]
+        self.assertEqual(len(success), 21)
+        self.assertTrue(all(r["call"]["segment"] == 0 for r in success))
+        # the response stays in the cost: 21 responses x 0.01
+        plan = Engine(self.rcfg(), llm=pgg_game.OfflineLLM()).resume_plan()
+        self.assertAlmostEqual(plan.prior_cost_usd, 0.21, places=9)
+        self.assertEqual(plan.unmarked_discarded, [])
+        self.assertEqual(list(plan.reuse), [u2.label])
+        engine, api = self.resume(cost=0.01)
+        engine.run(resume=True)
+        self.assertEqual(len(api.calls), 31)
+        summary = self.summary_now()
+        self.assertEqual(summary["n_discarded"], 0)
+        self.assertEqual([s["n_answers_reused"] for s in summary["segments"]], [0, 1])
+        self.assertEqual(summary["accepted_answers"]["n_pending"], 0)
+        reused = self.raw_events("pgg_answer_reused")
+        self.assertEqual([(e["segment"], e["answer_segment"], e["call"]) for e in reused],
+                         [(1, 0, {"segment": 0, "step": "contribute", "round": 2,
+                                  "agent_id": 1, "others_mean": None})])
+
+    def test_answer_that_could_not_be_journaled_is_marked_live(self):
+        with mock.patch.object(Engine, "_journal", return_value=False):
+            first, _ = self.interrupted_run(cost=0.01)
         u2 = first.unit_specs()[2]
         events = self.raw_events("pgg_discarded")
         self.assertEqual(len(events), 1)
@@ -314,16 +395,9 @@ class Discarded(RoundBase):
         slug = MODELS2[u2.model_key]
         self.assertEqual(summary["per_model"][slug]["n_discarded"], 1)
         self.assertEqual(summary["segments"][-1]["n_discarded"], 1)
-        # every raw-log record of a decision carries its "call"
-        success = [r for r in _raw(self.raw) if "response_parsed" in r and "event" not in r]
-        self.assertEqual(len(success), 21)
-        self.assertTrue(all(r["call"]["segment"] == 0 for r in success))
-        # the discarded response stays in the cost: 21 responses x 0.01
-        plan = Engine(self.rcfg(), llm=pgg_game.OfflineLLM()).resume_plan()
-        self.assertAlmostEqual(plan.prior_cost_usd, 0.21, places=9)
-        self.assertEqual(plan.unmarked_discarded, [])
-        engine, _ = self.resume(cost=0.01)
+        engine, api = self.resume(cost=0.01)
         engine.run(resume=True)
+        self.assertEqual(len(api.calls), 32)
         summary = self.summary_now()
         self.assertEqual(summary["n_discarded"], 1)
         self.assertEqual(summary["per_model"][slug]["n_discarded"], 1)
@@ -332,6 +406,9 @@ class Discarded(RoundBase):
 
     def test_killed_process_left_no_mark_found_on_resume(self):
         self.interrupted_run()
+        # a directory of the code before #79: no accepted answers file, so the
+        # answer without a row is lost; the kill left no pgg_discarded mark
+        (self.run_dir / "r1.accepted.jsonl").unlink()
         kept = [r for r in _raw(self.raw) if r.get("event") != "pgg_discarded"]
         self.raw.write_text("".join(json.dumps(r) + "\n" for r in kept))
         plan = Engine(self.rcfg(), llm=pgg_game.OfflineLLM()).resume_plan()
@@ -347,6 +424,7 @@ class Discarded(RoundBase):
 
     def test_raw_log_of_the_code_before_A1_is_matched_by_prompt(self):
         self.interrupted_run()
+        (self.run_dir / "r1.accepted.jsonl").unlink()          # no such file before #79
         old = []
         for r in _raw(self.raw):
             if r.get("event") == "pgg_discarded":
@@ -390,6 +468,30 @@ class Discarded(RoundBase):
             engine.run()
         api.release()                                # the round completes, the file is closed
         engine._wait_pools()
+        # task #79: the 4 answers are in r1.accepted.jsonl: not discarded, the
+        # next segment writes their rows without a call
+        self.assertEqual(self.raw_events("pgg_discarded"), [])
+        engine2, api2 = self.resume(request_deadline_s=60, stall_timeout_s=0.3)
+        engine2.run(resume=True)
+        self.assertEqual(len(api2.calls), 8 * 3 + 5 * 4 - 4)
+        summary = self.summary_now()
+        self.assertEqual(summary["n_discarded"], 0)
+        self.assertEqual(summary["n_answers_reused"], 4)
+        self.assertEqual(len(self.raw_events("pgg_discarded")), 0)
+        self.assertEqual(summary["units"]["n_remaining"], 0)
+
+    def test_answers_whose_rows_cannot_be_written_without_journal(self):
+        """As before #79 when the answers could not be journaled: discarded."""
+        api = HangAPI(12)
+        self.use(api)
+        self.addCleanup(_until, lambda: llm_client.abandoned_attempts_alive() == 0)
+        self.addCleanup(api.release)
+        with mock.patch.object(Engine, "_journal", return_value=False):
+            engine = Engine(self.rcfg(request_deadline_s=60, stall_timeout_s=0.3))
+            with self.assertRaisesRegex(RunStopped, "stalled"):
+                engine.run()
+            api.release()
+            engine._wait_pools()
         events = self.raw_events("pgg_discarded")
         self.assertEqual([(e["reason"], e["call"]["agent_id"]) for e in events],
                          [("row_not_written", a) for a in range(1, 5)])
@@ -427,8 +529,9 @@ class CutOffLastLine(RoundBase):
                            summary["n_truncated_lines"], len(engine.valid_rows())))
             self.assertEqual(summary["truncated_lines"][0]["line"], 21)
             self.assertEqual(summary["truncated_lines"][0]["n_bytes"], len(self.HALF))
-        # 20 rows + the cut line + 32 new rows; then nothing left to do
-        self.assertEqual(counts, [(32, 53, 1, 52), (0, 53, 1, 52), (0, 53, 1, 52)])
+        # 20 rows + the cut line + 32 new rows (31 calls: one answer reused,
+        # task #79); then nothing left to do
+        self.assertEqual(counts, [(31, 53, 1, 52), (0, 53, 1, 52), (0, 53, 1, 52)])
         self.assertEqual(self.results.read_bytes()[:len(before)], before)   # still in the file
         recs = self.partial_records()
         self.assertEqual(len(recs), 1)                                      # recorded once
@@ -587,7 +690,7 @@ class RunLock(RoundBase):
         self.assertEqual((plan.lock["state"], plan.lock["pid"]), ("stale", child.pid))
         engine, api = self.resume()
         engine.run(resume=True)
-        self.assertEqual(len(api.calls), 32)
+        self.assertEqual(len(api.calls), 31)          # + 1 answer reused (task #79)
         summary = self.summary_now()
         self.assertEqual(summary["lock"]["stale_lock"]["pid"], child.pid)
         taken = self.raw_events("pgg_stale_lock_taken_over")

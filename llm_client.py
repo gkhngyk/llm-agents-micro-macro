@@ -24,6 +24,10 @@ Contract (unchanged from the first study):
   * every record with a response carries model_version: the model of the
     endpoint that served it (openrouter_metadata), which holds the dated
     version where the response's "model" has none (Mistral, task #59)
+  * with attempt_log (task #79), every attempt is logged as an
+    "attempt_started" event BEFORE its request is sent, with an attempt_id
+    that the attempt's result record (success or failed attempt, and a late
+    response) carries too: an attempt without a result was cut off in flight
 
 The API key is read from ../.env (OPENROUTER_API_KEY), shared with the other
 projects in this folder; it is not copied here.
@@ -36,6 +40,7 @@ import os
 import re
 import threading
 import time
+import uuid
 import zlib
 from pathlib import Path
 
@@ -712,6 +717,8 @@ def _call_llm_counted(
     expected_provider: str | None = None,
     signed_numbers: bool = False,
     reasoning_cap_rule: str = DEFAULT_REASONING_CAP_RULE,
+    attempt_log: dict | None = None,
+    on_attempt=None,
 ) -> tuple[dict, int, int]:
     """call_llm that also returns the parse failures and provider errors it retried.
 
@@ -788,6 +795,20 @@ def _call_llm_counted(
     "provider_mismatch") and last_provider_missing.
 
     Every record with a response carries model_version (_model_version).
+
+    attempt_log (task #79): when a dict, every attempt (after before_call,
+    before the request is sent) is logged as {"event": "attempt_started",
+    "ts", "model", "session_id", **attempt_log, "attempt", "attempt_seq",
+    "attempt_id", "call"}; attempt_id is new per attempt (uuid4) and the
+    attempt's result record (its success record or its failed-attempt
+    record) and a late_response of it carry the same attempt_id. attempt_seq
+    is the attempt's number over the whole decision (1, 2, ...;
+    attempt_counts["n_attempts"]), "attempt" the number within this request
+    as in every other record. on_attempt(phase, record) then runs with phase
+    "started" (after the event is logged) and "finished" (after the result
+    record is logged). An attempt_started without a result record is an
+    attempt cut off in flight (the process was killed). Without attempt_log
+    nothing of this is logged (the records are as before).
     """
     deadline_s = DEFAULT_REQUEST_DEADLINE_S if request_deadline_s is None else request_deadline_s
     if not deadline_s > 0:
@@ -824,7 +845,7 @@ def _call_llm_counted(
             extra_body=body,
         )
 
-    def late(attempt):
+    def late(attempt, atag):
         def log_late(late_resp, reason):
             provider_name, quantization = _provider_info(late_resp)
             try:
@@ -842,20 +863,38 @@ def _call_llm_counted(
                 "finish_reason": _finish_reason(late_resp),
                 "reasoning_effort": effort_label,
                 "provider": provider_name, "provider_quantization": quantization, **tag,
+                **atag,
             }, log_path)
             if on_late_response is not None:
                 on_late_response({**_response_info(late_resp), "attempt": attempt})
         return log_late
 
+    def attempt_finished(record):
+        if attempt_log is not None and on_attempt is not None:
+            on_attempt("finished", record)
+
     for attempt in range(max_retries):
         resp = None
         if before_call is not None:
             before_call()
+        atag = {}                  # attempt_id of this attempt (attempt_log only)
+        if attempt_log is not None:
+            # task #79: written before the request goes out
+            seq = None
+            if attempt_counts is not None:
+                attempt_counts["n_attempts"] = seq = attempt_counts.get("n_attempts", 0) + 1
+            atag = {"attempt_id": uuid.uuid4().hex}
+            started_record = {"ts": time.time(), "event": "attempt_started", "model": model,
+                              "session_id": session_id, **attempt_log, "attempt": attempt,
+                              "attempt_seq": seq, **atag, **tag}
+            _append_log(started_record, log_path)
+            if on_attempt is not None:
+                on_attempt("started", started_record)
         started = time.monotonic()
         # Only the API call and the parsing are inside the try: a failing log
         # write must not trigger a retry (it would bill the same call again).
         try:
-            resp = _call_with_deadline(create, deadline_s, on_late=late(attempt))
+            resp = _call_with_deadline(create, deadline_s, on_late=late(attempt, atag))
             if _is_provider_error(resp):
                 raise _ProviderErrorResponse(
                     f"provider error response (finish_reason={_finish_reason(resp)!r}, "
@@ -888,7 +927,7 @@ def _call_llm_counted(
                 "error_type": type(e).__name__, "error_kind": kind,
                 "error": str(e), "attempt": attempt, "retrying": True,
                 "finish_reason": _finish_reason(resp),
-                "reasoning_effort": effort_label, **tag,
+                "reasoning_effort": effort_label, **tag, **atag,
             }
             if isinstance(e, openai.APIStatusError):
                 record["status_code"] = e.status_code
@@ -924,6 +963,7 @@ def _call_llm_counted(
                     attempt_counts["n_provider_missing"] = (
                         attempt_counts.get("n_provider_missing", 0) + 1)
             _append_log(record, log_path)
+            attempt_finished(record)
             if resp is not None and on_response is not None:
                 info = _response_info(resp)
                 if mismatch:
@@ -942,7 +982,7 @@ def _call_llm_counted(
         usage = _usage_dict(getattr(resp, "usage", None))
         capped = reasoning_capped(usage, max_tokens, reasoning_cap_rule)
         provider_name, quantization = _provider_info(resp)
-        _append_log({
+        success = {
             "ts": time.time(), "model": model, "session_id": session_id,
             "temperature": temperature_label(temperature), "messages": messages,
             "response_raw": raw, "response_parsed": parsed,
@@ -954,8 +994,10 @@ def _call_llm_counted(
             "reasoning_effort": effort_label,
             "provider": provider_name, "provider_quantization": quantization,
             "elapsed_s": elapsed, "max_tokens": max_tokens, "reasoning_capped": capped,
-            "reasoning_cap_rule": reasoning_cap_rule, **tag,
-        }, log_path)
+            "reasoning_cap_rule": reasoning_cap_rule, **tag, **atag,
+        }
+        _append_log(success, log_path)
+        attempt_finished(success)
         if on_response is not None:
             on_response(_response_info(resp))
         if meta is not None:
@@ -1072,6 +1114,8 @@ def call_llm_valid(
     expected_provider: str | None = None,
     signed_numbers: bool = False,
     reasoning_cap_rule: str = DEFAULT_REASONING_CAP_RULE,
+    attempt_log: dict | None = None,
+    on_attempt=None,
 ) -> tuple[dict, int] | tuple[dict, int, int]:
     """call_llm, re-requesting payloads for which is_valid(parsed) is False.
 
@@ -1094,6 +1138,11 @@ def call_llm_valid(
     on_late_response / on_deadline hooks are passed through to
     the underlying call; meta ends up holding the metadata of the accepted
     (last) response.
+
+    attempt_log / on_attempt (task #79): passed through, attempt_log with
+    "request" = the number of this request (0, then 1, 2, ... for every
+    re-request of an invalid payload); counts then also holds "n_attempts"
+    (every attempt started for the decision).
     """
     log_path = LOG_PATH
     call: dict = {}
@@ -1113,7 +1162,10 @@ def call_llm_valid(
                 on_late_response=on_late_response, call_info=call_info,
                 on_deadline=on_deadline, attempt_counts=counts,
                 expected_provider=expected_provider, signed_numbers=signed_numbers,
-                reasoning_cap_rule=reasoning_cap_rule)
+                reasoning_cap_rule=reasoning_cap_rule,
+                attempt_log=(None if attempt_log is None
+                             else {**attempt_log, "request": n_invalid}),
+                on_attempt=on_attempt)
         except RuntimeError as e:
             if counts is not None:
                 counts.update(

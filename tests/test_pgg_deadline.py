@@ -321,7 +321,9 @@ class StallWatchdog(ResumeBase):
         self.assertIsNone(summary["stop_reason"])
         self.assertEqual(summary["units"]["n_remaining"], 0)
         self.assertEqual([s["stop_reason"] for s in summary["segments"]], ["stalled", None])
-        self.assertEqual(len(api2.calls), 8 * 3 + 5 * 4)       # units 1-7
+        # units 1-7; task #79: unit 1's round 1 (its answers arrived after the
+        # stall and were journaled, no row) is reused: 4 calls fewer
+        self.assertEqual(len(api2.calls), 8 * 3 + 5 * 4 - 4)
 
     def test_deadline_below_the_stall_timeout_retries_without_stalling(self):
         api = self.hang_api(at=3)

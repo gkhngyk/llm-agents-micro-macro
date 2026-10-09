@@ -1782,7 +1782,12 @@ def _is_comprehension(rec: dict) -> bool:
 
 
 def _call_of_row(row: dict) -> tuple:
-    return _call_key(row.get("segment", 0), row.get("session_id"),
+    """_call_key of the call whose answer a row holds.
+
+    A row written from a reused answer (task #79) is in the segment that
+    wrote it; its call is of answer_segment, the segment that asked it.
+    """
+    return _call_key(row.get("answer_segment", row.get("segment", 0)), row.get("session_id"),
                      dict(zip(("step", "round", "agent_id", "others_mean"), _row_key(row))))
 
 
@@ -1840,7 +1845,13 @@ def _new_stats() -> dict:
     # completion_tokens: sums over every response with usage, kept apart;
     # n_reasoning_over_completion: responses whose reasoning_tokens exceed
     # their completion_tokens (cost is priced from completion_tokens).
+    # Task #79: n_answers_reused: accepted answers of an earlier segment taken
+    # from <run>.accepted.jsonl instead of a call (pgg_answer_reused); the
+    # attempts logged as "attempt_started" and those with a result record
+    # (same attempt_id), in total and per step (orphaned = started - finished).
     return {"cost_usd": 0.0, "n_responses": 0, "n_accepted": 0,
+            "n_answers_reused": 0, "n_attempt_started": 0, "n_attempt_finished": 0,
+            "attempt_started_by_step": {}, "attempt_finished_by_step": {},
             "n_comp_invalid": 0, "n_comp_parse_fail": 0, "n_comp_missing": 0,
             "reasoning_tokens": 0, "completion_tokens": 0, "n_reasoning_over_completion": 0,
             "n_invalid": 0, "n_parse_fail": 0, "n_provider_error": 0,
@@ -1853,12 +1864,50 @@ def _new_stats() -> dict:
             "n_model_version_unknown": 0}
 
 
-# Totals of the summary and of each segment entry (A2, A3, A4, task #68, #73).
+# Totals of the summary and of each segment entry (A2, A3, A4, task #68, #73, #79).
 _SEGMENT_TOTALS = ("n_reasoning_capped", "n_transport", "n_deadline", "n_cost_unknown",
                    "deadline_cost_usd", "n_provider_mismatch", "n_provider_missing",
                    "n_deadline_cost_estimated", "deadline_cost_estimated_usd",
                    "n_comp_invalid", "n_comp_parse_fail", "n_comp_missing",
-                   "reasoning_tokens", "completion_tokens", "n_reasoning_over_completion")
+                   "reasoning_tokens", "completion_tokens", "n_reasoning_over_completion",
+                   "n_answers_reused", "n_attempt_started", "n_attempt_finished")
+
+# Rows of a group round that need the whole round (their earnings): written
+# together when the round is complete, and accepted only from one segment.
+# The other rows (rule comprehension, isolated) stand alone (task #79).
+JOINT_STEPS = ("contribute", "punish")
+
+
+def _attempt_totals(stats: list[dict]) -> dict:
+    """n_attempt_started / _finished / _orphaned summed over counters (task #79)."""
+    started = sum(s.get("n_attempt_started", 0) for s in stats)
+    finished = sum(s.get("n_attempt_finished", 0) for s in stats)
+    return {"n_attempt_started": started, "n_attempt_finished": finished,
+            "n_attempt_orphaned": started - finished}
+
+
+def _attempt_table(per_model: dict) -> dict:
+    """{model: {step: {n_attempt_started, n_attempt_finished, n_attempt_orphaned}}} (task #79)."""
+    out = {}
+    for model, s in per_model.items():
+        started = s.get("attempt_started_by_step") or {}
+        finished = s.get("attempt_finished_by_step") or {}
+        out[model] = {step: {"n_attempt_started": started.get(step, 0),
+                             "n_attempt_finished": finished.get(step, 0),
+                             "n_attempt_orphaned": started.get(step, 0) - finished.get(step, 0)}
+                      for step in sorted(set(started) | set(finished))}
+    return out
+
+
+def prompt_sha256(model: str, messages, schema) -> str:
+    """sha256 of what one decision call sends: model, messages and schema (task #79).
+
+    llm_client builds the request from exactly these (augment_with_schema);
+    an answer is reused on resume only for the same value.
+    """
+    text = json.dumps({"model": model, "messages": messages, "schema": schema},
+                      ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _merge_stats(*parts: dict) -> dict:
@@ -1939,6 +1988,14 @@ class ResumePlan:
     # model key -> model_version of its first response in the earlier
     # segments (check_snapshot of snapshot_version_models, task #68)
     model_version_reference: dict = field(default_factory=dict)
+    # task #79: unit label -> {row key: <run>.accepted.jsonl record} of the
+    # accepted answers without a row that this segment reuses (no call);
+    # unit label -> row keys of the first round not complete that already
+    # have their row (rule comprehension, isolated: not asked again);
+    # what was found in <run>.accepted.jsonl (Engine._scan_journal)
+    reuse: dict = field(default_factory=dict)
+    rows_done: dict = field(default_factory=dict)
+    journal: dict = field(default_factory=dict)
 
     @property
     def prior_cost_usd(self) -> float:
@@ -1965,6 +2022,16 @@ class Answer:
     # task #73: a rule-comprehension call given up after max_invalid ("max_invalid")
     # or after its attempts all failed to parse ("parse_fail"); parsed is {}
     comp_missing: str | None = None
+    # task #79: in <run>.accepted.jsonl (a later segment can reuse it); taken
+    # from there instead of a call (its call is of an earlier segment)
+    journaled: bool = False
+    reused: bool = False
+
+
+# Fields of an Answer in a <run>.accepted.jsonl record (task #79).
+_ANSWER_FIELDS = ("parsed", "n_invalid", "n_parse_fail", "meta", "n_provider_error", "call",
+                  "n_transport", "n_deadline", "n_provider_mismatch", "n_provider_missing",
+                  "n_deadline_cost_estimated", "comp_missing")
 
 
 class _Pending:
@@ -1973,7 +2040,10 @@ class _Pending:
     An answer that does not become a row is discarded (Engine._discard): the
     round was given up (close() before its rows were written: a stop, a
     signal, an abort of another call), the answer arrived after that (a call
-    still in flight), or its row could not be written.
+    still in flight), or its row could not be written. Task #79: only answers
+    that are not in <run>.accepted.jsonl (its write failed, or no run
+    directory) are tracked here; a journaled answer is never discarded for
+    these reasons, a later segment writes its row without a call.
     """
 
     def __init__(self, engine: "Engine", model_key: str, session_id: str):
@@ -1987,6 +2057,8 @@ class _Pending:
         return _call_key(call.get("segment"), "", call)
 
     def add(self, ans: Answer) -> Answer:
+        if ans.journaled:
+            return ans
         with self.lock:
             if not self.closed:
                 self.items[self._id(ans.call)] = ans.call
@@ -1997,7 +2069,7 @@ class _Pending:
     def done(self, ans: Answer, written: bool) -> None:
         with self.lock:
             self.items.pop(self._id(ans.call), None)
-        if not written:
+        if not written and not ans.journaled:
             self.engine._discard(self.model_key, self.session_id, ans.call, "row_not_written")
 
     def close(self) -> None:
@@ -2058,6 +2130,13 @@ class Engine:
         self._raise_on_signal = False
         self._pools: list[ThreadPoolExecutor] = []
         self._finalizing = False
+        # Task #79: <run>.accepted.jsonl while run() runs (None: answers are not
+        # journaled); on resume, the answers to reuse and the rows already
+        # written of the first round not complete, per unit label.
+        self._journal_path: Path | None = None
+        self._journal_lock = threading.Lock()
+        self._reuse: dict[str, dict] = {}
+        self._rows_done: dict[str, set] = {}
 
     # -- seeds / output ----------------------------------------------------
 
@@ -2086,14 +2165,100 @@ class Engine:
         Counted in n_discarded of this segment when the call is of this
         segment (found_on_resume events are of earlier segments, already
         counted from the raw log). Its cost was counted when it arrived.
+        Task #79: a journaled answer of an earlier segment that cannot be
+        reused ("prompt_changed") was counted as reusable by resume_plan; it
+        is counted now with the earlier segments.
         """
         if call.get("segment") == self.segment:
             with self._lock:
                 self.stats[model_key]["n_discarded"] += 1
+        elif reason == "prompt_changed":
+            with self._lock:
+                self.prior_stats[model_key]["n_discarded"] += 1
         self._log({"ts": time.time(), "event": "pgg_discarded", "discarded": True,
                    "run": self.cfg.run, "segment": self.segment,
                    "model": self.cfg.models[model_key], "session_id": session_id,
                    "call": call, "reason": reason})
+
+    # -- accepted answers (task #79) ---------------------------------------
+
+    def _journal_file(self) -> Path:
+        """<run>.accepted.jsonl: every accepted answer, written when it is accepted."""
+        return self.cfg.output_dir() / f"{self.cfg.run}.accepted.jsonl"
+
+    def _journal(self, model_key: str, session_id: str, unit: str | None, ans: Answer,
+                 sha: str) -> bool:
+        """Append an accepted answer to <run>.accepted.jsonl; True when it is on disk.
+
+        One record per answer, flushed and fsynced before the answer is used,
+        so that a later segment can write its row without a call. A failed
+        write is logged ("pgg_journal_write_failed"); the answer is then
+        tracked as before (_Pending: discarded when it does not become a row).
+        """
+        path = self._journal_path
+        if path is None or ans.call is None:
+            return False
+        call = ans.call
+        rec = {"ts": time.time(), "run": self.cfg.run, "segment": call.get("segment"),
+               "unit": unit, "session_id": session_id, "model_key": model_key,
+               "key": [call.get("step"), call.get("round"), call.get("agent_id"),
+                       call.get("others_mean")],
+               "prompt_sha256": sha,
+               "answer": {k: getattr(ans, k) for k in _ANSWER_FIELDS}}
+        try:
+            line = json.dumps(rec, ensure_ascii=False) + "\n"
+            with self._journal_lock, open(path, "a", encoding="utf-8") as f:
+                f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
+        except (OSError, TypeError, ValueError) as e:
+            self._log({"ts": time.time(), "event": "pgg_journal_write_failed",
+                       "run": self.cfg.run, "segment": self.segment,
+                       "model": self.cfg.models[model_key], "session_id": session_id,
+                       "call": call, "error": str(e)})
+            return False
+        return True
+
+    def _reuse_answer(self, model_key: str, session_id: str, unit: str, entry: dict) -> Answer:
+        """The Answer of a journal record, logged as "pgg_answer_reused" and counted."""
+        a = entry["answer"]
+        ans = Answer(**{k: a[k] for k in _ANSWER_FIELDS if k in a}, journaled=True, reused=True)
+        with self._lock:
+            self.stats[model_key]["n_answers_reused"] += 1
+        self._log({"ts": time.time(), "event": "pgg_answer_reused", "run": self.cfg.run,
+                   "segment": self.segment, "model": self.cfg.models[model_key],
+                   "session_id": session_id, "unit": unit, "call": ans.call,
+                   "answer_segment": (ans.call or {}).get("segment")})
+        return ans
+
+    def _obtain(self, model_key, messages, schema, is_valid, session_id, ctx: dict) -> Answer:
+        """The accepted answer of one decision: reused, else asked (_ask) and journaled.
+
+        Reused (task #79): an earlier segment's answer for this unit and row
+        key from <run>.accepted.jsonl, when it was asked with exactly this
+        prompt (prompt_sha256); calls are stateless, so the call would send
+        the same request. Another prompt (never expected) discards it
+        ("prompt_changed") and the decision is asked.
+        """
+        unit = ctx.get("unit")
+        key = (ctx.get("step"), ctx.get("round"), ctx.get("agent_id"), ctx.get("others_mean"))
+        sha = prompt_sha256(self.cfg.models[model_key], messages, schema)
+        entry = self._reuse.get(unit, {}).pop(key, None) if unit is not None else None
+        if entry is not None:
+            if entry.get("prompt_sha256") == sha:
+                return self._reuse_answer(model_key, session_id, unit, entry)
+            self._discard(model_key, session_id, entry["answer"]["call"], "prompt_changed")
+        ans = self._ask(model_key, messages, schema, is_valid, session_id, ctx)
+        ans.journaled = self._journal(model_key, session_id, unit, ans, sha)
+        return ans
+
+    def _on_attempt(self, model_key: str, step, phase: str) -> None:
+        """llm_client's on_attempt: an attempt started / got its result record (task #79)."""
+        with self._lock:
+            s = self.stats[model_key]
+            s[f"n_attempt_{phase}"] += 1
+            by_step = s[f"attempt_{phase}_by_step"]
+            by_step[str(step)] = by_step.get(str(step), 0) + 1
 
     # -- run guards --------------------------------------------------------
 
@@ -2447,6 +2612,12 @@ class Engine:
                 call_info=call, on_deadline=on_deadline,
                 expected_provider=pinned["name"] if pinned else None,
                 reasoning_cap_rule=self.cfg.cap_rule_for(model_key),
+                # task #79: every attempt is logged as "attempt_started" before it is sent
+                attempt_log={"run": self.cfg.run, "segment": self.segment,
+                             "unit": ctx.get("unit"), "step": call["step"],
+                             "round": call["round"], "agent_id": call["agent_id"],
+                             "others_mean": call["others_mean"]},
+                on_attempt=lambda phase, _rec: self._on_attempt(model_key, call["step"], phase),
                 # task #67: a rule-comprehension answer {"q2": +3} is parsed and
                 # logged as degraded (decisions: as before); kept in task #73,
                 # where q2 asks for "a whole number (it can be positive, zero or
@@ -2531,7 +2702,12 @@ class Engine:
         usage = ans.meta.get("usage")
         reasoning_tokens, completion_tokens = usage_tokens(usage)
         return {
-            "run": self.cfg.run, "segment": self.segment, "unit": unit, "condition": condition, "arm": arm, "step": step,
+            "run": self.cfg.run, "segment": self.segment,
+            # task #79: the segment whose call gave the answer (an earlier one
+            # when it was reused from <run>.accepted.jsonl)
+            "answer_segment": (ans.call or {}).get("segment", self.segment),
+            "reused": ans.reused,
+            "unit": unit, "condition": condition, "arm": arm, "step": step,
             "model": self.cfg.models[model_key], "model_key": model_key,
             "model_snapshot": ans.meta.get("model_snapshot"),
             # the serving endpoint's (dated) model, openrouter_metadata (task #68)
@@ -2622,11 +2798,11 @@ class Engine:
     def _ask_comprehension(self, model_key, frame: str, card: Card, condition: str,
                            single_round: bool, session_id: str, ctx: dict) -> Answer:
         f = self.frames[frame]
-        return self._ask(model_key,
-                         f.comprehension_messages(self.cfg.params, card, condition,
-                                                  single_round=single_round),
-                         f.comprehension_schema(self.cfg.rationale), f.is_valid_comprehension,
-                         session_id, {**ctx, "step": "comprehension"})
+        return self._obtain(model_key,
+                            f.comprehension_messages(self.cfg.params, card, condition,
+                                                     single_round=single_round),
+                            f.comprehension_schema(self.cfg.rationale), f.is_valid_comprehension,
+                            session_id, {**ctx, "step": "comprehension"})
 
     # -- group arm ---------------------------------------------------------
 
@@ -2638,7 +2814,12 @@ class Engine:
         the game goes on with round k+1. frame: the frame label (default: the
         model's only frame). With comprehension on, every agent first answers
         the rule-comprehension questions in a separate call; their rows are
-        written with round 1 (round 1, step "comprehension").
+        written with round 1 (round 1, step "comprehension"), each one as soon
+        as it is accepted (task #79). Contribution and punishment rows are
+        written when the round is complete (their earnings need it); their
+        answers are journaled when accepted (_obtain). On resume, answers of
+        this unit in self._reuse are taken instead of a call, and the rows in
+        self._rows_done (rule comprehension already written) are not asked.
         """
         p = self.cfg.params
         if len(cards) != p.group_size:
@@ -2652,20 +2833,32 @@ class Engine:
         group_id = (f"{lead.card_id}-{lead.style}-{condition}-g{idx:02d}"
                     + (f"-{tag}" if tag else ""))
         unit = unit_label(model_key, lead, condition, "group", idx, tag)
+        rows_done = self._rows_done.get(unit, set())
         history = list(history or [])
         if [rec.round for rec in history] != list(range(1, len(history) + 1)):
             raise ValueError(f"history of {unit} is not rounds 1..{len(history)}")
         for r in range(len(history) + 1, p.rounds + 1):
-            ctx = {"round": r, "group_id": group_id, "condition": condition}
+            ctx = {"round": r, "group_id": group_id, "condition": condition, "unit": unit}
             pending = _Pending(self, model_key, session_id)
 
             def comprehend(i):
-                return self._add_comprehension(pending, self._ask_comprehension(
+                if ("comprehension", r, i + 1, None) in rows_done:
+                    return None                    # its row is written (earlier segment)
+                ans = self._add_comprehension(pending, self._ask_comprehension(
                     model_key, frame, cards[i], condition, False, session_id,
                     {**ctx, "agent_id": i + 1}))
+                # written at once: no other row needs it (task #79)
+                self._write_comprehension(pending, ans, self._row(
+                    condition=condition, arm="group", model_key=model_key, card=cards[i],
+                    session_id=session_id, group_id=group_id, agent_id=i + 1, round_no=r,
+                    step="comprehension", ans=ans, unit=unit, frame=frame,
+                    seed=self.seed_for(model_key, *fp, cards[i].card_id, cards[i].style,
+                                       condition, "group", idx, i + 1, r, "comprehension"),
+                    **self._comprehension_fields(frame, ans)))
+                return ans
 
             def contribute(i):
-                return pending.add(self._ask(
+                return pending.add(self._obtain(
                     model_key, contribution_messages(p, condition, cards[i], history, i, r,
                                                      prompt_frame=f),
                     contribution_schema(p, self.cfg.rationale, prompt_frame=f),
@@ -2673,8 +2866,8 @@ class Engine:
                     {**ctx, "agent_id": i + 1, "step": "contribute"}))
 
             try:
-                comp_answers = (self._map(comprehend, range(p.group_size))
-                                if r == 1 and self.cfg.comprehension else None)
+                if r == 1 and self.cfg.comprehension:
+                    self._map(comprehend, range(p.group_size))
                 answers = self._map(contribute, range(p.group_size))
                 contributions = [a.parsed[key] for a in answers]
                 earnings = project_payoffs(p, contributions)
@@ -2687,7 +2880,7 @@ class Engine:
                     def punish(i):
                         targets = [j + 1 for j in range(p.group_size) if j != i]
                         budget = punishment_budget(earnings[i])
-                        return pending.add(self._ask(
+                        return pending.add(self._obtain(
                             model_key,
                             punishment_messages(p, cards[i], history, i, r, contributions,
                                                 earnings[i], prompt_frame=f),
@@ -2702,14 +2895,6 @@ class Engine:
                     rec.final_earnings, rec.cost_paid, rec.received = apply_punishment(
                         p, earnings, rec.punishment)
 
-                for i, ans in enumerate(comp_answers or []):
-                    self._write_comprehension(pending, ans, self._row(
-                        condition=condition, arm="group", model_key=model_key, card=cards[i],
-                        session_id=session_id, group_id=group_id, agent_id=i + 1, round_no=r,
-                        step="comprehension", ans=ans, unit=unit, frame=frame,
-                        seed=self.seed_for(model_key, *fp, cards[i].card_id, cards[i].style,
-                                           condition, "group", idx, i + 1, r, "comprehension"),
-                        **self._comprehension_fields(frame, ans)))
                 for i in range(p.group_size):
                     pending.done(answers[i], self._write(self._row(
                         condition=condition, arm="group", model_key=model_key, card=cards[i],
@@ -2743,7 +2928,10 @@ class Engine:
         """The conditional schedule for one card: one call per conditioning value.
 
         With comprehension on, the rule-comprehension call comes first, once
-        per schedule (its row: round null, step "comprehension").
+        per schedule (its row: round null, step "comprehension"). Every row is
+        written as soon as its answer is accepted (task #79: the values do not
+        depend on each other); on resume the values whose row is written
+        (self._rows_done) are not asked, journaled answers are reused.
         """
         p = self.cfg.params
         condition = "N"
@@ -2757,30 +2945,39 @@ class Engine:
         group_id = (f"{card.card_id}-{card.style}-{condition}-iso{rep:02d}"
                     + (f"-{tag}" if tag else ""))
         unit = unit_label(model_key, card, condition, "isolated", rep, tag)
+        rows_done = self._rows_done.get(unit, set())
 
         pending = _Pending(self, model_key, session_id)
-        base_ctx = {"round": None, "group_id": group_id, "condition": condition, "agent_id": 1}
-
-        def ask_point(x):
-            ctx = {**base_ctx, "step": "isolated", "others_mean": x}
-            return pending.add(self._ask(
-                model_key, isolated_messages(p, card, x, iso, round_no, prompt_frame=f),
-                contribution_schema(p, self.cfg.rationale, prompt_frame=f),
-                lambda c: is_valid_contribution(c, p, key), session_id, ctx))
-
-        points = list(self.cfg.isolated_points)
+        base_ctx = {"round": None, "group_id": group_id, "condition": condition, "agent_id": 1,
+                    "unit": unit}
         extra = {"isolated_frame": iso}
         if round_no is not None:
             extra["isolated_round_no"] = round_no
+
+        def ask_point(x):
+            if ("isolated", None, 1, x) in rows_done:
+                return                             # its row is written (earlier segment)
+            ctx = {**base_ctx, "step": "isolated", "others_mean": x}
+            ans = pending.add(self._obtain(
+                model_key, isolated_messages(p, card, x, iso, round_no, prompt_frame=f),
+                contribution_schema(p, self.cfg.rationale, prompt_frame=f),
+                lambda c: is_valid_contribution(c, p, key), session_id, ctx))
+            pending.done(ans, self._write(self._row(
+                condition=condition, arm="isolated", model_key=model_key, card=card,
+                session_id=session_id, group_id=group_id, agent_id=1, round_no=None,
+                step="isolated", ans=ans, unit=unit, frame=frame,
+                seed=self.seed_for(model_key, *fp, card.card_id, card.style, condition,
+                                   "isolated", rep, 1, "isolated", x),
+                contribution=ans.parsed[key], others_mean=x, **extra)))
+
+        points = list(self.cfg.isolated_points)
         try:
-            comp = None
-            if self.cfg.comprehension:
+            if (self.cfg.comprehension
+                    and ("comprehension", None, 1, None) not in rows_done):
                 single = f.data["isolated"][iso]["rules"] == "single_round"
                 comp = self._add_comprehension(pending, self._ask_comprehension(
                     model_key, frame, card, condition, single, session_id,
                     {**base_ctx, "others_mean": None}))
-            answers = self._map(ask_point, points)
-            if comp is not None:
                 self._write_comprehension(pending, comp, self._row(
                     condition=condition, arm="isolated", model_key=model_key, card=card,
                     session_id=session_id, group_id=group_id, agent_id=1, round_no=None,
@@ -2788,14 +2985,7 @@ class Engine:
                     seed=self.seed_for(model_key, *fp, card.card_id, card.style, condition,
                                        "isolated", rep, 1, "comprehension"),
                     **self._comprehension_fields(frame, comp), **extra))
-            for x, ans in zip(points, answers):
-                pending.done(ans, self._write(self._row(
-                    condition=condition, arm="isolated", model_key=model_key, card=card,
-                    session_id=session_id, group_id=group_id, agent_id=1, round_no=None,
-                    step="isolated", ans=ans, unit=unit, frame=frame,
-                    seed=self.seed_for(model_key, *fp, card.card_id, card.style, condition,
-                                       "isolated", rep, 1, "isolated", x),
-                    contribution=ans.parsed[key], others_mean=x, **extra)))
+            self._map(ask_point, points)
         finally:
             pending.close()
 
@@ -3032,14 +3222,37 @@ class Engine:
     def _unit_chain(self, spec: UnitSpec, segs: dict[int, dict]) -> dict:
         """Accepted and superseded rows of one unit (module docstring, "Valid rows").
 
-        segs: segment -> round -> rows. Returns {"accepted": {round: segment}
-        in round order, "superseded": [(segment, round, n_rows)], "problems"}.
+        segs: segment -> round -> rows. Returns {"accepted": {round: segment
+        that completed it} in round order, "pieces": {round: {row key:
+        segment}} of the accepted rounds, "pending": {row key: segment} of the
+        first round not complete, "superseded": [(segment, round, n_rows)],
+        "problems"}.
+
+        Task #79: a round's rows may come from more than one segment. Rows of
+        JOINT_STEPS (contribution, punishment) are accepted only all from one
+        segment (their earnings need the whole round): a segment with such rows
+        of a round replaces the earlier ones, and those of an incomplete round
+        are superseded. Rule-comprehension and isolated rows stand alone: those
+        of the first round not complete stay "pending" and a later segment adds
+        the missing ones (a row of the same key in a later segment replaces
+        the earlier one, as the code before A1 re-ran a schedule whole). For
+        rows of the earlier code (a round written at once or partly cut off)
+        the result is as before, except that cut-off rule-comprehension /
+        isolated rows of the last segment are pending, not superseded.
         """
         rounds = _unit_rounds(spec)
         want = {r: frozenset(k for k in spec.expected if k[1] == r) for r in rounds}
         accepted: dict = {}
-        superseded: list[tuple] = []
+        pieces: dict = {}                       # round -> {row key: segment}
+        dropped: dict = {}                      # (segment, round) -> superseded rows
         problems: list[str] = []
+
+        def drop(r, keys):
+            have = pieces.get(r, {})
+            for x in list(keys):
+                s = have.pop(x)
+                dropped[(s, r)] = dropped.get((s, r), 0) + 1
+
         for seg in sorted(segs):
             blocks = segs[seg]
             keys = {r: [_row_key(x) for x in rows] for r, rows in blocks.items()}
@@ -3059,25 +3272,42 @@ class Engine:
                                 f"but only {k} earlier round(s) are complete")
                 continue
             # this segment replays the unit from round rounds[first] (the code
-            # before A1 re-ran a unit from its start): earlier rounds from there
-            # on are replaced
-            for r in rounds[first:k]:
-                s = accepted.pop(r)
-                superseded.append((s, r, len(segs[s][r])))
+            # before A1 re-ran a unit from its start): earlier rows from there
+            # on (accepted rounds and the pending rows) are replaced
+            if first < k:
+                for r in rounds[first:]:
+                    accepted.pop(r, None)
+                    drop(r, list(pieces.get(r, {})))
             taking = True
             for r in rounds[first:]:
                 if r not in blocks:
                     taking = False
                     continue
-                if taking and set(keys[r]) == want[r]:
-                    accepted[r] = seg
-                    continue
                 if not taking:
                     problems.append(f"unit {spec.label} segment {seg}: rows of round {r} after "
                                     "an incomplete or missing round")
+                    dropped[(seg, r)] = dropped.get((seg, r), 0) + len(blocks[r])
+                    continue
+                have = pieces.setdefault(r, {})
+                if any(x[0] in JOINT_STEPS for x in keys[r]):
+                    drop(r, [x for x in have if x[0] in JOINT_STEPS])
+                for x in keys[r]:
+                    if x in have:
+                        drop(r, [x])
+                    have[x] = seg
+                if set(have) == want[r]:
+                    accepted[r] = seg
+                    continue
                 taking = False
-                superseded.append((seg, r, len(blocks[r])))
-        return {"accepted": accepted, "superseded": superseded, "problems": problems}
+                # the first incomplete round: its contribution / punishment rows
+                # are given up, its other rows wait for the missing ones
+                drop(r, [x for x in have if x[0] in JOINT_STEPS])
+        # (round ids of a schedule are None: the open round is a list)
+        open_round = [r for r in rounds if r not in accepted][:1]
+        return {"accepted": accepted, "pieces": {r: dict(pieces[r]) for r in accepted},
+                "pending": dict(pieces.get(open_round[0], {})) if open_round else {},
+                "superseded": [(s, r, n) for (s, r), n in dropped.items()],
+                "problems": problems}
 
     def _scan_rows(self, path: Path, specs: list[UnitSpec]) -> dict:
         """Rows of the results file: accepted rounds per unit, complete and partial units.
@@ -3154,15 +3384,24 @@ class Engine:
         problems += sorted(frame_problems)
         by_label = {s.label: s for s in specs}
         complete: dict[str, int] = {}
-        progress: dict[str, dict] = {}      # partial unit -> accepted rounds and their rows
+        # partial unit -> accepted rounds and their rows, the segments they are
+        # in, and the pending rows of its first round not complete (task #79)
+        progress: dict[str, dict] = {}
         superseded: list[dict] = []
-        accepted_rounds: set = set()        # (label, segment, round)
+        accepted_rows: set = set()          # (label, segment, row key)
+        kept_calls: set = set()             # _call_of_row of accepted and pending rows
         for label in sorted(blocks, key=order.get):
             spec, segs = by_label[label], blocks[label]
             chain = self._unit_chain(spec, segs)
             problems += chain["problems"]
             accepted = chain["accepted"]
-            accepted_rounds |= {(label, s, r) for r, s in accepted.items()}
+            row_of = {(seg, _row_key(x)): x for seg, by_round in segs.items()
+                      for rows_r in by_round.values() for x in rows_r}
+            accepted_rows |= {(label, s, x) for have in chain["pieces"].values()
+                              for x, s in have.items()}
+            kept_calls |= {_call_of_row(row_of[(s, x)])
+                           for have in [*chain["pieces"].values(), chain["pending"]]
+                           for x, s in have.items()}
             by_seg: dict[int, list] = {}
             for s, r, n in chain["superseded"]:
                 by_seg.setdefault(s, []).append((r, n))
@@ -3174,26 +3413,35 @@ class Engine:
             if len(accepted) == len(_unit_rounds(spec)):
                 complete[label] = max(accepted.values())
             else:
-                progress[label] = {"rounds": {r: segs[s][r] for r, s in accepted.items()},
-                                   "segments": sorted(set(accepted.values()))}
+                progress[label] = {
+                    "rounds": {r: [row_of[(s, x)] for x, s in chain["pieces"][r].items()]
+                               for r in accepted},
+                    "segments": sorted({s for have in chain["pieces"].values()
+                                        for s in have.values()}),
+                    "pending": {x: row_of[(s, x)] for x, s in chain["pending"].items()}}
         return {"n_rows": sum(per_segment.values()), "rows_per_segment": per_segment,
                 "complete": complete, "progress": progress, "superseded": superseded,
-                "accepted_rounds": accepted_rounds, "row_calls": row_calls,
+                "accepted_rows": accepted_rows, "row_calls": row_calls,
+                "kept_calls": kept_calls,
                 "units_with_rows": set(blocks), "n_length_checked": n_length_checked,
                 "n_frame_checked": n_frame_checked,
                 "ends_with_newline": ends_with_newline, "truncated_last_line": truncated,
                 "truncated_lines": truncated_lines, "problems": list(dict.fromkeys(problems))}
 
     def valid_rows(self, path: Path | None = None) -> list[dict]:
-        """The rows that count (accepted rounds of their unit), in file order."""
+        """The rows that count (accepted rounds of their unit), in file order.
+
+        A row counts when it is one of its accepted round's rows (_unit_chain;
+        a segment has at most one row per unit and row key).
+        """
         path = Path(path) if path is not None else self.cfg.output_dir() / f"{self.cfg.run}.jsonl"
         specs = self.unit_specs()
         by_session = {s.session_id: s for s in specs}
-        accepted = self._scan_rows(path, specs)["accepted_rounds"]
+        accepted = self._scan_rows(path, specs)["accepted_rows"]
         out = []
         for row in _read_jsonl(path)[0]:
             spec = by_session.get(row.get("session_id")) if isinstance(row, dict) else None
-            if spec and (spec.label, row.get("segment", 0), row.get("round")) in accepted:
+            if spec and (spec.label, row.get("segment", 0), _row_key(row)) in accepted:
                 out.append(row)
         return out
 
@@ -3274,10 +3522,19 @@ class Engine:
         Also "model_version_reference": model key -> model_version of its
         first response not rejected for its provider (check_snapshot of
         snapshot_version_models goes on comparing with it).
+
+        Task #79: n_attempt_started (per step too) counts the
+        "attempt_started" events, n_attempt_finished those whose attempt_id is
+        on a result record (success or failed attempt); the others were cut
+        off in flight (orphaned). Attempt events carry no usage: they change
+        no cost. "attempt_segments": segments with attempt events (the code
+        before #79 wrote none). n_answers_reused counts "pgg_answer_reused".
         """
         sessions = {s.session_id: s for s in specs}
         per_segment: dict[int, dict] = {}
         events, problems, started = [], [], set()
+        attempts: dict[str, tuple] = {}        # attempt_id -> (segment, model key, step)
+        finished_ids: set = set()
         system_text: dict[str, str] = {}
         accepted: dict[tuple, int] = {}
         marked: set = set()
@@ -3314,6 +3571,15 @@ class Engine:
                 continue
             s = per_segment.setdefault(seg, {k: _new_stats() for k in self.cfg.models})[key]
             started.add(spec.label)
+            if event == "attempt_started":      # task #79: before the request was sent
+                step = str((rec.get("call") or {}).get("step", rec.get("step")))
+                s["n_attempt_started"] += 1
+                s["attempt_started_by_step"][step] = s["attempt_started_by_step"].get(step, 0) + 1
+                attempts[rec.get("attempt_id")] = (seg, key, step)
+                continue
+            if event == "pgg_answer_reused":
+                s["n_answers_reused"] += 1
+                continue
             if event == "late_response":        # billed after its attempt was abandoned
                 if "usage" in rec:
                     self._count_response(s, key, {
@@ -3355,6 +3621,8 @@ class Engine:
                 continue
             if event is not None:
                 continue
+            if rec.get("attempt_id") is not None:     # the result record of an attempt
+                finished_ids.add(rec["attempt_id"])
             messages = rec.get("messages")
             if spec.session_id not in system_text and isinstance(messages, list) and messages:
                 system_text[spec.session_id] = (messages[0] or {}).get("content")
@@ -3399,6 +3667,11 @@ class Engine:
                     capped[ck] = bool(is_capped)
             elif rec.get("retrying") and rec.get("error_kind") == "parse":
                 s["n_comp_parse_fail" if _is_comprehension(rec) else "n_parse_fail"] += 1
+        for attempt_id, (seg_a, key, step) in attempts.items():
+            if attempt_id in finished_ids:
+                s = per_segment[seg_a][key]
+                s["n_attempt_finished"] += 1
+                s["attempt_finished_by_step"][step] = s["attempt_finished_by_step"].get(step, 0) + 1
         for session_id, text in system_text.items():
             spec = sessions[session_id]
             card = spec.card
@@ -3410,7 +3683,61 @@ class Engine:
                 "n_unparsed_lines": n_unparsed, "ends_with_newline": ends_with_newline,
                 "model_version_reference": first_version,
                 "replaced_after_summary": replaced_after_summary,
+                "attempt_segments": sorted({seg_a for seg_a, _, _ in attempts.values()}),
                 "problems": list(dict.fromkeys(problems))}
+
+    def _scan_journal(self, specs: list[UnitSpec], rows: dict) -> dict:
+        """What <run>.accepted.jsonl holds for a resume (task #79). Reads only.
+
+        Per record: "used" when an accepted or pending row holds its call
+        (_call_of_row); else "reusable" when its unit is not complete and its
+        row key has no accepted or pending row (the latest record per unit and
+        key; reused when the prompt is the same, Engine._obtain) - also when
+        its row was superseded (a round cut off while its rows were written);
+        else "unused" (the decision has a row of another call: the answer is
+        lost, counted as discarded from the raw log unless a superseded row
+        holds it). Lines that are not JSON were cut off while being written
+        (n_cut_lines); they are skipped.
+        Returns {"info", "reuse": {label: {key: record}}, "reusable_calls"}.
+        """
+        path = self._journal_file()
+        info = {"path": str(path), "exists": path.is_file(), "n_records": 0, "n_cut_lines": 0,
+                "n_used": 0, "n_reusable": 0, "n_unused": 0, "problems": []}
+        reuse: dict[str, dict] = {}
+        if not path.is_file():
+            return {"info": info, "reuse": reuse, "reusable_calls": set()}
+        by_session = {s.session_id: s for s in specs}
+        has_row: dict[str, set] = {}
+        for label, prog in rows["progress"].items():
+            has_row[label] = ({_row_key(x) for rows_r in prog["rounds"].values() for x in rows_r}
+                              | set(prog["pending"]))
+        records, _ = _read_jsonl(path)
+        for rec in records:
+            if not isinstance(rec, dict):
+                info["n_cut_lines"] += 1
+                continue
+            spec = by_session.get(rec.get("session_id"))
+            call = (rec.get("answer") or {}).get("call")
+            if spec is None or rec.get("run") != self.cfg.run or not isinstance(call, dict):
+                info["problems"].append(
+                    f"{path.name}: a record of session {rec.get('session_id')!r} is not an answer "
+                    "of this run's design")
+                continue
+            info["n_records"] += 1
+            key = tuple(rec.get("key") or ())
+            if _call_key(call.get("segment"), spec.session_id, call) in rows["kept_calls"]:
+                info["n_used"] += 1
+            elif spec.label in rows["complete"] or key in has_row.get(spec.label, set()):
+                info["n_unused"] += 1
+            else:
+                earlier = reuse.setdefault(spec.label, {}).get(key)
+                if earlier is not None:
+                    info["n_unused"] += 1          # replaced by the later record
+                reuse[spec.label][key] = rec
+        info["n_reusable"] = sum(len(v) for v in reuse.values())
+        calls = {_call_key(rec["answer"]["call"].get("segment"), rec["session_id"],
+                           rec["answer"]["call"]) for v in reuse.values() for rec in v.values()}
+        return {"info": info, "reuse": reuse, "reusable_calls": calls}
 
     def resume_plan(self) -> ResumePlan:
         """What a resumed segment of this run has to do. Reads only; writes nothing.
@@ -3440,13 +3767,18 @@ class Engine:
             problems += log["problems"]
             if not log["events"]:
                 log = None                     # not this run's log
+        # task #79: accepted answers without a row that this segment reuses
+        journal = self._scan_journal(specs, rows)
+        problems += journal["info"]["problems"]
 
-        # discarded: accepted responses of earlier segments without a row
+        # discarded: accepted responses of earlier segments without a row (and
+        # not reused from <run>.accepted.jsonl, task #79)
         unmarked: list = []
         if log is not None:
             by_session = {s.session_id: s for s in specs}
             for ck, n in sorted(log["accepted"].items(), key=lambda kv: _short(kv[0])):
-                n_lost = n - (1 if ck in rows["row_calls"] else 0)
+                n_lost = n - (1 if ck in rows["row_calls"] or ck in journal["reusable_calls"]
+                              else 0)
                 if n_lost <= 0:
                     continue
                 seg_k, session_id = ck[0], ck[1]
@@ -3594,6 +3926,10 @@ class Engine:
                             n_responses=sum(s["n_responses"] for s in by_model.values()),
                             n_discarded=sum(s["n_discarded"] for s in by_model.values()),
                             **{k: sum(s[k] for s in by_model.values()) for k in _SEGMENT_TOTALS},
+                            # task #79: orphaned = started without a result record
+                            n_attempt_orphaned=_attempt_totals(
+                                list(by_model.values()))["n_attempt_orphaned"],
+                            attempts_logged=seg in log["attempt_segments"],
                             per_model={cfg.models[k]: s for k, s in by_model.items()})
             else:
                 item.update(cost_usd=entry.get("cost_usd"), per_model=entry.get("per_model"))
@@ -3660,7 +3996,10 @@ class Engine:
             lock=read_run_lock(self._lock_path()),
             timeout_change=timeout_change, timeout_check=timeout_check,
             code_change=code_change,
-            model_version_reference=dict(log["model_version_reference"]) if log else {})
+            model_version_reference=dict(log["model_version_reference"]) if log else {},
+            reuse=journal["reuse"], journal=journal["info"],
+            rows_done={label: set(prog["pending"]) for label, prog in rows["progress"].items()
+                       if prog["pending"]})
 
     def _lock_path(self) -> Path:
         return self.cfg.output_dir() / f"{self.cfg.run}.lock"
@@ -3675,6 +4014,8 @@ class Engine:
         self.prior_stats = {k: _merge_stats(s) for k, s in plan.prior_stats.items()}
         self.prior_extra_cost = plan.prior_extra_cost
         self._histories = dict(plan.histories)
+        self._reuse = {label: dict(entries) for label, entries in plan.reuse.items()}
+        self._rows_done = {label: set(keys) for label, keys in plan.rows_done.items()}
         self.model_version_reference = {k: v for k, v in plan.model_version_reference.items()
                                         if k in self.cfg.snapshot_version_models}
         caps = self.cfg.model_budget_usd or {}
@@ -3769,6 +4110,7 @@ class Engine:
             "n_units_completed": units["n_complete_this_segment"] if units else None,
             "n_discarded": sum(s["n_discarded"] for s in self.stats.values()),
             **{k: sum(s[k] for s in self.stats.values()) for k in _SEGMENT_TOTALS},
+            **_attempt_totals(list(self.stats.values())), "attempts_logged": True,
             "stalled": self.stalled,
             "request_deadline_s": self.deadline, "stall_timeout_s": self.stall_timeout,
             "timeout_change": self.plan.timeout_change if self.plan else None,
@@ -3822,6 +4164,29 @@ class Engine:
             "n_provider_unknown": sum(s["n_provider_unknown"] for s in per_model.values()),
             "n_discarded": sum(s["n_discarded"] for s in per_model.values()),
             **{k: sum(s[k] for s in per_model.values()) for k in _SEGMENT_TOTALS},
+            **_attempt_totals(list(per_model.values())),
+            # task #79
+            "attempts": {
+                "per_model_step": _attempt_table(per_model),
+                "this_segment": _attempt_table(
+                    {self.cfg.models[k]: s for k, s in self.stats.items()}),
+                "n_attempt_orphaned_earlier_segments": _attempt_totals(
+                    list(self.prior_stats.values()))["n_attempt_orphaned"],
+                "segments_without_attempt_log": [s["segment"] for s in segments
+                                                 if not s.get("attempts_logged")],
+                "rule": (
+                    "every attempt is logged as an attempt_started event before its request is "
+                    "sent (llm_client attempt_log: run, segment, unit, step, round, agent_id, "
+                    "others_mean, request, attempt, attempt_seq, attempt_id); its result record "
+                    "(success or failed attempt) carries the same attempt_id. finished = "
+                    "started with a result record; orphaned = started - finished: attempts "
+                    "cut off in flight (the process ended before their response). For the "
+                    "current segment, a summary written while calls are still in flight "
+                    "(signal, stall) counts those too; the next --resume recounts every "
+                    "earlier segment from the raw log. Segments of the code before #79 have no "
+                    "attempt events (segments_without_attempt_log). Attempt events carry no "
+                    "usage: cost and budget are unchanged by them")},
+            "accepted_answers": self._journal_summary(rows),
             "reasoning_capped_rule": (
                 "reasoning_tokens >= max_tokens - "
                 f"{self.llm.REASONING_RESERVE_TOKENS} (llm_client.REASONING_RESERVE_TOKENS); for "
@@ -3880,6 +4245,28 @@ class Engine:
             out["row_problems"] = rows["problems"]
         return out
 
+    def _journal_summary(self, rows: dict | None) -> dict:
+        """Summary "accepted_answers" (task #79): <run>.accepted.jsonl at the summary's time."""
+        out = {"path": str(self._journal_file()), "n_records": None, "n_used": None,
+               "n_pending": None, "n_unused": None, "n_cut_lines": None,
+               "n_reused_this_segment": sum(s["n_answers_reused"] for s in self.stats.values()),
+               "rule": (
+                   "every accepted answer (and every rule-comprehension call given up) is "
+                   "appended to <run>.accepted.jsonl when it is accepted, before its row "
+                   "(flushed, fsynced). A resumed segment reuses an answer without a row "
+                   "(pgg_answer_reused; the row says reused: true and answer_segment) when its "
+                   "unit is not complete, its decision has no row and the prompt is the same "
+                   "(prompt_sha256); only the missing decisions are asked. n_used: answers with "
+                   "a row; n_pending: answers without a row that a --resume reuses; n_unused: "
+                   "answers whose decision has a row of another call (discarded). A pending "
+                   "answer is not discarded")}
+        if rows is not None and self._specs:
+            info = self._scan_journal(self._specs, rows)["info"]
+            out.update(n_records=info["n_records"], n_used=info["n_used"],
+                       n_pending=info["n_reusable"], n_unused=info["n_unused"],
+                       n_cut_lines=info["n_cut_lines"])
+        return out
+
     def comprehension_summary(self, path: Path | None) -> dict:
         """Share of correct rule-comprehension answers per model x frame (valid rows only)."""
         counts: dict = {}
@@ -3930,6 +4317,9 @@ class Engine:
             "raw_log": {"path": str(raw_log), "lines": _count_lines(raw_log),
                         "redirected_for_run": log_path is not None},
             "summary": {"path": str(summary_path)},
+            # task #79: the accepted answers, one line each
+            "accepted_answers": {"path": str(self._journal_file()),
+                                 "lines": _count_lines(self._journal_file())},
             "summary_backups": [str(p) for p in sorted(
                 summary_path.parent.glob(f"{self.cfg.run}_summary.seg*.json"))],
         }
@@ -3964,7 +4354,14 @@ class Engine:
                                       if k != "text"} if p.truncated_last_line else None),
                 remaining_units=[s.label for s in todo], stopped_models=dict(self.stopped_models),
                 config_checked=p.config_checked,
-                summary_backup=str(backup) if backup else None)
+                summary_backup=str(backup) if backup else None,
+                # task #79: answers reused instead of calls, rows not asked again,
+                # attempts of the earlier segments cut off in flight
+                n_answers_reusable=sum(len(v) for v in p.reuse.values()),
+                n_rows_kept_pending=sum(len(v) for v in p.rows_done.values()),
+                accepted_answers=p.journal,
+                n_attempt_orphaned_earlier_segments=_attempt_totals(
+                    list(p.prior_stats.values()))["n_attempt_orphaned"])
         return event
 
     def _log_state(self):
@@ -4056,15 +4453,20 @@ class Engine:
 
     def _close_raw_log_line(self) -> bool:
         """End a raw log whose last record was cut off with a newline; True if one was added."""
+        return self._close_last_line(self.llm.LOG_PATH)
+
+    @staticmethod
+    def _close_last_line(path) -> bool:
+        """End a file whose last line was cut off with a newline; True if one was added."""
         try:
-            with open(self.llm.LOG_PATH, "rb") as f:
+            with open(path, "rb") as f:
                 f.seek(-1, os.SEEK_END)
                 last = f.read(1)
         except (OSError, TypeError, ValueError):       # missing or empty
             return False
         if last == b"\n":
             return False
-        with open(self.llm.LOG_PATH, "ab") as f:
+        with open(path, "ab") as f:
             f.write(b"\n")
         return True
 
@@ -4082,6 +4484,11 @@ class Engine:
             todo = [s for s in self._specs if s.label not in plan.complete]
         else:
             todo = self._specs
+            if not path.exists() and self._journal_file().exists():
+                # a new run never takes answers it did not ask (task #79)
+                raise ValueError(f"run {cfg.run!r} not started, no call made: "
+                                 f"{self._journal_file()} exists (accepted answers of an earlier "
+                                 "run of this name); use --resume or another run name")
         started = time.time()
         # "x": never overwrite a run; "a": a resumed run only appends
         with open(path, "a" if resume else "x", encoding="utf-8") as out:
@@ -4090,6 +4497,10 @@ class Engine:
             if resume and not self.plan.results_ends_with_newline:
                 out.write("\n")            # a cut-off last line stays as it is, on its own
                 out.flush()
+            # task #79: accepted answers go to <run>.accepted.jsonl when accepted; a
+            # record cut off by a killed process stays, on its own line
+            journal_cut_closed = self._close_last_line(self._journal_file()) if resume else False
+            self._journal_path = self._journal_file()
             log_path = cfg.raw_log_path()
             previous_log = self.llm.set_log_path(log_path) if log_path else None
             self._run_log = Path(self.llm.LOG_PATH)
@@ -4100,7 +4511,8 @@ class Engine:
                     self._catch_signals(handlers)
                     raw_closed = self._close_raw_log_line()
                     self.llm._append_log({**self._start_event(out_dir, todo, backup),
-                                          "raw_log_cut_line_closed": raw_closed})
+                                          "raw_log_cut_line_closed": raw_closed,
+                                          "accepted_answers_cut_line_closed": journal_cut_closed})
                     if self.lock.get("stale_lock"):
                         self._log({"ts": time.time(), "event": "pgg_stale_lock_taken_over",
                                    "run": cfg.run, "segment": self.segment, "lock": self.lock})
@@ -4836,8 +5248,35 @@ def resume_report(engine: Engine, plan: ResumePlan) -> str:
         "başladığı turdan itibaren öncekilerin yerine geçer; tamamlanmış turlar (turun bütün "
         "ajan satırları, P'de ceza satırları da) sırayla kabul edilir, ilk eksik tur ve "
         "segmentin geri kalanı superseded olur. Birim, her turu kabul edilmişse tamamdır "
-        "(izole çizelge tek blok: her koşul değeri bir satır).",
+        "(izole çizelge tek blok: her koşul değeri bir satır). #79: katkı/ceza satırları bir "
+        "turda tek segmentten gelir; kural anlama ve izole satırları tek tek yazılır, ilk "
+        "eksik turdaki bu satırlar bekler (pending) ve sonraki segment yalnız eksikleri ekler.",
     ]
+    journal = plan.journal or {}
+    n_reuse = sum(len(v) for v in plan.reuse.values())
+    n_done = sum(len(v) for v in plan.rows_done.values())
+    lines.append(
+        f"Kabul edilmiş cevaplar ({cfg.run}.accepted.jsonl): "
+        + (f"{journal.get('n_records', 0)} kayıt; satırı olan {journal.get('n_used', 0)}; "
+           f"sürdürmede çağrısız yeniden kullanılacak {n_reuse}; kullanılmayan "
+           f"{journal.get('n_unused', 0)}; yarım kesilmiş satır {journal.get('n_cut_lines', 0)}"
+           if journal.get("exists") else "dosya yok (#79 öncesi kod ya da hiç cevap yok)")
+        + f". Satırı yazılmış, yeniden sorulmayacak bekleyen satır (kural anlama / izole): {n_done}")
+    for label in plan.reuse:
+        keys = sorted(plan.reuse[label], key=_short)
+        lines.append(f"  yeniden kullanılacak: {label}: "
+                     + ", ".join(f"{k[0]} tur {k[1]} ajan {k[2]}"
+                                 + (f" değer {k[3]}" if k[3] is not None else "")
+                                 + f" (segment {plan.reuse[label][k].get('segment')})"
+                                 for k in keys))
+    orphaned = {k: st.get("n_attempt_started", 0) - st.get("n_attempt_finished", 0)
+                for k, st in plan.prior_stats.items()}
+    without = [s["segment"] for s in plan.segments if not s.get("attempts_logged")]
+    lines.append("Yetim denemeler (attempt_started var, sonucu yok: uçuşta kesilmiş) — önceki "
+                 f"segmentlerde: {sum(orphaned.values())} "
+                 f"({', '.join(f'{k} {n}' for k, n in orphaned.items())})"
+                 + (f"; deneme logu olmayan segmentler (#79 öncesi kod): {without}"
+                    if without else ""))
     for label, seg in plan.complete.items():
         lines.append(f"  tamam: {label} (segment {seg})")
     for p in plan.resume_points:
@@ -4930,6 +5369,12 @@ def resume_report(engine: Engine, plan: ResumePlan) -> str:
             else:
                 n_left = n * (rounds - kept) // rounds   # group kinds are per round
             by_kind[kind] = by_kind.get(kind, 0) + n_left
+        # task #79: rows already written and answers reused are not asked
+        for key in [*plan.rows_done.get(spec.label, ()), *plan.reuse.get(spec.label, {})]:
+            kind = {"contribute": f"contribute_{spec.condition}", "punish": "punish_P"}.get(
+                key[0], key[0])
+            if by_kind.get(kind, 0) > 0:
+                by_kind[kind] -= 1
     # without frames: per model, no prompt scaling (as before frames)
     scales = ({label: prompt_scales(f, cfg.params, cfg.cards, isolated_frame=cfg.isolated_frame,
                                     isolated_round_no=cfg.isolated_round_no,

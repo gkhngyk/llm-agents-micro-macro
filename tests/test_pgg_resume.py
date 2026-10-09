@@ -125,7 +125,9 @@ class ResumeUnits(ResumeBase):
         called = set(_sessions(api))
         self.assertTrue(called.isdisjoint({specs[0].session_id, specs[1].session_id}))
         self.assertEqual(called, {s.session_id for s in specs[2:]})
-        self.assertEqual(len(api.calls), 4 + 8 + 4 * 5)
+        # task #79: agent 1 of unit 2's round 2 was accepted before the cut; its
+        # answer is reused from r1.accepted.jsonl (3 calls for that round)
+        self.assertEqual(len(api.calls), 3 + 8 + 4 * 5)
 
         # (b) append-only: the old file is a byte-for-byte prefix of the new one
         new_bytes = self.results.read_bytes()
@@ -133,6 +135,8 @@ class ResumeUnits(ResumeBase):
         new_rows = _rows(self.results)[len(old_rows):]
         self.assertEqual({r["segment"] for r in new_rows}, {1})
         self.assertEqual(len(new_rows), 4 + 8 + 4 * 5)
+        self.assertEqual([(r["unit"], r["round"], r["agent_id"], r["answer_segment"])
+                          for r in new_rows if r["reused"]], [(specs[2].label, 2, 1, 0)])
         # unit 2: round 1 kept from segment 0, round 2 played in segment 1
         old_u2 = {(r["round"], r["agent_id"]) for r in old_rows if r["unit"] == specs[2].label}
         new_u2 = {(r["round"], r["agent_id"]) for r in new_rows if r["unit"] == specs[2].label}
@@ -153,9 +157,11 @@ class ResumeUnits(ResumeBase):
         self.assertEqual([s["segment"] for s in summary["segments"]], [0, 1])
         self.assertEqual([s["stop_reason"] for s in summary["segments"]], ["interrupted", None])
         self.assertEqual([s["n_rows"] for s in summary["segments"]], [20, 32])
-        # the answer of round 2 agent 1 of segment 0 never became a row
-        self.assertEqual([s["n_discarded"] for s in summary["segments"]], [1, 0])
-        self.assertEqual(summary["n_discarded"], 1)
+        # the answer of round 2 agent 1 of segment 0 became a row in segment 1
+        # (task #79: reused, not discarded as before)
+        self.assertEqual([s["n_discarded"] for s in summary["segments"]], [0, 0])
+        self.assertEqual(summary["n_discarded"], 0)
+        self.assertEqual([s["n_answers_reused"] for s in summary["segments"]], [0, 1])
         self.assertEqual(summary["files"]["results"]["lines"], 52)
         self.assertEqual(summary["files"]["raw_log"]["lines"],
                          len(self.raw.read_text().splitlines()))
@@ -223,6 +229,7 @@ class ResumeUnits(ResumeBase):
     def test_old_format_run_is_resumed_from_its_rows(self):
         """A first run of the earlier code: rows without segment / unit, summary without config."""
         first, _ = self.interrupted_run()
+        (self.run_dir / "r1.accepted.jsonl").unlink()      # the earlier code wrote none (#79)
         rows = _rows(self.results)
         self.results.write_text("".join(
             json.dumps({k: v for k, v in r.items() if k not in ("segment", "unit")}) + "\n"
@@ -358,7 +365,7 @@ class ResumeConfig(ResumeBase):
         # operational settings may change
         engine, api = self.resume(workers=2, parallel_units=2, request_timeout_s=99)
         engine.run(resume=True)
-        self.assertEqual(len(api.calls), 32)
+        self.assertEqual(len(api.calls), 31)         # + 1 answer reused (task #79)
 
     def test_rows_of_another_design_are_refused(self):
         self.interrupted_run()
@@ -444,7 +451,9 @@ class ResumeDryRun(ResumeBase):
         self.assertIn("tamam 1; yarım (kaldığı turdan sürer) 1", text)
         self.assertIn("kalan (koşulacak) 3", text)
         self.assertIn("2. turdan sürer", text)
-        self.assertIn("gemini 14; toplam 14", text)               # 4 (round 2) + 5 + 5
+        # 3 (round 2: agent 1's answer is reused, task #79) + 5 + 5
+        self.assertIn("gemini 13; toplam 13", text)
+        self.assertIn("çağrısız yeniden kullanılacak 1", text)
         self.assertIn("Kilit: yok", text)
         self.assertIn("yeni segment: 1", text)
         self.assertIn("Config tutarlı", text)
