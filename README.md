@@ -152,6 +152,21 @@ tested. Design choices are in the module docstring; the main ones:
   warns. A resumed segment with another commit is recorded (`code_change`,
   `code_changes`).
 
+- **Answer instruction** (task #80, off by default): config `answer_format`.
+  Unset or `"schema_text"` sends exactly the requests of 811fdcc (schema text
+  after the last message, `json_object`; checked against recorded request
+  hashes). `"example"` shows a placeholder example object instead
+  (`{"contribution": <whole number from 0 to 20>, ...}`, no new number);
+  `"json_schema"` keeps the messages and sends `response_format` json_schema
+  with `strict: true` (every object closed, every field required). When set it
+  is in the config record, rows, raw log and `prompt_sha256`. Comparison:
+  `notes/cevap_talimati_tasarim.md`.
+- **Status file** (task #80): once a run has passed its checks, the run
+  process writes `<runs-dir>/<run>/status.json` itself (pid, heartbeat every
+  `--heartbeat-interval` s, default 30, units complete, cost, stop_reason, at
+  the end outcome). A `stop_request.json` naming its pid makes it send itself
+  SIGTERM (for callers that may not signal it, e.g. orc's sandbox).
+
 ```bash
 .venv/bin/python pgg_game.py --dry-run --config configs/pilot.json   # no API, no key
 .venv/bin/python pgg_game.py --config configs/pilot.json --run pilot_<date> --runs-dir /abs/path/runs
@@ -172,3 +187,35 @@ the calibration (reads the run directory only):
 ```
 .venv/bin/python pgg_cost_calibrate.py --run-dir /abs/workspace/runs/pilot_v2_20261005
 ```
+
+## Long runs outside any tool session (`scripts/runctl.py`, task #80)
+
+A paid run is started by the user in their own Terminal (outside orc's
+sandbox), as a detached process: own session (setsid), SIGHUP ignored, output
+to `<runs-dir>/<run>/console.log`. orc and the user follow it from the files
+only. Comparison of the options (launchd, nohup/setsid, tmux, tool background
+command), what was tried in this environment and the step-by-step guide in
+Turkish: `notes/uzun_omurlu_kosu.md`.
+
+```bash
+cd /abs/workspace/_kod_<sha>                     # stamped code copy (see above)
+# the key must be in the environment (a code copy has no ../.env); never print it
+PY=/abs/project-publicgoods/.venv/bin/python
+$PY pgg_game.py --dry-run --config configs/<config>.json                 # gate first
+$PY scripts/runctl.py start  --config configs/<config>.json --run <run> \
+    --runs-dir /abs/workspace/runs --caffeinate  # add --resume to go on
+$PY scripts/runctl.py status --runs-dir /abs/workspace/runs --run <run>  # files only
+$PY scripts/runctl.py stop   --runs-dir /abs/workspace/runs --run <run> --wait 1000
+```
+
+- `start` waits until the run's `status.json` names the new pid (or prints
+  the console log's tail when the process ended at once, e.g. a refused gate),
+  records the launch in `launcher.jsonl` (never the environment) and returns;
+  the terminal can be closed. `--caffeinate` keeps the Mac awake while the run
+  lives (not with the lid closed).
+- `status` reads files only. Exit code 0 running, 3 ended, 4 heartbeat stale
+  (process may be gone: console log, then `start --resume`), 2 no status yet.
+- `stop` sends SIGTERM to the pid of `status.json` if `<run>.lock` holds the
+  same pid; where signalling is not allowed (orc's sandbox) or with
+  `--via-file`, it writes `stop_request.json`. Either way the run ends with
+  stop_reason "interrupted": summary at once, calls in flight waited for.

@@ -275,6 +275,78 @@ def augment_with_schema(messages: list[dict], schema: dict) -> list[dict]:
     return augmented
 
 
+# Answer instruction (task #80, EMIR 4d; notes/cevap_talimati_tasarim.md). None
+# is "schema_text": the request is exactly that of the code before task #80.
+#   schema_text  the schema text appended (augment_with_schema), json_object
+#   example      a placeholder example object instead of the schema text
+#                (augment_with_example), json_object; option A
+#   json_schema  the messages of schema_text, response_format json_schema with
+#                strict true (strict_json_schema); option B
+ANSWER_FORMATS = ("schema_text", "example", "json_schema")
+
+
+def example_template(schema: dict) -> str:
+    """The shape of an answer to schema, with <...> placeholders instead of values.
+
+    An integer is "<whole number from MIN to MAX>" (the bounds of the schema,
+    which the question states anyway) or "<whole number>"; a string is
+    "<its description>" in quotes. No other number is written, so the example
+    proposes no value (anchoring). It is not JSON (the integer placeholders
+    are bare).
+    """
+    t = schema.get("type")
+    if t == "object":
+        return "{" + ", ".join(f"{json.dumps(k, ensure_ascii=False)}: {example_template(v)}"
+                               for k, v in schema.get("properties", {}).items()) + "}"
+    if t == "integer":
+        if "minimum" in schema and "maximum" in schema:
+            return f"<whole number from {schema['minimum']} to {schema['maximum']}>"
+        return "<whole number>"
+    return json.dumps(f"<{schema.get('description') or 'text'}>", ensure_ascii=False)
+
+
+def augment_with_example(messages: list[dict], schema: dict) -> list[dict]:
+    """Copy of messages whose last one asks for ONLY a JSON object shaped as example_template."""
+    augmented = list(messages)
+    augmented[-1] = {
+        **augmented[-1],
+        "content": (
+            augmented[-1]["content"]
+            + "\n\nRespond with ONLY a JSON object of this form, with your own values in "
+              "place of the <...> parts:\n"
+            + example_template(schema)
+        ),
+    }
+    return augmented
+
+
+def strict_json_schema(schema: dict) -> dict:
+    """schema for strict structured outputs: every object closed, every property required."""
+    out = dict(schema)
+    if schema.get("type") == "object":
+        props = {k: strict_json_schema(v) for k, v in schema.get("properties", {}).items()}
+        out["properties"] = props
+        required = list(schema.get("required", []))
+        out["required"] = required + [k for k in props if k not in required]
+        out["additionalProperties"] = False
+    return out
+
+
+def answer_request(messages: list[dict], schema: dict,
+                   answer_format: str | None = None) -> tuple[list[dict], dict]:
+    """(messages sent, response_format) for an answer_format (ANSWER_FORMATS)."""
+    if answer_format in (None, "schema_text"):
+        return augment_with_schema(messages, schema), {"type": "json_object"}
+    if answer_format == "example":
+        return augment_with_example(messages, schema), {"type": "json_object"}
+    if answer_format == "json_schema":
+        return augment_with_schema(messages, schema), {
+            "type": "json_schema",
+            "json_schema": {"name": "answer", "strict": True,
+                            "schema": strict_json_schema(schema)}}
+    raise ValueError(f"answer_format must be one of {ANSWER_FORMATS}, got {answer_format!r}")
+
+
 def _usage_dict(u) -> dict | None:
     if u is None:
         return None
@@ -719,6 +791,7 @@ def _call_llm_counted(
     reasoning_cap_rule: str = DEFAULT_REASONING_CAP_RULE,
     attempt_log: dict | None = None,
     on_attempt=None,
+    answer_format: str | None = None,
 ) -> tuple[dict, int, int]:
     """call_llm that also returns the parse failures and provider errors it retried.
 
@@ -809,12 +882,17 @@ def _call_llm_counted(
     record is logged). An attempt_started without a result record is an
     attempt cut off in flight (the process was killed). Without attempt_log
     nothing of this is logged (the records are as before).
+
+    answer_format (task #80, ANSWER_FORMATS; answer_request): None sends
+    exactly what the code before it sent; when set, every record of the call
+    carries "answer_format".
     """
-    deadline_s = DEFAULT_REQUEST_DEADLINE_S if request_deadline_s is None else request_deadline_s
+    deadline_s =DEFAULT_REQUEST_DEADLINE_S if request_deadline_s is None else request_deadline_s
     if not deadline_s > 0:
         raise ValueError("request_deadline_s must be positive")
     log_path = LOG_PATH
-    augmented = augment_with_schema(messages, schema)
+    # task #80: answer_format None sends exactly what the code before it sent
+    augmented, response_format = answer_request(messages, schema, answer_format)
     # temperature=None: not sent, the provider's own default applies.
     extra = {} if temperature is None else {"temperature": temperature}
     if timeout is not None:
@@ -826,6 +904,9 @@ def _call_llm_counted(
         body["provider"] = provider
     effort_label = reasoning_effort_label(reasoning_effort)
     tag = {} if call_info is None else {"call": call_info}
+    # task #80: only when set (the records of the default stay as before)
+    if answer_format is not None:
+        tag["answer_format"] = answer_format
 
     last_err = None
     last_finish_reason = None
@@ -837,7 +918,7 @@ def _call_llm_counted(
             messages=augmented,
             max_tokens=max_tokens,
             **extra,
-            response_format={"type": "json_object"},
+            response_format=response_format,
             # X-OpenRouter-Metadata: the response then names the provider
             # that served it (openrouter_metadata, "Router Metadata" docs).
             extra_headers={"X-Title": "GABM public goods",
@@ -1116,6 +1197,7 @@ def call_llm_valid(
     reasoning_cap_rule: str = DEFAULT_REASONING_CAP_RULE,
     attempt_log: dict | None = None,
     on_attempt=None,
+    answer_format: str | None = None,
 ) -> tuple[dict, int] | tuple[dict, int, int]:
     """call_llm, re-requesting payloads for which is_valid(parsed) is False.
 
@@ -1165,7 +1247,7 @@ def call_llm_valid(
                 reasoning_cap_rule=reasoning_cap_rule,
                 attempt_log=(None if attempt_log is None
                              else {**attempt_log, "request": n_invalid}),
-                on_attempt=on_attempt)
+                on_attempt=on_attempt, answer_format=answer_format)
         except RuntimeError as e:
             if counts is not None:
                 counts.update(

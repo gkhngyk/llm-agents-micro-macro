@@ -279,6 +279,34 @@ written; a lock of a dead PID is stale: it is taken over, logged
 SIGINT and SIGTERM stop the run with stop_reason "interrupted": the summary is
 written at once, then once more after the calls in flight have ended.
 
+Status file (task #80). Once the run has passed its checks (a refused run or
+resume writes nothing), the run process itself keeps <output dir>/status.json
+(STATUS_FILE) up to date: written at the start, then by a heartbeat thread
+every heartbeat_s seconds (CLI --heartbeat-interval, default
+DEFAULT_HEARTBEAT_S; outside the "config" record) and once more at the end.
+It holds pid, host, segment, state ("running", "stopping" after a stop
+reason, "ended"), heartbeat time, units complete (heartbeat: units of the
+earlier segments + units of this segment that returned; at the end the
+summary's count), cost (total, segment, per model), stop_reason and, at the
+end, outcome ("completed", "stopped", "aborted", "error") and the summary
+path. It is replaced atomically (temporary file + os.replace), so a reader
+never sees half of it. scripts/runctl.py reads it (status) and stops a run
+with SIGTERM or, where the caller may not signal the process (orc's sandbox),
+with <output dir>/stop_request.json (STOP_REQUEST_FILE) holding the run's pid
+and segment: the heartbeat thread checks it every second and, when the pid is
+its own, sends SIGTERM to its own process, so both ways end as a signal does
+(stop_reason "interrupted", the request in the pgg_run_stopped event).
+
+Answer instruction (task #80, EMIR 4d; off by default). Config
+"answer_format" (ANSWER_FORMATS): unset or "schema_text" sends what the code
+before task #80 sent (schema text after the last message, json_object);
+"example" shows a placeholder example object instead of the schema text
+(llm_client.augment_with_example); "json_schema" keeps the messages of
+schema_text and asks for response_format json_schema, strict true
+(llm_client.strict_json_schema). When set it is in the config record (a
+resume with another value stops), in every row, in the raw-log records and in
+prompt_sha256. notes/cevap_talimati_tasarim.md compares the options.
+
 Hangs. Every HTTP attempt has a wall-clock deadline, request_deadline_s
 (default llm_client.DEFAULT_REQUEST_DEADLINE_S = 900 s; config / CLI
 --request-deadline): past it the attempt is abandoned, logged as a transport
@@ -389,6 +417,14 @@ QUANTIZATIONS = ("int4", "int8", "fp4", "mxfp4", "nvfp4", "fp6", "fp8", "mxfp8",
 # Keep it well above request_deadline_s (default 900 s): one attempt may take
 # that long.
 DEFAULT_STALL_TIMEOUT_S = 1800.0
+# Status file of a running run and its heartbeat (task #80; module docstring).
+STATUS_FILE = "status.json"
+STOP_REQUEST_FILE = "stop_request.json"
+DEFAULT_HEARTBEAT_S = 30.0
+# Answer instruction (task #80, EMIR 4d; = llm_client.ANSWER_FORMATS, a test
+# checks): config "answer_format", None = "schema_text" = the requests of the
+# code before task #80. notes/cevap_talimati_tasarim.md compares the options.
+ANSWER_FORMATS = ("schema_text", "example", "json_schema")
 # Operational limits compared with the previous segment on --resume (a
 # difference needs allow_timeout_change / --allow-timeout-change).
 TIMEOUT_SETTINGS = ("request_deadline_s", "stall_timeout_s")
@@ -1476,6 +1512,9 @@ class RunConfig:
     # how reasoning_capped reads the usage of that model; models missing
     # from it (and None) use "reasoning" (reasoning_tokens >= max_tokens - 4096)
     reasoning_cap_rule: dict | None = None
+    # task #80 (EMIR 4d): ANSWER_FORMATS entry; None = schema_text (as before;
+    # not in the config record, rows or raw log then)
+    answer_format: str | None = None
     _frame_cache: dict | None = field(default=None, init=False, repr=False, compare=False)
     _frame_audit: dict | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -1613,6 +1652,9 @@ class RunConfig:
                         or not value > 0):
                     raise ValueError(f"model_budget_usd[{key}] must be a positive number, "
                                      f"got {value!r}")
+        if self.answer_format is not None and self.answer_format not in ANSWER_FORMATS:
+            raise ValueError(f"answer_format must be one of {ANSWER_FORMATS}, "
+                             f"got {self.answer_format!r}")
         if self.reasoning_cap_rule is not None:
             if not isinstance(self.reasoning_cap_rule, dict):
                 raise ValueError("reasoning_cap_rule must be a {model key: rule} object")
@@ -1899,14 +1941,17 @@ def _attempt_table(per_model: dict) -> dict:
     return out
 
 
-def prompt_sha256(model: str, messages, schema) -> str:
+def prompt_sha256(model: str, messages, schema, answer_format: str | None = None) -> str:
     """sha256 of what one decision call sends: model, messages and schema (task #79).
 
     llm_client builds the request from exactly these (augment_with_schema);
-    an answer is reused on resume only for the same value.
+    an answer is reused on resume only for the same value. answer_format
+    (task #80) is in it only when set, so the default's sha256 is as before.
     """
-    text = json.dumps({"model": model, "messages": messages, "schema": schema},
-                      ensure_ascii=False, sort_keys=True)
+    sent = {"model": model, "messages": messages, "schema": schema}
+    if answer_format is not None:
+        sent["answer_format"] = answer_format
+    text = json.dumps(sent, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
@@ -2137,6 +2182,20 @@ class Engine:
         self._journal_lock = threading.Lock()
         self._reuse: dict[str, dict] = {}
         self._rows_done: dict[str, set] = {}
+        # Task #80: status.json and its heartbeat (written from the start of
+        # _run_locked's segment on; nothing before the checks have passed).
+        self.heartbeat_s = DEFAULT_HEARTBEAT_S
+        self._status: dict | None = None           # fixed part of status.json
+        self._status_lock = threading.Lock()
+        self._status_final = False
+        self._hb_stop = threading.Event()
+        self._hb_thread: threading.Thread | None = None
+        self._n_heartbeats = 0
+        self._units_done = 0                       # units of this segment that returned
+        self._signals_caught = False
+        self._signal_lock = threading.Lock()
+        self._stop_request: dict | None = None     # the stop_request.json acted on
+        self._last_summary: dict | None = None
 
     # -- seeds / output ----------------------------------------------------
 
@@ -2242,7 +2301,7 @@ class Engine:
         """
         unit = ctx.get("unit")
         key = (ctx.get("step"), ctx.get("round"), ctx.get("agent_id"), ctx.get("others_mean"))
-        sha = prompt_sha256(self.cfg.models[model_key], messages, schema)
+        sha = prompt_sha256(self.cfg.models[model_key], messages, schema, self.cfg.answer_format)
         entry = self._reuse.get(unit, {}).pop(key, None) if unit is not None else None
         if entry is not None:
             if entry.get("prompt_sha256") == sha:
@@ -2622,7 +2681,10 @@ class Engine:
                 # logged as degraded (decisions: as before); kept in task #73,
                 # where q2 asks for "a whole number (it can be positive, zero or
                 # negative)" without a +3 example
-                **({"signed_numbers": True} if ctx.get("step") == "comprehension" else {}))
+                **({"signed_numbers": True} if ctx.get("step") == "comprehension" else {}),
+                # task #80: only when set (the default request is as before)
+                **({"answer_format": self.cfg.answer_format}
+                   if self.cfg.answer_format is not None else {}))
         except RuntimeError as e:
             missing = self._comprehension_missing(e, counts, ctx)
             if missing is not None:
@@ -2740,6 +2802,9 @@ class Engine:
             "reasoning_effort": self.llm.reasoning_effort_label(self.cfg.effort_for(model_key)),
             "max_tokens": self.max_tokens, "temperature": "default",
             "seed": seed, "ts": time.time(),
+            # task #80, only when set
+            **({"answer_format": self.cfg.answer_format}
+               if self.cfg.answer_format is not None else {}),
         }
 
     # -- frames ------------------------------------------------------------
@@ -3088,6 +3153,8 @@ class Engine:
             return
         try:
             fn()
+            with self._lock:               # status.json heartbeat count (task #80)
+                self._units_done += 1
         except (RunStopped, ModelStopped):
             pass
         except RunAborted as e:
@@ -3155,6 +3222,8 @@ class Engine:
             # task #73, only when set
             **({"reasoning_cap_rule": dict(cfg.reasoning_cap_rule)}
                if cfg.reasoning_cap_rule is not None else {}),
+            # task #80, only when set
+            **({"answer_format": cfg.answer_format} if cfg.answer_format is not None else {}),
         })
 
     def frames_summary(self) -> dict:
@@ -4064,12 +4133,15 @@ class Engine:
             previous = signal.getsignal(sig)
             saved[sig] = previous if previous is not None else signal.SIG_DFL
             signal.signal(sig, self._on_signal)
+        self._signals_caught = True
 
-    @staticmethod
-    def _restore_signals(saved: dict) -> None:
-        for sig, handler in saved.items():
-            signal.signal(sig, handler)
-        saved.clear()
+    def _restore_signals(self, saved: dict) -> None:
+        # under _signal_lock: a stop request never sends SIGTERM to a restored handler
+        with self._signal_lock:
+            self._signals_caught = False
+            for sig, handler in saved.items():
+                signal.signal(sig, handler)
+            saved.clear()
 
     def _wait_pools(self) -> None:
         """After a signal: let the calls in flight end (they are billed and logged)."""
@@ -4079,6 +4151,146 @@ class Engine:
                     return
                 pool = self._pools.pop(0)
             pool.shutdown(wait=True)
+
+    # -- status file and heartbeat (task #80) ------------------------------
+
+    def _status_path(self) -> Path:
+        return self.cfg.output_dir() / STATUS_FILE
+
+    def _stop_request_path(self) -> Path:
+        return self.cfg.output_dir() / STOP_REQUEST_FILE
+
+    @staticmethod
+    def _iso(ts: float) -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(ts))
+
+    def _status_record(self, state: str, now: float) -> dict:
+        """status.json now: the fixed part, heartbeat, units, cost and stop reason."""
+        with self._lock:
+            units_done = self._units_done
+            stop_reason = self.stop_reason
+        before = len(self.plan.complete) if self.plan else 0
+        per_model = {self.cfg.models[k]: (self.stats[k]["cost_usd"]
+                                          + self.prior_stats[k]["cost_usd"])
+                     for k in self.cfg.models}
+        return {
+            **(self._status or {}), "state": state,
+            "heartbeat_ts": now, "heartbeat_at": self._iso(now),
+            "heartbeat_interval_s": self.heartbeat_s, "n_heartbeats": self._n_heartbeats,
+            "units": {"n_units": len(self._specs), "n_complete": before + units_done,
+                      "n_complete_before_segment": before,
+                      "n_completed_this_segment": units_done, "source": "heartbeat"},
+            "cost_usd": {"total": self.total_cost, "segment": self.segment_cost,
+                         "per_model": per_model},
+            "budget_usd": self.cfg.budget_usd,
+            "n_responses_segment": sum(s["n_responses"] for s in self.stats.values()),
+            "stopped_models": dict(self.stopped_models),
+            "stop_reason": stop_reason,
+            "signal": self._interrupted,
+            "stop_request": self._stop_request,
+        }
+
+    def _write_status(self, record: dict) -> None:
+        """Replace status.json atomically (a reader sees the old or the new file)."""
+        path = self._status_path()
+        tmp = path.with_name(f".{STATUS_FILE}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+
+    def _heartbeat(self) -> None:
+        """One heartbeat: status.json with state running / stopping (not after the end)."""
+        with self._status_lock:
+            if self._status_final or self._status is None:
+                return
+            self._n_heartbeats += 1
+            stopping = self.stop_reason is not None or self._interrupted is not None or self.stalled
+            self._write_status(self._status_record("stopping" if stopping else "running",
+                                                   time.time()))
+
+    def _check_stop_request(self) -> None:
+        """stop_request.json naming this process: stop as SIGTERM does."""
+        if self._stop_request is not None:
+            return
+        try:
+            req = json.loads(self._stop_request_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(req, dict) or req.get("pid") != os.getpid():
+            return                         # another (earlier) process's request
+        if req.get("segment") is not None and req.get("segment") != self.segment:
+            return
+        self._stop_request = {k: req.get(k) for k in ("pid", "segment", "requested_at", "by")}
+        self._log({"ts": time.time(), "event": "pgg_stop_request", "run": self.cfg.run,
+                   "segment": self.segment, "file": str(self._stop_request_path()),
+                   "request": self._stop_request})
+        with self._signal_lock:
+            if self._signals_caught:
+                os.kill(os.getpid(), signal.SIGTERM)
+            elif self._interrupted is None:    # run() outside the main thread: no handler
+                self._interrupted = "stop_request"
+
+    def _heartbeat_loop(self) -> None:
+        last = time.monotonic()
+        while not self._hb_stop.wait(min(1.0, self.heartbeat_s)):
+            try:
+                self._check_stop_request()
+                if time.monotonic() - last >= self.heartbeat_s:
+                    last = time.monotonic()
+                    self._heartbeat()
+            except Exception as e:         # never stops the run; recorded
+                self._log({"ts": time.time(), "event": "pgg_heartbeat_error",
+                           "run": self.cfg.run, "error": f"{type(e).__name__}: {e}"})
+
+    def _start_status(self, started: float) -> None:
+        """status.json at the segment start and the heartbeat thread."""
+        out_dir = self.cfg.output_dir()
+        self._status = {
+            "schema": 1, "run": self.cfg.run, "segment": self.segment, "pid": os.getpid(),
+            "host": socket.gethostname(), "started_ts": started,
+            "started_at": self._iso(started), "resume": self.plan is not None,
+            "files": {"results": str(out_dir / f"{self.cfg.run}.jsonl"),
+                      "summary": str(out_dir / f"{self.cfg.run}_summary.json"),
+                      "raw_log": str(self.llm.LOG_PATH),
+                      "stop_request": str(self._stop_request_path())},
+        }
+        self._heartbeat()
+        self._hb_stop.clear()
+        self._hb_thread = threading.Thread(target=self._heartbeat_loop, daemon=True,
+                                           name=f"heartbeat-{self.cfg.run}")
+        self._hb_thread.start()
+
+    def _finish_status(self, error: BaseException | None) -> None:
+        """Last status.json: state ended, outcome, the summary's units and cost."""
+        if self._status is None:
+            return
+        self._hb_stop.set()
+        if self._hb_thread is not None:
+            self._hb_thread.join()
+        with self._status_lock:
+            if self._status_final:
+                return
+            now = time.time()
+            record = self._status_record("ended", now)
+            summary = self._last_summary or {}
+            if summary.get("units"):
+                record["units"] = {**summary["units"], "source": "summary"}
+            if summary.get("total_cost_usd") is not None:
+                record["cost_usd"]["total"] = summary["total_cost_usd"]
+            if error is None and self.stop_reason is None:
+                outcome = "completed"
+            elif isinstance(error, (RunStopped, RunInterrupted)) or (
+                    error is None and self.stop_reason is not None):
+                outcome = "stopped"
+            elif isinstance(error, RunAborted):
+                outcome = "aborted"
+            else:
+                outcome = "error"
+            record.update(outcome=outcome, ended_ts=now, ended_at=self._iso(now),
+                          error=None if error is None or outcome == "stopped" else
+                          f"{type(error).__name__}: {error}"[:500],
+                          summary=str(self.cfg.output_dir() / f"{self.cfg.run}_summary.json"))
+            self._write_status(record)
+            self._status_final = True
 
     # -- summary -----------------------------------------------------------
 
@@ -4320,12 +4532,15 @@ class Engine:
             # task #79: the accepted answers, one line each
             "accepted_answers": {"path": str(self._journal_file()),
                                  "lines": _count_lines(self._journal_file())},
+            # task #80: status.json of the run process (heartbeat; one JSON document)
+            "status": {"path": str(self._status_path())},
             "summary_backups": [str(p) for p in sorted(
                 summary_path.parent.glob(f"{self.cfg.run}_summary.seg*.json"))],
         }
         summary_path.write_text(
             json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         self.files = summary["files"]
+        self._last_summary = summary
         return summary
 
     # -- whole run ---------------------------------------------------------
@@ -4435,9 +4650,14 @@ class Engine:
             out_dir.mkdir(exist_ok=True)   # the parent exists (validate)
         # no other process may run or resume this run at the same time
         self.lock = acquire_run_lock(self._lock_path())
+        error = None
         try:
             return self._run_locked(resume, out_dir, path, summary_path)
+        except BaseException as e:
+            error = e
+            raise
         finally:
+            self._finish_status(error)     # task #80: only once status.json was started
             release_run_lock(self.lock)
 
     def _record_truncated(self, cut: dict) -> None:
@@ -4516,6 +4736,7 @@ class Engine:
                     if self.lock.get("stale_lock"):
                         self._log({"ts": time.time(), "event": "pgg_stale_lock_taken_over",
                                    "run": cfg.run, "segment": self.segment, "lock": self.lock})
+                    self._start_status(started)        # task #80: status.json + heartbeat
                     for model_key, session_id, call in (self.plan.unmarked_discarded
                                                         if self.plan else []):
                         self._discard(model_key, session_id, call, "found_on_resume")
@@ -4536,13 +4757,17 @@ class Engine:
                 self._raise_on_signal = False
                 interrupted = self._interrupted
                 if interrupted is not None:
-                    self._stop("interrupted", signal=interrupted)
+                    self._stop("interrupted", signal=interrupted,
+                               **({"stop_request": self._stop_request}
+                                  if self._stop_request else {}))
                 if self.stalled:
                     with self._lock:       # calls still in flight write no row any more
                         self._out = None
                 out.flush()
                 summary = self._write_summary(started, path, summary_path, log_path, "pgg_run_end")
                 if interrupted is not None and not self.stalled:
+                    # status.json says "stopping" / "interrupted" at once (task #80)
+                    self._heartbeat()
                     # the summary is on disk; a second signal now acts as usual
                     self._restore_signals(handlers)
                     self._wait_pools()
@@ -5106,6 +5331,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--allow-timeout-change", action="store_true", default=None,
                     help="--resume: allow request_deadline_s / stall_timeout_s other than the "
                          "previous segment's (recorded in the summary, timeout_changes)")
+    ap.add_argument("--heartbeat-interval", type=float, dest="heartbeat_s",
+                    help=f"seconds between the heartbeats of <runs-dir>/<run>/{STATUS_FILE} "
+                         f"(default {DEFAULT_HEARTBEAT_S:g}; not part of the config record)")
     ap.add_argument("--max-invalid", type=int)
     ap.add_argument("--no-rationale", action="store_true", default=None)
     ap.add_argument("--workers", type=int)
@@ -5209,6 +5437,7 @@ def run_config(run: str, s: dict, models: dict[str, str], output: dict) -> RunCo
         expected_cost_gate_usd=s.get("expected_cost_gate_usd"),
         reasoning_cap_rule=resolve_model_keyed(s.get("reasoning_cap_rule"), models,
                                                "reasoning_cap_rule"),
+        answer_format=s.get("answer_format"),
         **output)
 
 
@@ -5562,6 +5791,7 @@ def main(argv=None) -> int:
                                     "expected_cost_gate_usd",
                                     "invalid_rate_cap", "stop_on_length", "check_snapshot",
                                     "snapshot_version_models", "reasoning_cap_rule",
+                                    "answer_format",
                                     "seed_namespace", "parallel_units", "workers",
                                     "isolated_frame", "isolated_round_no", "comprehension")
                   if s.get(k) is not None}
@@ -5637,6 +5867,11 @@ def main(argv=None) -> int:
     except ValueError as e:
         print(f"HATA: {e}", file=sys.stderr)
         return 1
+    if args.heartbeat_s is not None:
+        if not args.heartbeat_s > 0:
+            print("HATA: --heartbeat-interval must be positive", file=sys.stderr)
+            return 1
+        engine.heartbeat_s = args.heartbeat_s
     if engine.stall_timeout <= engine.deadline:
         print(f"UYARI: stall_timeout_s ({engine.stall_timeout:g}) <= request_deadline_s "
               f"({engine.deadline:g}): a single long attempt can stop the run as stalled",
