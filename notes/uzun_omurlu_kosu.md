@@ -33,7 +33,7 @@ sonucuyla yazılı; denenemeyenler **(doğrulanmadı)** diye işaretli.
 | Seçenek | Sandbox'ta çalışırlık | Oturum / görev kapanınca | Durdurma / sürdürme | Log yeri | Risk |
 |---|---|---|---|---|---|
 | **A. Araç arka plan komutu** (bugünkü yol, `run_in_background` / 600 sn ön plan) | Çalışır | Görev bitince süreç ölür ya da `interrupted` olur (#44); 600 sn ön plan sınırı segment böldürür (mini-pilot) | SIGINT/SIGTERM, `--resume` | Komut çıktısı + run dizini | Uçuştaki çağrılar kaybolur (mini-pilot: 100 atılan yanıt); kesinti sayısı araç sınırına bağlı |
-| **B. setsid + SIGHUP yok sayma (nohup eşdeğeri), `scripts/runctl.py start`** | Başlar, komut bitince yaşar, ağ en az 16 sn sonra da açık (denendi). Orc görevi bittikten sonra ağ **(doğrulanmadı)**; süreç sandbox profilini miras alır | Kullanıcının kendi Terminal'inden başlatılınca: terminal kapanması süreci etkilemez (oturumu ve kontrol terminali yok) **(bu ortamda terminal yok, doğrulanmadı)**. macOS'ta oturumu kapatma (logout) ve yeniden başlatma süreci öldürür **(doğrulanmadı)** | `runctl.py stop` → SIGTERM (aynı kullanıcı, sandbox dışı) ya da `stop_request.json` (orc sandbox'ı); `runctl.py start --resume` | `runs/<run>/console.log` (stdout+stderr), `launcher.jsonl`, `status.json`; ham log ve özet her zamanki yerde | Mac uykuya geçerse bağlantılar kopar (`--caffeinate` ile azalır; kapak kapanınca yine uyur). Süreç ölürse durum dosyası "bayat" görünür, `--resume` ile devam edilir |
+| **B. setsid + SIGHUP yok sayma (nohup eşdeğeri), `scripts/runctl.py start`** | Başlar, komut bitince yaşar, ağ en az 16 sn sonra da açık (denendi). Orc görevi bittikten sonra ağ **(doğrulanmadı)**; süreç sandbox profilini miras alır | Kullanıcının kendi Terminal'inden başlatılınca: terminal kapanması süreci etkilemez (oturumu ve kontrol terminali yok) **(bu ortamda terminal yok, doğrulanmadı)**. macOS'ta oturumu kapatma (logout) ve yeniden başlatma süreci öldürür **(doğrulanmadı)** | `runctl.py stop` → SIGTERM (aynı kullanıcı, sandbox dışı) ya da `stop_request.json` (orc sandbox'ı); `runctl.py start --resume` | `runs/<run>/console.log` (stdout+stderr), `launcher.jsonl`, `status.json`; ham log ve özet her zamanki yerde | Mac uykuya geçerse bağlantılar kopar (caffeinate ile azalır, #90'dan beri varsayılan açık; kapak kapanınca yine uyur). Süreç ölürse durum dosyası "bayat" görünür, `--resume` ile devam edilir |
 | **C. tmux / screen** | tmux sandbox'ta açılamıyor (Unix soketi yasak, denendi); screen de aynı kısıtta olmalı **(doğrulanmadı)** | Kullanıcının terminalinde: tmux sunucusu terminal kapanınca yaşar; logout'ta ölür **(doğrulanmadı)** | Panede Ctrl-C (SIGINT → `interrupted`), `--resume` | Panenin kaydırma geçmişi; dosyaya ancak `tee` ile | Yanlışlıkla Ctrl-C; orc bağlanıp izleyemez, yalnız dosyalardan izler (B ile aynı); ek araç bilgisi gerekir |
 | **D. launchd kullanıcı ajanı** (`~/Library/LaunchAgents/*.plist`, `launchctl bootstrap gui/501`) | Kurulum denenmedi **(doğrulanmadı)**. launchd'nin başlattığı süreç orc sandbox'ının **dışında** çalışır; bu yüzden ajanı orc değil kullanıcı kurmalı | Terminalden ve orc'tan bağımsız; logout'ta `gui` alanındaki ajanlar biter **(doğrulanmadı)** | `launchctl bootout` ya da SIGTERM; `KeepAlive` açık kalırsa durdurulan koşu yeniden başlatılır (çift faturalama riski), kapalı olmalı | `StandardOutPath` / `StandardErrorPath` | Kabuk ortamı yok: anahtar `../.env`'den okunmalı ya da plist'e yazılmalı (düz metin anahtar, kabul edilemez); `_kod_<sha>/` kopyasında `../.env` = `workspace/.env` yok. Kurulum ve temizlik (plist silme) gerekir |
 | (E. OpenRouter Batch) | — | Süreç gerekmez | Batch kimliği diskte, `--resume` toplar | Batch logları | Ayrı mimari; kullanıcı notundaki batch yolu. Bu emrin konusu değil |
@@ -41,7 +41,7 @@ sonucuyla yazılı; denenemeyenler **(doğrulanmadı)** diye işaretli.
 ## 4. Öneri
 
 **B: `scripts/runctl.py start`, ücretli koşularda kullanıcının kendi Terminal'inden (sandbox
-dışında) `--caffeinate` ile.** Orc koşuyu yalnız dosyalardan izler (`runctl.py status`) ve gerekirse
+dışında); caffeinate varsayılan açık (#90; `--no-caffeinate` kapatır).** Orc koşuyu yalnız dosyalardan izler (`runctl.py status`) ve gerekirse
 `runctl.py stop` ile durdurur.
 
 Gerekçe:
@@ -105,8 +105,10 @@ dosyası olduğu gibi kalır (test edildi).
 4. Başlatın (açık run adıyla; `{run_date}` şablonu kabul edilmez):
    ```bash
    $PY scripts/runctl.py start --config configs/<config>.json --run <run> \
-       --runs-dir "$W/runs" --caffeinate
-   # sürdürme: aynı komut + --resume
+       --runs-dir "$W/runs"
+   # sürdürme: aynı komut + --resume (aynı _kod_<sha> kopyasıyla: başka git_commit'li
+   # segmentin kabul edilmiş cevapları yeniden kullanılmaz, sürdürme başlamaz; #90)
+   # caffeinate varsayılan açık (#90); --no-caffeinate kapatır; caffeinate yoksa uyarı verir
    ```
    Komut, koşunun ilk `status.json`'u yazmasını bekler (en çok 60 sn), durumu yazar ve çıkar.
    Süreç erken biterse (ör. prereg / kapı / kod sürümü reddi) konsol logunun sonunu gösterir ve

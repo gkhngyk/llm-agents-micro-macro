@@ -34,7 +34,7 @@ teknik not T1). Pilot v2'de (DeepSeek, GPT, Gemini) geçersiz 0, degraded 0.
 **A — örnek cevap nesnesi (şema metni yerine).** İki biçimi var:
 - A1 (somut değerli): `{"contribution": 10, "rationale": "..."}`. Sayı içerdiği için çapalama riski
   taşır (§5). Uygulanmadı.
-- A2 (yer tutuculu, uygulandı: `answer_format: "example"`). Tamsayı alanı soruda zaten yazan
+- A2 (yer tutuculu, uygulandı: `answer_format: "example_object"`). Tamsayı alanı soruda zaten yazan
   aralıkla, metin alanı açıklamasıyla gösterilir. Başka sayı yazılmaz. Sonuç geçerli bir JSON
   değildir, bir kalıptır:
   ```
@@ -45,7 +45,7 @@ teknik not T1). Pilot v2'de (DeepSeek, GPT, Gemini) geçersiz 0, degraded 0.
   `{"punishments": {"2": <whole number from 0 to 10>, ...}}`, story_A'da
   `{"credits_into_jar": <whole number from 0 to 20>, ...}`. `response_format` json_object kalır.
 
-**B — `response_format: json_schema`, `strict: true`.** Uygulandı: `answer_format: "json_schema"`.
+**B — `response_format: json_schema`, `strict: true`.** Uygulandı: `answer_format: "json_schema_strict"` (#80'de `"json_schema"`; #90'da yeniden adlandırıldı).
 - B1 (uygulandı): mesajlar bugünküyle bayt bayt aynı kalır, şema metni istemde durur. Yalnız
   `response_format` değişir:
   ```json
@@ -143,7 +143,8 @@ sorusu bu.
   - `answer_format` config kaydına girer. Başka bir değerle `--resume` çağrı yapmadan durur
     (test edildi).
   - Her satıra ve ham log kaydına yazılır.
-  - `prompt_sha256`'ya girer: kabul edilmiş cevap başka biçimle yeniden kullanılmaz.
+  - `prompt_sha256`'ya (#90'dan beri isteğin tamamının `request_sha256`'sına) girer: kabul edilmiş
+    cevap başka biçimle yeniden kullanılmaz.
   - Kod sürümü (`git_commit`) kaydı zaten her segmentte var.
 - **Ana deney için öneri (karar değil):** Prensip "modelin gördüğü her metin çerçeve dosyasındadır".
   Talimat da çerçeveye taşınırsa (ör. `response.instruction` şablonu), bu yeni çerçeve sürümleri
@@ -170,8 +171,10 @@ anlama yanıtlarında da gerekçe her zaman olur.
 
 ## 8. Pilot v2 ve mini-pilot ile karşılaştırılabilirlik
 
-- **B1:** Mesajlar bayt bayt aynı (test: `answer_format: "json_schema"` ile her isteğin mesajları
-  varsayılanınkiyle aynı). Değişen yalnız kod çözme kısıtı. DeepSeek ve GPT mini-pilotta zaten
+- **B1:** #80'de mesajlar bayt bayt aynıydı. #90'dan (EMİR 5 M4) beri istemdeki şema metni zorlanan
+  katı şemanın kendisi (`strict_json_schema`: `rationale` dahil her alan `required`,
+  `additionalProperties: false`); talimat ile zorlanan şema birbirine uysun diye. Şema metninden
+  önceki her şey varsayılanınkiyle bayt bayt aynı (test). Değişen: şema metni ve kod çözme kısıtı. DeepSeek ve GPT mini-pilotta zaten
   ~%0 geçersizle cevap verdiği için, katkı dağılımı karşılaştırılabilir kalmalı **(doğrulanmadı)**.
   Constrained decoding cevap dağılımını değiştirebilir; biçim testinde DeepSeek/GPT'nin katkı
   dağılımı mini-pilotla kaba olarak karşılaştırılmalı (betimsel). Mistral'ın mini-pilot verisi zaten
@@ -190,11 +193,18 @@ anlama yanıtlarında da gerekçe her zaman olur.
 
 - Config / RunConfig anahtarı `answer_format`:
   - yok ya da `"schema_text"`: bugünkü istek;
-  - `"example"`: A2;
-  - `"json_schema"`: B1.
+  - `"example_object"`: A2 (#80'de `"example"`);
+  - `"json_schema_strict"`: B1 (#80'de `"json_schema"`).
+  - #90: A2 ve B1'de `rationale` hem istemde hem denetimde zorunlu. A2'de örnek "every field is
+    required" der ve `llm_client.required_fields_present` her alanı arar; B1'de istemdeki şema
+    metni zorlanan katı şemadır, aynı denetim sağlayıcı şemayı uygulamazsa da çalışır. Gerekçe:
+    B'de strict mod her alanı zorunlu kılar (OpenAI strict kuralı), yani "iki yerde de isteğe
+    bağlı" B'de kurulamaz; iki seçenek aynı kuralla karşılaştırılsın diye A'da da zorunlu.
+    Varsayılan `schema_text`'te `rationale` eskisi gibi isteğe bağlı.
   - `llm_client.answer_request` isteği kurar. `example_template` ve `strict_json_schema` saf
     fonksiyonlardır.
-- Ayarsızken config kaydı, satırlar, ham log kayıtları ve `prompt_sha256` önceki kodunkiyle aynı.
+- Ayarsızken config kaydı ve `prompt_sha256` önceki kodunkiyle aynı; gönderilen istek bayt bayt aynı.
+  #90'dan beri satırlar ve ham log kayıtları ek olarak `request_sha256` alanını taşır.
 - `tests/test_answer_format.py` (9 test):
   - **811fdcc ile bayt bayt aynılık:** Üç küçük tasarımın bütün istekleri (model, mesajlar,
     `response_format`, `max_tokens`, gövde, başlıklar) 811fdcc koduyla üretilen hash'lerle

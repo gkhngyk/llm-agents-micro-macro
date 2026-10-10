@@ -12,8 +12,10 @@ of the caller: closing the terminal or ending the caller's session does not
 signal it), SIGHUP ignored (as nohup), stdin /dev/null, stdout and stderr
 appended to <runs-dir>/<run>/console.log. The launch is recorded in
 <runs-dir>/<run>/launcher.jsonl (pid, argv, code dir, console log; never the
-environment). With --caffeinate, `caffeinate -is -w PID` keeps the Mac awake
-while the run lives. start then waits (--wait) until the run's own
+environment). By default (task #90; --no-caffeinate turns it off)
+`caffeinate -is -w PID` keeps the Mac awake while the run lives; where there is
+no caffeinate (not macOS, or not on PATH) start warns and goes on (the run
+then pauses while the computer sleeps). start then waits (--wait) until the run's own
 status.json names the new pid, or the process has ended (the console log's
 tail is printed).
 
@@ -41,6 +43,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -271,6 +274,11 @@ def cmd_start(args) -> int:
         print("başlatılmadı", file=sys.stderr)
         return 1
     cmd = build_command(args, code_dir)
+    caffeinate = shutil.which("caffeinate") if args.caffeinate else None
+    if args.caffeinate and caffeinate is None:
+        print("UYARI: caffeinate bulunamadı (macOS değil ya da PATH'te değil): bilgisayar "
+              "uyursa koşu da duraklar; uyku ayarını elle kapatın ya da --no-caffeinate ile "
+              "bu uyarıyı kapatın", file=sys.stderr)
     run_dir.mkdir(exist_ok=True)
     console = run_dir / CONSOLE_LOG
     now = time.time()
@@ -279,17 +287,21 @@ def cmd_start(args) -> int:
         log.flush()
         proc = _spawn(cmd, cwd=code_dir, log=log)
     caffeinate_pid = None
-    if args.caffeinate:
+    if caffeinate is not None:
         with open(os.devnull, "w") as null:
-            caffeinate_pid = _spawn(["caffeinate", "-is", "-w", str(proc.pid)],
+            caffeinate_pid = _spawn([caffeinate, "-is", "-w", str(proc.pid)],
                                     cwd=code_dir, log=null).pid
     record = {"ts": now, "at": _iso(now), "event": "start", "pid": proc.pid,
               "host": socket.gethostname(), "argv": cmd, "cwd": str(code_dir),
               "python": args.python, "console_log": str(console), "resume": args.resume,
-              "heartbeat_interval_s": args.heartbeat_interval, "caffeinate_pid": caffeinate_pid}
+              "heartbeat_interval_s": args.heartbeat_interval,
+              "caffeinate": args.caffeinate, "caffeinate_pid": caffeinate_pid,
+              "caffeinate_missing": args.caffeinate and caffeinate is None}
     with open(run_dir / LAUNCHER_LOG, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    print(f"başlatıldı: pid {proc.pid} (ayrı oturum), konsol {console}")
+    print(f"başlatıldı: pid {proc.pid} (ayrı oturum), konsol {console}"
+          + (f"; caffeinate pid {caffeinate_pid} (Mac koşu boyunca uyumaz)"
+             if caffeinate_pid else ""))
     deadline = time.monotonic() + args.wait
     while time.monotonic() < deadline:
         code = proc.poll()
@@ -398,8 +410,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--python", default=sys.executable)
     p.add_argument("--entry", help="script run instead of <code-dir>/pgg_game.py (tests)")
     p.add_argument("--heartbeat-interval", type=float, default=DEFAULT_HEARTBEAT_S)
-    p.add_argument("--caffeinate", action="store_true",
-                   help="keep the Mac awake while the run lives (caffeinate -is -w PID)")
+    p.add_argument("--caffeinate", action=argparse.BooleanOptionalAction, default=True,
+                   help="keep the Mac awake while the run lives (caffeinate -is -w PID); on "
+                        "by default, --no-caffeinate turns it off; without caffeinate on PATH "
+                        "start warns and goes on")
     p.add_argument("--wait", type=float, default=60.0,
                    help="seconds to wait for the run's first status.json")
     p.add_argument("extra", nargs=argparse.REMAINDER, help="-- further pgg_game.py options")

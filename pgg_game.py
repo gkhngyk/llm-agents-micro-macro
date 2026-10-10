@@ -297,15 +297,33 @@ and segment: the heartbeat thread checks it every second and, when the pid is
 its own, sends SIGTERM to its own process, so both ways end as a signal does
 (stop_reason "interrupted", the request in the pgg_run_stopped event).
 
-Answer instruction (task #80, EMIR 4d; off by default). Config
-"answer_format" (ANSWER_FORMATS): unset or "schema_text" sends what the code
-before task #80 sent (schema text after the last message, json_object);
-"example" shows a placeholder example object instead of the schema text
-(llm_client.augment_with_example); "json_schema" keeps the messages of
-schema_text and asks for response_format json_schema, strict true
-(llm_client.strict_json_schema). When set it is in the config record (a
-resume with another value stops), in every row, in the raw-log records and in
-prompt_sha256. notes/cevap_talimati_tasarim.md compares the options.
+Answer instruction (task #80, EMIR 4d; task #90, EMIR 5 M4; off by default).
+Config "answer_format" (ANSWER_FORMATS): unset or "schema_text" sends what the
+code before task #80 sent (schema text after the last message, json_object;
+"rationale" optional); "example_object" (option A) shows a placeholder
+example object instead of the schema text (llm_client.augment_with_example),
+json_object; "json_schema_strict" (option B) appends the strict schema
+(llm_client.strict_json_schema) as the schema text and sends the same schema
+as response_format json_schema, strict true. In A and B every field
+("rationale" included) is required in the prompt and in what is checked
+(llm_client.required_fields_present on top of the step's own check; in B the
+provider enforces it too). When set to A or B it is in the config record (a
+resume with another value stops); when set, in every row and the raw-log
+records; it changes the request body, so request_sha256 too.
+notes/cevap_talimati_tasarim.md compares the options.
+
+Reuse safety (task #90, EMIR 5 M1). A journaled answer (<run>.accepted.jsonl)
+is reused on --resume only when (1) the request this segment would send has
+the same request_sha256 (llm_client.request_body: messages with the answer
+instruction, response_format, max_tokens, provider routing, model; not the
+session id; records of the code before #90 carry prompt_sha256 only and are
+compared on it), else it is discarded ("prompt_changed") and asked; (2) the segment
+that obtained it ran the same git_commit as this one: otherwise the resume
+does not start (resume_plan problem "reuse refused", before any call; with
+discard_reuse_on_code_change / --discard-reuse-on-code-change those answers
+are discarded, "code_changed", and asked again); (3) it passes the step's
+is_valid again: otherwise it is discarded ("reuse_invalid", counted in
+n_reuse_invalid) and asked. Every row carries request_sha256.
 
 Hangs. Every HTTP attempt has a wall-clock deadline, request_deadline_s
 (default llm_client.DEFAULT_REQUEST_DEADLINE_S = 900 s; config / CLI
@@ -359,9 +377,10 @@ start event and its git_commit is never empty for a real run:
     git checkout, no stamp) or the code is dirty: ValueError / exit 1 before
     the lock, any write and any call. There is no option to override it. A
     dry run (also --resume --dry-run) only prints a warning.
-  * --resume records, never refuses, a git_commit other than (or unknown in)
-    the earlier segments': "code_change" in the segment entry and in the
-    start event, "code_changes" in the summary.
+  * --resume records a git_commit other than (or unknown in) the earlier
+    segments': "code_change" in the segment entry and in the start event,
+    "code_changes" in the summary. It refuses it only when an answer of such
+    a segment would be reused (task #90; "Reuse safety" above).
 
 Per row and summary (A2, A3). Every row has elapsed_s (seconds of the accepted
 attempt), n_transport and n_deadline (connection errors and attempts past the
@@ -421,10 +440,12 @@ DEFAULT_STALL_TIMEOUT_S = 1800.0
 STATUS_FILE = "status.json"
 STOP_REQUEST_FILE = "stop_request.json"
 DEFAULT_HEARTBEAT_S = 30.0
-# Answer instruction (task #80, EMIR 4d; = llm_client.ANSWER_FORMATS, a test
-# checks): config "answer_format", None = "schema_text" = the requests of the
-# code before task #80. notes/cevap_talimati_tasarim.md compares the options.
-ANSWER_FORMATS = ("schema_text", "example", "json_schema")
+# Answer instruction (task #80, EMIR 4d; task #90; = llm_client.ANSWER_FORMATS
+# and ALL_FIELDS_REQUIRED_FORMATS, a test checks): config "answer_format",
+# None = "schema_text" = the requests of the code before task #80.
+# notes/cevap_talimati_tasarim.md compares the options.
+ANSWER_FORMATS = ("schema_text", "example_object", "json_schema_strict")
+ALL_FIELDS_REQUIRED_FORMATS = ("example_object", "json_schema_strict")
 # Operational limits compared with the previous segment on --resume (a
 # difference needs allow_timeout_change / --allow-timeout-change).
 TIMEOUT_SETTINGS = ("request_deadline_s", "stall_timeout_s")
@@ -1477,6 +1498,10 @@ class RunConfig:
     # --resume: request_deadline_s / stall_timeout_s may differ from the
     # previous segment's (recorded in the summary); otherwise a difference stops
     allow_timeout_change: bool = False
+    # --resume (task #90): accepted answers of a segment that ran another
+    # git_commit are discarded ("code_changed") and asked again; otherwise
+    # such answers stop the resume before any call. Not in the config record.
+    discard_reuse_on_code_change: bool = False
     # {model key: {"slug", "name"[, "quantizations"]}}: pins one provider per
     # model (order + only, allow_fallbacks false, require_parameters true); a
     # response from another provider is re-requested (A4; it changes prereg
@@ -1512,8 +1537,9 @@ class RunConfig:
     # how reasoning_capped reads the usage of that model; models missing
     # from it (and None) use "reasoning" (reasoning_tokens >= max_tokens - 4096)
     reasoning_cap_rule: dict | None = None
-    # task #80 (EMIR 4d): ANSWER_FORMATS entry; None = schema_text (as before;
-    # not in the config record, rows or raw log then)
+    # task #80 (EMIR 4d), #90 (M4): ANSWER_FORMATS entry; None = schema_text
+    # (as before; not in the config record, rows or raw log then; an explicit
+    # "schema_text" is in rows and raw log, not in the config record)
     answer_format: str | None = None
     _frame_cache: dict | None = field(default=None, init=False, repr=False, compare=False)
     _frame_audit: dict | None = field(default=None, init=False, repr=False, compare=False)
@@ -1599,6 +1625,8 @@ class RunConfig:
                 raise ValueError(f"{name} must be positive")
         if not isinstance(self.allow_timeout_change, bool):
             raise ValueError("allow_timeout_change must be true or false")
+        if not isinstance(self.discard_reuse_on_code_change, bool):
+            raise ValueError("discard_reuse_on_code_change must be true or false")
         if self.providers is not None:
             if not isinstance(self.providers, dict):
                 raise ValueError("providers must be a {model key: spec} object")
@@ -1891,8 +1919,11 @@ def _new_stats() -> dict:
     # from <run>.accepted.jsonl instead of a call (pgg_answer_reused); the
     # attempts logged as "attempt_started" and those with a result record
     # (same attempt_id), in total and per step (orphaned = started - finished).
+    # Task #90: n_reuse_invalid: journaled answers with the same request that
+    # failed is_valid when checked again (discarded "reuse_invalid", asked).
     return {"cost_usd": 0.0, "n_responses": 0, "n_accepted": 0,
-            "n_answers_reused": 0, "n_attempt_started": 0, "n_attempt_finished": 0,
+            "n_answers_reused": 0, "n_reuse_invalid": 0,
+            "n_attempt_started": 0, "n_attempt_finished": 0,
             "attempt_started_by_step": {}, "attempt_finished_by_step": {},
             "n_comp_invalid": 0, "n_comp_parse_fail": 0, "n_comp_missing": 0,
             "reasoning_tokens": 0, "completion_tokens": 0, "n_reasoning_over_completion": 0,
@@ -1912,12 +1943,17 @@ _SEGMENT_TOTALS = ("n_reasoning_capped", "n_transport", "n_deadline", "n_cost_un
                    "n_deadline_cost_estimated", "deadline_cost_estimated_usd",
                    "n_comp_invalid", "n_comp_parse_fail", "n_comp_missing",
                    "reasoning_tokens", "completion_tokens", "n_reasoning_over_completion",
-                   "n_answers_reused", "n_attempt_started", "n_attempt_finished")
+                   "n_answers_reused", "n_attempt_started", "n_attempt_finished",
+                   "n_reuse_invalid")
 
 # Rows of a group round that need the whole round (their earnings): written
 # together when the round is complete, and accepted only from one segment.
 # The other rows (rule comprehension, isolated) stand alone (task #79).
 JOINT_STEPS = ("contribute", "punish")
+
+# Reasons why a journaled answer of an earlier segment is not reused (tasks
+# #79, #90); Engine._discard counts it with the earlier segments.
+_REUSE_DISCARD_REASONS = ("prompt_changed", "code_changed", "reuse_invalid")
 
 
 def _attempt_totals(stats: list[dict]) -> dict:
@@ -1942,11 +1978,12 @@ def _attempt_table(per_model: dict) -> dict:
 
 
 def prompt_sha256(model: str, messages, schema, answer_format: str | None = None) -> str:
-    """sha256 of what one decision call sends: model, messages and schema (task #79).
+    """sha256 of model, messages and schema of one decision call (task #79).
 
-    llm_client builds the request from exactly these (augment_with_schema);
-    an answer is reused on resume only for the same value. answer_format
-    (task #80) is in it only when set, so the default's sha256 is as before.
+    Task #90: replaced by llm_client.request_sha256 of the whole request
+    body; kept to read <run>.accepted.jsonl records of the code before #90
+    (they carry only prompt_sha256). answer_format (task #80) is in it only
+    when set, so the default's sha256 is as before.
     """
     sent = {"model": model, "messages": messages, "schema": schema}
     if answer_format is not None:
@@ -2041,6 +2078,8 @@ class ResumePlan:
     reuse: dict = field(default_factory=dict)
     rows_done: dict = field(default_factory=dict)
     journal: dict = field(default_factory=dict)
+    # task #90: Engine._reuse_code_check of the answers in reuse
+    reuse_code_check: dict = field(default_factory=dict)
 
     @property
     def prior_cost_usd(self) -> float:
@@ -2071,6 +2110,8 @@ class Answer:
     # from there instead of a call (its call is of an earlier segment)
     journaled: bool = False
     reused: bool = False
+    # task #90: llm_client.request_sha256 of the request that obtained it
+    request_sha256: str | None = None
 
 
 # Fields of an Answer in a <run>.accepted.jsonl record (task #79).
@@ -2182,6 +2223,9 @@ class Engine:
         self._journal_lock = threading.Lock()
         self._reuse: dict[str, dict] = {}
         self._rows_done: dict[str, set] = {}
+        # Task #90: earlier segments whose answers are not reused (another
+        # git_commit, with discard_reuse_on_code_change)
+        self._reuse_refused_segments: set = set()
         # Task #80: status.json and its heartbeat (written from the start of
         # _run_locked's segment on; nothing before the checks have passed).
         self.heartbeat_s = DEFAULT_HEARTBEAT_S
@@ -2225,13 +2269,14 @@ class Engine:
         segment (found_on_resume events are of earlier segments, already
         counted from the raw log). Its cost was counted when it arrived.
         Task #79: a journaled answer of an earlier segment that cannot be
-        reused ("prompt_changed") was counted as reusable by resume_plan; it
-        is counted now with the earlier segments.
+        reused ("prompt_changed"; task #90: "code_changed", "reuse_invalid")
+        was counted as reusable by resume_plan; it is counted now with the
+        earlier segments.
         """
         if call.get("segment") == self.segment:
             with self._lock:
                 self.stats[model_key]["n_discarded"] += 1
-        elif reason == "prompt_changed":
+        elif reason in _REUSE_DISCARD_REASONS:
             with self._lock:
                 self.prior_stats[model_key]["n_discarded"] += 1
         self._log({"ts": time.time(), "event": "pgg_discarded", "discarded": True,
@@ -2262,7 +2307,7 @@ class Engine:
                "unit": unit, "session_id": session_id, "model_key": model_key,
                "key": [call.get("step"), call.get("round"), call.get("agent_id"),
                        call.get("others_mean")],
-               "prompt_sha256": sha,
+               "request_sha256": sha,
                "answer": {k: getattr(ans, k) for k in _ANSWER_FIELDS}}
         try:
             line = json.dumps(rec, ensure_ascii=False) + "\n"
@@ -2281,33 +2326,95 @@ class Engine:
     def _reuse_answer(self, model_key: str, session_id: str, unit: str, entry: dict) -> Answer:
         """The Answer of a journal record, logged as "pgg_answer_reused" and counted."""
         a = entry["answer"]
-        ans = Answer(**{k: a[k] for k in _ANSWER_FIELDS if k in a}, journaled=True, reused=True)
+        ans = Answer(**{k: a[k] for k in _ANSWER_FIELDS if k in a}, journaled=True, reused=True,
+                     request_sha256=entry.get("request_sha256"))
         with self._lock:
             self.stats[model_key]["n_answers_reused"] += 1
         self._log({"ts": time.time(), "event": "pgg_answer_reused", "run": self.cfg.run,
                    "segment": self.segment, "model": self.cfg.models[model_key],
                    "session_id": session_id, "unit": unit, "call": ans.call,
-                   "answer_segment": (ans.call or {}).get("segment")})
+                   "answer_segment": (ans.call or {}).get("segment"),
+                   "request_sha256": entry.get("request_sha256"),
+                   "reuse_check": "request_sha256" if entry.get("request_sha256") is not None
+                   else "prompt_sha256"})
         return ans
+
+    def _request_options(self, model_key: str) -> dict:
+        """What _ask passes to llm_client that goes into the request body (task #90)."""
+        pinned = self.cfg.provider_for(model_key)
+        return {"max_tokens": self.max_tokens, "reasoning_effort": self.cfg.effort_for(model_key),
+                "provider": provider_routing(pinned) if pinned else None,
+                # task #80: only when set (the default request is as before)
+                **({"answer_format": self.cfg.answer_format}
+                   if self.cfg.answer_format is not None else {})}
+
+    def request_sha256(self, model_key: str, messages, schema, session_id: str) -> str:
+        """llm_client.request_sha256 of the request _ask would send for this decision."""
+        return self.llm.request_sha256(self.llm.request_body(
+            self.cfg.models[model_key], messages, schema, session_id=session_id,
+            **self._request_options(model_key)))
+
+    def _checked(self, schema, is_valid):
+        """is_valid, and in ALL_FIELDS_REQUIRED_FORMATS every field of schema present (#90)."""
+        if self.cfg.answer_format not in ALL_FIELDS_REQUIRED_FORMATS:
+            return is_valid
+        present = self.llm.required_fields_present
+        return lambda parsed: present(parsed, schema) and is_valid(parsed)
+
+    def _reuse_problem(self, entry: dict, sha: str, model_key: str, messages, schema,
+                       is_valid) -> str | None:
+        """Why a journal record is not reused (a _discard reason); None: reuse it (#90).
+
+        code_changed: its segment ran another git_commit (only with
+        discard_reuse_on_code_change; else the resume did not start).
+        prompt_changed: another request_sha256 (records of the code before
+        #90: another prompt_sha256). reuse_invalid: it fails is_valid now
+        (a rule-comprehension call given up, comp_missing, has no answer to
+        check).
+        """
+        if entry.get("segment") in self._reuse_refused_segments:
+            return "code_changed"
+        if entry.get("request_sha256") is not None:
+            if entry["request_sha256"] != sha:
+                return "prompt_changed"
+        elif entry.get("prompt_sha256") != prompt_sha256(
+                self.cfg.models[model_key], messages, schema, self.cfg.answer_format):
+            return "prompt_changed"
+        a = entry["answer"]
+        if a.get("comp_missing") is None:
+            try:
+                ok = isinstance(a.get("parsed"), dict) and bool(is_valid(a["parsed"]))
+            except Exception:              # a broken record is no answer
+                ok = False
+            if not ok:
+                return "reuse_invalid"
+        return None
 
     def _obtain(self, model_key, messages, schema, is_valid, session_id, ctx: dict) -> Answer:
         """The accepted answer of one decision: reused, else asked (_ask) and journaled.
 
         Reused (task #79): an earlier segment's answer for this unit and row
         key from <run>.accepted.jsonl, when it was asked with exactly this
-        prompt (prompt_sha256); calls are stateless, so the call would send
-        the same request. Another prompt (never expected) discards it
-        ("prompt_changed") and the decision is asked.
+        request (task #90: request_sha256 of the whole body); calls are
+        stateless, so the call would send the same request. Task #90: it must
+        also pass is_valid again; a record that is not reused is discarded
+        (_reuse_problem gives the reason) and the decision is asked.
         """
         unit = ctx.get("unit")
         key = (ctx.get("step"), ctx.get("round"), ctx.get("agent_id"), ctx.get("others_mean"))
-        sha = prompt_sha256(self.cfg.models[model_key], messages, schema, self.cfg.answer_format)
+        is_valid = self._checked(schema, is_valid)
+        sha = self.request_sha256(model_key, messages, schema, session_id)
         entry = self._reuse.get(unit, {}).pop(key, None) if unit is not None else None
         if entry is not None:
-            if entry.get("prompt_sha256") == sha:
+            reason = self._reuse_problem(entry, sha, model_key, messages, schema, is_valid)
+            if reason is None:
                 return self._reuse_answer(model_key, session_id, unit, entry)
-            self._discard(model_key, session_id, entry["answer"]["call"], "prompt_changed")
+            if reason == "reuse_invalid":
+                with self._lock:
+                    self.stats[model_key]["n_reuse_invalid"] += 1
+            self._discard(model_key, session_id, entry["answer"]["call"], reason)
         ans = self._ask(model_key, messages, schema, is_valid, session_id, ctx)
+        ans.request_sha256 = sha
         ans.journaled = self._journal(model_key, session_id, unit, ans, sha)
         return ans
 
@@ -2662,11 +2769,13 @@ class Engine:
         try:
             parsed, n_invalid, n_parse_fail = self.llm.call_llm_valid(
                 self.cfg.models[model_key], messages, schema=schema, session_id=session_id,
-                is_valid=is_valid, max_tokens=self.max_tokens, max_invalid=self.cfg.max_invalid,
-                return_parse_fail=True, reasoning_effort=self.cfg.effort_for(model_key),
-                meta=meta, before_call=lambda: self._before_call(model_key),
+                is_valid=is_valid, max_invalid=self.cfg.max_invalid,
+                return_parse_fail=True, meta=meta,
+                before_call=lambda: self._before_call(model_key),
                 on_response=on_response, timeout=self.timeout, counts=counts,
-                provider=provider_routing(pinned) if pinned else None,
+                # task #90: max_tokens, reasoning_effort, provider and
+                # answer_format as request_sha256 hashes them
+                **self._request_options(model_key),
                 request_deadline_s=self.deadline, on_late_response=on_late_response,
                 call_info=call, on_deadline=on_deadline,
                 expected_provider=pinned["name"] if pinned else None,
@@ -2681,10 +2790,7 @@ class Engine:
                 # logged as degraded (decisions: as before); kept in task #73,
                 # where q2 asks for "a whole number (it can be positive, zero or
                 # negative)" without a +3 example
-                **({"signed_numbers": True} if ctx.get("step") == "comprehension" else {}),
-                # task #80: only when set (the default request is as before)
-                **({"answer_format": self.cfg.answer_format}
-                   if self.cfg.answer_format is not None else {}))
+                **({"signed_numbers": True} if ctx.get("step") == "comprehension" else {}))
         except RuntimeError as e:
             missing = self._comprehension_missing(e, counts, ctx)
             if missing is not None:
@@ -2801,6 +2907,8 @@ class Engine:
             "rationale": rationale if isinstance(rationale, str) else None,
             "reasoning_effort": self.llm.reasoning_effort_label(self.cfg.effort_for(model_key)),
             "max_tokens": self.max_tokens, "temperature": "default",
+            # task #90: the request that obtained the answer (llm_client.request_sha256)
+            "request_sha256": ans.request_sha256,
             "seed": seed, "ts": time.time(),
             # task #80, only when set
             **({"answer_format": self.cfg.answer_format}
@@ -3222,8 +3330,10 @@ class Engine:
             # task #73, only when set
             **({"reasoning_cap_rule": dict(cfg.reasoning_cap_rule)}
                if cfg.reasoning_cap_rule is not None else {}),
-            # task #80, only when set
-            **({"answer_format": cfg.answer_format} if cfg.answer_format is not None else {}),
+            # task #80, only when set; task #90: an explicit "schema_text" is the
+            # default's request, so it has the default's record
+            **({"answer_format": cfg.answer_format}
+               if cfg.answer_format not in (None, "schema_text") else {}),
         })
 
     def frames_summary(self) -> dict:
@@ -3597,7 +3707,9 @@ class Engine:
         on a result record (success or failed attempt); the others were cut
         off in flight (orphaned). Attempt events carry no usage: they change
         no cost. "attempt_segments": segments with attempt events (the code
-        before #79 wrote none). n_answers_reused counts "pgg_answer_reused".
+        before #79 wrote none). n_answers_reused counts "pgg_answer_reused";
+        n_reuse_invalid (task #90) the "pgg_discarded" events with reason
+        "reuse_invalid", in the segment that checked them.
         """
         sessions = {s.session_id: s for s in specs}
         per_segment: dict[int, dict] = {}
@@ -3687,6 +3799,8 @@ class Engine:
             if event == "pgg_discarded":
                 call = rec.get("call") if isinstance(rec.get("call"), dict) else {}
                 marked.add(_call_key(call.get("segment"), spec.session_id, call))
+                if rec.get("reason") == "reuse_invalid":      # task #90
+                    s["n_reuse_invalid"] += 1
                 continue
             if event is not None:
                 continue
@@ -3807,6 +3921,24 @@ class Engine:
         calls = {_call_key(rec["answer"]["call"].get("segment"), rec["session_id"],
                            rec["answer"]["call"]) for v in reuse.values() for rec in v.values()}
         return {"info": info, "reuse": reuse, "reusable_calls": calls}
+
+    @staticmethod
+    def _reuse_code_check(reuse: dict, earlier_commits: dict, now_commit) -> dict:
+        """The answers to reuse whose segment ran another (or an unknown) git_commit (#90).
+
+        Returns {"now", "earlier": {segment: commit} of those segments,
+        "refused_segments", "n_answers"}. A commit unknown now or in the
+        answer's segment (None, or a segment the summary does not list)
+        counts as another commit.
+        """
+        segs = [rec.get("segment") for entries in reuse.values() for rec in entries.values()]
+        refused = sorted({s for s in segs
+                          if now_commit is None or earlier_commits.get(s) != now_commit},
+                         key=lambda s: (s is None, s if isinstance(s, int) else 0))
+        return {"now": now_commit,
+                "earlier": {str(s): earlier_commits.get(s) for s in refused},
+                "refused_segments": refused,
+                "n_answers": sum(1 for s in segs if s in refused)}
 
     def resume_plan(self) -> ResumePlan:
         """What a resumed segment of this run has to do. Reads only; writes nothing.
@@ -4042,6 +4174,21 @@ class Engine:
                            "earlier": {str(seg): c for seg, c in earlier_commits.items()},
                            "differs_from_segments": differs}
 
+        # task #90 (M1): an answer is reused only by the code that obtained it
+        reuse_code_check = self._reuse_code_check(journal["reuse"], earlier_commits, now_commit)
+        if journal["reuse"]:
+            checked.append("git_commit of the answers to reuse")
+        if reuse_code_check["refused_segments"]:
+            if not cfg.discard_reuse_on_code_change:
+                problems.append(
+                    f"reuse refused (code_changed): {reuse_code_check['n_answers']} accepted "
+                    f"answer(s) to reuse were obtained in segment(s) "
+                    f"{reuse_code_check['refused_segments']} with git_commit "
+                    f"{_short(reuse_code_check['earlier'])}, this segment runs {now_commit}; "
+                    "they are not reused and not asked again silently. Resume with the code of "
+                    "that commit, or discard and ask them again with "
+                    "--discard-reuse-on-code-change")
+
         if previous is not None:
             backup = self._backup_path(previous)
             if backup.exists() and backup.read_bytes() != summary_path.read_bytes():
@@ -4064,7 +4211,7 @@ class Engine:
             histories=histories, unmarked_discarded=unmarked,
             lock=read_run_lock(self._lock_path()),
             timeout_change=timeout_change, timeout_check=timeout_check,
-            code_change=code_change,
+            code_change=code_change, reuse_code_check=reuse_code_check,
             model_version_reference=dict(log["model_version_reference"]) if log else {},
             reuse=journal["reuse"], journal=journal["info"],
             rows_done={label: set(prog["pending"]) for label, prog in rows["progress"].items()
@@ -4085,6 +4232,8 @@ class Engine:
         self._histories = dict(plan.histories)
         self._reuse = {label: dict(entries) for label, entries in plan.reuse.items()}
         self._rows_done = {label: set(keys) for label, keys in plan.rows_done.items()}
+        # task #90: only reached with discard_reuse_on_code_change (else a problem)
+        self._reuse_refused_segments = set(plan.reuse_code_check.get("refused_segments") or ())
         self.model_version_reference = {k: v for k, v in plan.model_version_reference.items()
                                         if k in self.cfg.snapshot_version_models}
         caps = self.cfg.model_budget_usd or {}
@@ -4467,8 +4616,12 @@ class Engine:
                    "appended to <run>.accepted.jsonl when it is accepted, before its row "
                    "(flushed, fsynced). A resumed segment reuses an answer without a row "
                    "(pgg_answer_reused; the row says reused: true and answer_segment) when its "
-                   "unit is not complete, its decision has no row and the prompt is the same "
-                   "(prompt_sha256); only the missing decisions are asked. n_used: answers with "
+                   "unit is not complete, its decision has no row, the request is the same "
+                   "(request_sha256 of the whole request body; prompt_sha256 for records of "
+                   "the code before #90), its segment ran the same git_commit (else the resume "
+                   "does not start, or with --discard-reuse-on-code-change it is discarded: "
+                   "code_changed) and it passes is_valid again (else discarded: reuse_invalid, "
+                   "n_reuse_invalid); only the missing decisions are asked. n_used: answers with "
                    "a row; n_pending: answers without a row that a --resume reuses; n_unused: "
                    "answers whose decision has a row of another call (discarded). A pending "
                    "answer is not discarded")}
@@ -4576,7 +4729,11 @@ class Engine:
                 n_rows_kept_pending=sum(len(v) for v in p.rows_done.values()),
                 accepted_answers=p.journal,
                 n_attempt_orphaned_earlier_segments=_attempt_totals(
-                    list(p.prior_stats.values()))["n_attempt_orphaned"])
+                    list(p.prior_stats.values()))["n_attempt_orphaned"],
+                # task #90: answers of segments with another git_commit (only
+                # here when discard_reuse_on_code_change let the resume start)
+                reuse_code_check=p.reuse_code_check,
+                discard_reuse_on_code_change=self.cfg.discard_reuse_on_code_change)
         return event
 
     def _log_state(self):
@@ -4657,8 +4814,31 @@ class Engine:
             error = e
             raise
         finally:
-            self._finish_status(error)     # task #80: only once status.json was started
-            release_run_lock(self.lock)
+            # task #90 (M3): the lock is released even when the last status.json
+            # cannot be written, and that failure never hides the run's own
+            # error (it is logged and chained as its __context__ instead)
+            try:
+                self._finish_status(error)     # task #80: only once status.json was started
+            except Exception as status_error:
+                self._status_write_failed(status_error, error)
+                if error is None:
+                    raise                      # the run itself ended well: report it
+            finally:
+                release_run_lock(self.lock)
+
+    def _status_write_failed(self, status_error: Exception, error: BaseException | None) -> None:
+        """The last status.json could not be written: logged, on stderr, noted on the run's error."""
+        text = f"{type(status_error).__name__}: {status_error}"
+        if error is not None:
+            error.add_note(f"(also: the last {STATUS_FILE} could not be written: {text})")
+        print(f"UYARI: son {STATUS_FILE} yazılamadı: {text}", file=sys.stderr)
+        try:
+            self._log({"ts": time.time(), "event": "pgg_status_write_failed",
+                       "run": self.cfg.run, "segment": self.segment, "error": text,
+                       "run_error": None if error is None
+                       else f"{type(error).__name__}: {error}"[:500]})
+        except Exception:                  # the raw log may be gone too; never hides the error
+            pass
 
     def _record_truncated(self, cut: dict) -> None:
         """Record the cut-off last line in <run>.partial.jsonl (once), before a newline closes it."""
@@ -5331,6 +5511,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--allow-timeout-change", action="store_true", default=None,
                     help="--resume: allow request_deadline_s / stall_timeout_s other than the "
                          "previous segment's (recorded in the summary, timeout_changes)")
+    ap.add_argument("--discard-reuse-on-code-change", action="store_true", default=None,
+                    help="--resume: accepted answers of a segment that ran another git commit "
+                         "are discarded (code_changed) and asked again; without it such "
+                         "answers stop the resume before any call")
     ap.add_argument("--heartbeat-interval", type=float, dest="heartbeat_s",
                     help=f"seconds between the heartbeats of <runs-dir>/<run>/{STATUS_FILE} "
                          f"(default {DEFAULT_HEARTBEAT_S:g}; not part of the config record)")
@@ -5388,6 +5572,7 @@ def settings_from_args(args) -> dict:
         "request_timeout_s": args.request_timeout_s,
         "request_deadline_s": args.request_deadline_s, "stall_timeout_s": args.stall_timeout_s,
         "allow_timeout_change": args.allow_timeout_change,
+        "discard_reuse_on_code_change": args.discard_reuse_on_code_change,
         "rationale": False if args.no_rationale else None, "workers": args.workers,
         "runs_dir": args.runs_dir, "results_dir": args.results_dir,
     }
@@ -5429,6 +5614,7 @@ def run_config(run: str, s: dict, models: dict[str, str], output: dict) -> RunCo
         request_timeout_s=s.get("request_timeout_s"),
         request_deadline_s=s.get("request_deadline_s"), stall_timeout_s=s.get("stall_timeout_s"),
         allow_timeout_change=bool(s.get("allow_timeout_change", False)),
+        discard_reuse_on_code_change=bool(s.get("discard_reuse_on_code_change", False)),
         providers=resolve_providers(s.get("providers"), models),
         isolated_frame=s.get("isolated_frame", "one_shot"),
         frames=resolve_frames(s.get("frames"), models), frame_files=s.get("frame_files"),
@@ -5653,7 +5839,18 @@ def resume_report(engine: Engine, plan: ResumePlan) -> str:
         lines.append(
             f"Kod commit'i önceki segment(ler)den farklı ya da onlarda bilinmiyor: segment "
             f"{change['differs_from_segments']} (önceki: {change['earlier']}; şimdi: "
-            f"{change['now']}); engellemez, özete code_change olarak yazılır")
+            f"{change['now']}); yeniden kullanılacak cevap yoksa engellemez, özete "
+            "code_change olarak yazılır")
+    check = plan.reuse_code_check or {}
+    if check.get("refused_segments"):
+        lines.append(
+            f"Yeniden kullanım: {check['n_answers']} kabul edilmiş cevap başka commit'li "
+            f"segment(ler)den {check['refused_segments']} (o segmentler: {check['earlier']}; "
+            f"şimdi: {check['now']}); "
+            + ("--discard-reuse-on-code-change verildi: bu cevaplar atılır (code_changed) ve "
+               "yeniden sorulur" if cfg.discard_reuse_on_code_change else
+               "yeniden kullanım REDDEDİLİR, sürdürme başlamaz (o commit'in koduyla sürdürün "
+               "ya da --discard-reuse-on-code-change ile atıp yeniden sorun)"))
     if plan.problems:
         lines.append("SORUN (sürdürme başlamaz):")
         lines += [f"  - {p}" for p in plan.problems]

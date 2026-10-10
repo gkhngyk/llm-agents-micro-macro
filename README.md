@@ -155,12 +155,25 @@ tested. Design choices are in the module docstring; the main ones:
 - **Answer instruction** (task #80, off by default): config `answer_format`.
   Unset or `"schema_text"` sends exactly the requests of 811fdcc (schema text
   after the last message, `json_object`; checked against recorded request
-  hashes). `"example"` shows a placeholder example object instead
-  (`{"contribution": <whole number from 0 to 20>, ...}`, no new number);
-  `"json_schema"` keeps the messages and sends `response_format` json_schema
-  with `strict: true` (every object closed, every field required). When set it
-  is in the config record, rows, raw log and `prompt_sha256`. Comparison:
+  hashes). `"example_object"` (option A) shows a placeholder example object
+  instead (`{"contribution": <whole number from 0 to 20>, ...}`, no new
+  number); `"json_schema_strict"` (option B) appends the strict schema (every
+  object closed, every field required) as the schema text and sends the same
+  schema as `response_format` json_schema with `strict: true`. In A and B
+  `rationale` is required in the prompt and in the check (task #90). A or B is
+  in the config record (a resume with another value stops); any set value is
+  in rows and raw log; it changes `request_sha256`. Comparison:
   `notes/cevap_talimati_tasarim.md`.
+- **Reuse safety** (task #90): every row, raw-log record and
+  `<run>.accepted.jsonl` record carries `request_sha256`, the sha256 of the
+  canonical JSON (keys sorted, separators `,` `:`) of the whole request body
+  sent but `session_id` (model, messages with the answer instruction,
+  `max_tokens`, `response_format`, provider routing; temperature / reasoning
+  only when sent). `--resume` reuses a journaled answer only with the same
+  `request_sha256` (records before #90: `prompt_sha256`), only from a segment
+  with the same `git_commit` (otherwise the resume does not start;
+  `--discard-reuse-on-code-change` discards and asks them again), and only if
+  it passes `is_valid` again (`reuse_invalid`, `n_reuse_invalid`).
 - **Status file** (task #80): once a run has passed its checks, the run
   process writes `<runs-dir>/<run>/status.json` itself (pid, heartbeat every
   `--heartbeat-interval` s, default 30, units complete, cost, stop_reason, at
@@ -203,7 +216,7 @@ cd /abs/workspace/_kod_<sha>                     # stamped code copy (see above)
 PY=/abs/project-publicgoods/.venv/bin/python
 $PY pgg_game.py --dry-run --config configs/<config>.json                 # gate first
 $PY scripts/runctl.py start  --config configs/<config>.json --run <run> \
-    --runs-dir /abs/workspace/runs --caffeinate  # add --resume to go on
+    --runs-dir /abs/workspace/runs               # add --resume to go on
 $PY scripts/runctl.py status --runs-dir /abs/workspace/runs --run <run>  # files only
 $PY scripts/runctl.py stop   --runs-dir /abs/workspace/runs --run <run> --wait 1000
 ```
@@ -211,8 +224,42 @@ $PY scripts/runctl.py stop   --runs-dir /abs/workspace/runs --run <run> --wait 1
 - `start` waits until the run's `status.json` names the new pid (or prints
   the console log's tail when the process ended at once, e.g. a refused gate),
   records the launch in `launcher.jsonl` (never the environment) and returns;
-  the terminal can be closed. `--caffeinate` keeps the Mac awake while the run
-  lives (not with the lid closed).
+  the terminal can be closed. caffeinate is on by default (task #90): it keeps
+  the Mac awake while the run lives (not with the lid closed);
+  `--no-caffeinate` turns it off; without `caffeinate` on PATH `start` warns
+  and goes on.
+
+### A paid run, step by step (the user's own Terminal)
+
+Paid runs are started by the user, never from orc's sandbox. `W` is the
+workspace, `SHA` the approved commit, `<run>` an explicit run name.
+
+1. **Pin the code.** In the main checkout:
+   `mkdir "$W/_kod_$SHA" && git archive $SHA | tar -x -C "$W/_kod_$SHA"`, then
+   `.venv/bin/python pgg_game.py --write-code-version "$W/_kod_$SHA" --code-commit $SHA`.
+2. **Key** for this terminal only, never printed:
+   `set -a; source /abs/complexity-prj/.env; set +a`.
+3. **Gate.** `cd "$W/_kod_$SHA"`; `$PY pgg_game.py --dry-run --config configs/<config>.json`
+   (for a resume add `--resume --run <run>`: it prints the resume plan, and a
+   reuse refused because of another `git_commit` shows up here as a problem).
+4. **Start.** `$PY scripts/runctl.py start --config configs/<config>.json --run <run> --runs-dir "$W/runs"`.
+   It prints the pid and the caffeinate pid; the terminal can then be closed
+   (keep the lid open and the Mac on power).
+5. **Watch.** `$PY scripts/runctl.py status --runs-dir "$W/runs" --run <run>`
+   (`--json` too): heartbeat age, units complete, cost, last raw-log write.
+   Exit 0 running, 3 ended, 4 heartbeat stale (look at `console.log`), 2 no
+   status yet. The heartbeat only says the process lives; progress is in
+   units, cost and the raw-log line.
+6. **Stop.** `$PY scripts/runctl.py stop --runs-dir "$W/runs" --run <run> --wait 1000`
+   (SIGTERM, or `stop_request.json` with `--via-file`): stop_reason
+   "interrupted", summary at once, calls in flight waited for.
+7. **Resume.** Same code copy (same `SHA`: answers of another commit are not
+   reused and stop the resume), step 3 with `--resume`, then step 4 with
+   `--resume`. Only the missing decisions are asked.
+8. **After.** Report the files of `"$W/runs/<run>/"` and their line counts
+   (data-persistence rule); raw logs with the account id are never committed.
+
+Details and the options compared: `notes/uzun_omurlu_kosu.md` §6.
 - `status` reads files only. Exit code 0 running, 3 ended, 4 heartbeat stale
   (process may be gone: console log, then `start --resume`), 2 no status yet.
 - `stop` sends SIGTERM to the pid of `status.json` if `<run>.lock` holds the

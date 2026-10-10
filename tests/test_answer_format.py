@@ -1,14 +1,17 @@
-"""Mock tests of the answer-instruction options (task #80, EMIR 4d; off by default).
+"""Mock tests of the answer-instruction options (task #80, EMIR 4d; #90, EMIR 5 M4; off by default).
 
 answer_format (config / RunConfig, default None = "schema_text"):
   * None / "schema_text": the request is byte for byte what the code before
     task #80 (811fdcc) sent: the schema text appended to the last message,
     response_format json_object. Checked against request hashes recorded
     with that commit (tests/fixtures/request_hashes_811fdcc.json).
-  * "example" (option A): a placeholder example object instead of the
-    schema text (no number that is not already in the question); json_object.
-  * "json_schema" (option B): the same messages as schema_text, response_format
-    json_schema with strict true (every object closed, every field required).
+  * "example_object" (option A): a placeholder example object instead of the
+    schema text (no number that is not already in the question), every field
+    required; json_object.
+  * "json_schema_strict" (option B, task #90): the strict schema (every object
+    closed, every field required) as the schema text in the prompt AND as
+    response_format json_schema with strict true: the prompt says what is enforced.
+  In A and B "rationale" is required in the prompt and in the check.
 No network, no ../.env. Regenerate the fixture with an export of the commit:
     git archive 811fdcc | tar -x -C DIR; cp tests/test_answer_format.py DIR/tests/
     python DIR/tests/test_answer_format.py --print-hashes > tests/fixtures/request_hashes_811fdcc.json
@@ -33,6 +36,7 @@ import pgg_game  # noqa: E402
 from pgg_game import Engine, GameParams, RunConfig  # noqa: E402
 
 FIXTURE = ROOT / "tests" / "fixtures" / "request_hashes_811fdcc.json"
+EXAMPLE_INTRO = "parts (every field is required):\n"
 STORY_A = ROOT / "frames" / "story_A.json"
 
 
@@ -68,7 +72,7 @@ class SchemaAPI:
         elif "matching this schema:\n" in user:
             answer = _answer(json.loads(user.rsplit("matching this schema:\n", 1)[1]))
         else:
-            answer = _example_answer(user.rsplit("parts:\n", 1)[1])
+            answer = _example_answer(user.rsplit(EXAMPLE_INTRO, 1)[1])
         message = SimpleNamespace(content=json.dumps(answer), reasoning=None)
         usage = SimpleNamespace(model_dump=lambda: {"prompt_tokens": 10, "completion_tokens": 5})
         return SimpleNamespace(model=kwargs["model"], usage=usage,
@@ -144,7 +148,7 @@ class DefaultIsByteIdentical(EngineTestBase):
                                          "schema": args[2]}, ensure_ascii=False,
                                         sort_keys=True).encode("utf-8")).hexdigest()
         self.assertEqual(pgg_game.prompt_sha256(*args), old)
-        self.assertNotEqual(pgg_game.prompt_sha256(*args, "example"), old)
+        self.assertNotEqual(pgg_game.prompt_sha256(*args, "example_object"), old)
 
 
 def _instruction_cut(content: str) -> str:
@@ -166,6 +170,8 @@ class Options(EngineTestBase):
 
     def test_constants_agree(self):
         self.assertEqual(pgg_game.ANSWER_FORMATS, llm_client.ANSWER_FORMATS)
+        self.assertEqual(pgg_game.ALL_FIELDS_REQUIRED_FORMATS,
+                         llm_client.ALL_FIELDS_REQUIRED_FORMATS)
         with self.assertRaisesRegex(ValueError, "answer_format must be one of"):
             RunConfig(run="x", cards=[CARD_A], models={"m1": "v/m"}, answer_format="xml",
                       results_dir=self.tmp).validate()
@@ -173,7 +179,7 @@ class Options(EngineTestBase):
     def test_example_object_replaces_the_schema_text(self):
         for name in DESIGNS:
             with self.subTest(name):
-                default, calls, rows, summary, raw = self.runs(name, "example")
+                default, calls, rows, summary, raw = self.runs(name, "example_object")
                 self.assertEqual(len(calls), len(default))
                 # everything before the instruction is the default's, byte for byte
                 key = lambda k: json.dumps([k["messages"][:-1],  # noqa: E731
@@ -183,16 +189,17 @@ class Options(EngineTestBase):
                     user = k["messages"][-1]["content"]
                     self.assertNotIn("matching this schema", user)
                     self.assertNotIn('"type"', user)
-                    self.assertIn("with your own values in place of the <...> parts:\n{", user)
+                    self.assertIn("with your own values in place of the <...> " + EXAMPLE_INTRO
+                                  + "{", user)
                     self.assertEqual(k["response_format"], {"type": "json_object"})
                     # the example writes no number the question does not hold already
                     question = _instruction_cut(user)
-                    example = user.rsplit("parts:\n", 1)[1]
+                    example = user.rsplit(EXAMPLE_INTRO, 1)[1]
                     for number in re.findall(r"\d+", example):
                         self.assertRegex(question, rf"(?<!\d){number}(?!\d)")
-                self.assertEqual({r["answer_format"] for r in rows}, {"example"})
-                self.assertEqual(summary["config"]["answer_format"], "example")
-                self.assertTrue(all(r.get("answer_format") == "example"
+                self.assertEqual({r["answer_format"] for r in rows}, {"example_object"})
+                self.assertEqual(summary["config"]["answer_format"], "example_object")
+                self.assertTrue(all(r.get("answer_format") == "example_object"
                                     for r in raw if "messages" in r))
 
     def test_example_template(self):
@@ -214,20 +221,32 @@ class Options(EngineTestBase):
             pgg_game.contribution_schema(p, True, story)).startswith(
             '{"credits_into_jar": <whole number from 0 to 20>'))
 
-    def test_json_schema_keeps_the_messages(self):
+    def test_json_schema_strict_states_the_enforced_schema(self):
+        def text_schema(k):
+            return json.loads(k["messages"][-1]["content"].rsplit("matching this schema:\n", 1)[1])
+
         for name in DESIGNS:
             with self.subTest(name):
-                default, calls, rows, summary, raw = self.runs(name, "json_schema")
-                self.assertEqual(sorted(json.dumps(k["messages"]) for k in calls),
-                                 sorted(json.dumps(k["messages"]) for k in default))
+                default, calls, rows, summary, raw = self.runs(name, "json_schema_strict")
+                self.assertEqual(len(calls), len(default))
+                # task #90: everything before the schema text is the default's, byte for
+                # byte; the schema text is the strict form of the default's schema text
+                key = lambda k: json.dumps([k["messages"][:-1],  # noqa: E731
+                                            _instruction_cut(k["messages"][-1]["content"])])
+                self.assertEqual(sorted(map(key, calls)), sorted(map(key, default)))
+                self.assertEqual(
+                    sorted(json.dumps([key(k), llm_client.strict_json_schema(text_schema(k))],
+                                      sort_keys=True) for k in default),
+                    sorted(json.dumps([key(k), text_schema(k)], sort_keys=True) for k in calls))
                 for k in calls:
                     rf = k["response_format"]
                     self.assertEqual((rf["type"], rf["json_schema"]["strict"],
                                       rf["json_schema"]["name"]), ("json_schema", True, "answer"))
                     schema = rf["json_schema"]["schema"]
-                    sent = json.loads(k["messages"][-1]["content"]
-                                      .rsplit("matching this schema:\n", 1)[1])
-                    self.assertEqual(schema, llm_client.strict_json_schema(sent))
+                    # the prompt states exactly the enforced schema (rationale required in both)
+                    self.assertEqual(text_schema(k), schema)
+                    if "rationale" in schema["properties"]:
+                        self.assertIn("rationale", schema["required"])
 
                     def closed(s):
                         if s.get("type") == "object":
@@ -236,8 +255,8 @@ class Options(EngineTestBase):
                             for v in s["properties"].values():
                                 closed(v)
                     closed(schema)
-                self.assertEqual({r["answer_format"] for r in rows}, {"json_schema"})
-                self.assertEqual(summary["config"]["answer_format"], "json_schema")
+                self.assertEqual({r["answer_format"] for r in rows}, {"json_schema_strict"})
+                self.assertEqual(summary["config"]["answer_format"], "json_schema_strict")
 
     def test_strict_schema_does_not_change_its_input(self):
         f = pgg_game.load_frame_file("abstract_v3", None)
@@ -258,7 +277,7 @@ class ResumeWithAnotherFormat(unittest.TestCase):
         class T(ResumeBase):
             def runTest(self):
                 self.interrupted_run()
-                engine, api = self.resume(answer_format="json_schema")
+                engine, api = self.resume(answer_format="json_schema_strict")
                 with self.assertRaisesRegex(ValueError, "answer_format"):
                     engine.run(resume=True)
                 self.assertEqual(api.calls, [])

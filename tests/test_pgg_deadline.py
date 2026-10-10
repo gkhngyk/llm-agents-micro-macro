@@ -425,6 +425,9 @@ class OldConfigResume(ResumeBase):
                 for k in NEW_FIELDS:
                     rec.pop(k, None)
         self.raw.write_text("".join(json.dumps(r) + "\n" for r in raw))
+        # 58ae381 wrote no accepted-answers file (task #79). Task #90: an answer
+        # of a segment without a recorded commit would not be reused (resume refused)
+        (self.run_dir / "r1.accepted.jsonl").unlink()
 
     def test_config_record_is_unchanged(self):
         engine = Engine(self.rcfg(request_deadline_s=1, stall_timeout_s=2),

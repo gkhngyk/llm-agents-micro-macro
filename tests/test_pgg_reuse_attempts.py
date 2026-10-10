@@ -235,7 +235,7 @@ class ReuseGuards(ResumeBase):
     def test_answer_with_another_prompt_is_discarded_and_asked(self):
         self.interrupted_run()                   # unit 2: round 2 agent 1 accepted
         recs = _raw(self.journal())
-        recs[-1]["prompt_sha256"] = "0" * 64
+        recs[-1]["request_sha256"] = "0" * 64     # task #90 (prompt_sha256 before)
         self.journal().write_text("".join(json.dumps(r) + "\n" for r in recs))
         engine, api = self.resume()
         engine.run(resume=True)
@@ -303,7 +303,7 @@ class ReuseGuards(ResumeBase):
 class AttemptStarted(ResumeBase):
     FIELDS = {"ts", "event", "model", "session_id", "run", "segment", "unit", "step", "round",
               "agent_id", "others_mean", "request", "attempt", "attempt_seq", "attempt_id",
-              "call"}
+              "call", "request_sha256"}
 
     def test_logged_before_the_request_and_matched_by_its_result(self):
         last = []

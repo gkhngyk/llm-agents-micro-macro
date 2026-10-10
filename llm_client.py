@@ -28,6 +28,9 @@ Contract (unchanged from the first study):
     "attempt_started" event BEFORE its request is sent, with an attempt_id
     that the attempt's result record (success or failed attempt, and a late
     response) carries too: an attempt without a result was cut off in flight
+  * every record of a call carries request_sha256 (task #90): the sha256 of
+    the canonical JSON of the request body sent (request_body) without its
+    session_id; a caller can compute the same value before the call
 
 The API key is read from ../.env (OPENROUTER_API_KEY), shared with the other
 projects in this folder; it is not copied here.
@@ -35,6 +38,7 @@ projects in this folder; it is not copied here.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -275,14 +279,23 @@ def augment_with_schema(messages: list[dict], schema: dict) -> list[dict]:
     return augmented
 
 
-# Answer instruction (task #80, EMIR 4d; notes/cevap_talimati_tasarim.md). None
-# is "schema_text": the request is exactly that of the code before task #80.
-#   schema_text  the schema text appended (augment_with_schema), json_object
-#   example      a placeholder example object instead of the schema text
-#                (augment_with_example), json_object; option A
-#   json_schema  the messages of schema_text, response_format json_schema with
-#                strict true (strict_json_schema); option B
-ANSWER_FORMATS = ("schema_text", "example", "json_schema")
+# Answer instruction (task #80, EMIR 4d; task #90, EMIR 5 M4;
+# notes/cevap_talimati_tasarim.md). None is "schema_text": the request is
+# exactly that of the code before task #80.
+#   schema_text         the schema text appended (augment_with_schema),
+#                       json_object; "rationale" optional in the text and in
+#                       the check (as before)
+#   example_object      a placeholder example object instead of the schema
+#                       text (augment_with_example), json_object; option A
+#   json_schema_strict  the strict schema (strict_json_schema) appended as
+#                       the schema text AND sent as response_format
+#                       json_schema, strict true; option B
+# In both options every field of the schema is required, in the prompt and in
+# what is enforced (strict_json_schema; pgg_game checks required_fields_present
+# for option A, and for B in case a provider does not enforce the schema).
+ANSWER_FORMATS = ("schema_text", "example_object", "json_schema_strict")
+# Formats in which every field of the schema is required (strict_json_schema).
+ALL_FIELDS_REQUIRED_FORMATS = ("example_object", "json_schema_strict")
 
 
 def example_template(schema: dict) -> str:
@@ -306,14 +319,17 @@ def example_template(schema: dict) -> str:
 
 
 def augment_with_example(messages: list[dict], schema: dict) -> list[dict]:
-    """Copy of messages whose last one asks for ONLY a JSON object shaped as example_template."""
+    """Copy of messages whose last one asks for ONLY a JSON object shaped as example_template.
+
+    Every field of the example is required (task #90: as in json_schema_strict).
+    """
     augmented = list(messages)
     augmented[-1] = {
         **augmented[-1],
         "content": (
             augmented[-1]["content"]
             + "\n\nRespond with ONLY a JSON object of this form, with your own values in "
-              "place of the <...> parts:\n"
+              "place of the <...> parts (every field is required):\n"
             + example_template(schema)
         ),
     }
@@ -332,19 +348,95 @@ def strict_json_schema(schema: dict) -> dict:
     return out
 
 
+def required_fields_present(parsed, schema: dict) -> bool:
+    """True if parsed holds every property of schema, at any depth, with its JSON type.
+
+    The check of "every field is required" (ALL_FIELDS_REQUIRED_FORMATS):
+    what strict_json_schema enforces where the provider applies it. Value
+    ranges are the caller's is_valid; extra keys are not checked here.
+    """
+    t = schema.get("type")
+    if t == "object":
+        if not isinstance(parsed, dict):
+            return False
+        return all(k in parsed and required_fields_present(parsed[k], v)
+                   for k, v in schema.get("properties", {}).items())
+    if t == "integer":
+        return isinstance(parsed, int) and not isinstance(parsed, bool)
+    if t == "string":
+        return isinstance(parsed, str)
+    return True
+
+
 def answer_request(messages: list[dict], schema: dict,
                    answer_format: str | None = None) -> tuple[list[dict], dict]:
-    """(messages sent, response_format) for an answer_format (ANSWER_FORMATS)."""
+    """(messages sent, response_format) for an answer_format (ANSWER_FORMATS).
+
+    json_schema_strict (task #90): the schema text in the prompt is the
+    schema that is enforced (strict_json_schema), so that both say the same
+    (every field required, objects closed).
+    """
     if answer_format in (None, "schema_text"):
         return augment_with_schema(messages, schema), {"type": "json_object"}
-    if answer_format == "example":
+    if answer_format == "example_object":
         return augment_with_example(messages, schema), {"type": "json_object"}
-    if answer_format == "json_schema":
-        return augment_with_schema(messages, schema), {
+    if answer_format == "json_schema_strict":
+        strict = strict_json_schema(schema)
+        return augment_with_schema(messages, strict), {
             "type": "json_schema",
-            "json_schema": {"name": "answer", "strict": True,
-                            "schema": strict_json_schema(schema)}}
+            "json_schema": {"name": "answer", "strict": True, "schema": strict}}
     raise ValueError(f"answer_format must be one of {ANSWER_FORMATS}, got {answer_format!r}")
+
+
+def request_body(model: str, messages: list[dict], schema: dict, *, session_id: str,
+                 max_tokens: int = DEFAULT_MAX_TOKENS, temperature: float | None = None,
+                 reasoning_effort: str | None = None, provider: dict | None = None,
+                 answer_format: str | None = None) -> dict:
+    """The JSON body of one chat-completions request, as _call_llm_counted sends it.
+
+    Task #90 (EMIR 5 M1): model, the messages sent (answer instruction
+    appended, answer_request), max_tokens, temperature (only when sent),
+    response_format, and what goes into extra_body: session_id (cut to 256
+    characters), reasoning (only when sent) and provider (the routing
+    object: order / only / allow_fallbacks / require_parameters /
+    quantizations). Not in it: the HTTP headers (constants of this module)
+    and the client timeout (not sent to the model).
+    """
+    augmented, response_format = answer_request(messages, schema, answer_format)
+    body = {"model": model, "messages": augmented, "max_tokens": max_tokens}
+    if temperature is not None:
+        body["temperature"] = temperature
+    body["response_format"] = response_format
+    body["session_id"] = session_id[:256]
+    if reasoning_effort is not None:
+        body["reasoning"] = {"effort": reasoning_effort}
+    if provider is not None:
+        body["provider"] = provider
+    return body
+
+
+# keys of request_body that the OpenAI client sends through extra_body
+_EXTRA_BODY_KEYS = ("session_id", "reasoning", "provider")
+
+
+# keys of request_body left out of request_sha256: OpenRouter's session
+# grouping id is not seen by the model and holds the run name
+_UNHASHED_KEYS = ("session_id",)
+
+
+def request_sha256(body: dict) -> str:
+    """sha256 of a request body (request_body) as canonical JSON (task #90).
+
+    Everything of the body but _UNHASHED_KEYS: model, messages (answer
+    instruction included), max_tokens, response_format, provider routing,
+    and temperature / reasoning when they are sent. Canonical: keys sorted,
+    separators "," and ":" without blanks, UTF-8 without escaping. Two calls
+    with the same value send the same body up to session_id, so the value
+    also compares the requests of two runs.
+    """
+    hashed = {k: v for k, v in body.items() if k not in _UNHASHED_KEYS}
+    text = json.dumps(hashed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _usage_dict(u) -> dict | None:
@@ -886,27 +978,31 @@ def _call_llm_counted(
     answer_format (task #80, ANSWER_FORMATS; answer_request): None sends
     exactly what the code before it sent; when set, every record of the call
     carries "answer_format".
+
+    The request is built by request_body (task #90); every record of the
+    call (attempt_started, success, failed attempt, late response, final
+    failure) carries its request_sha256.
     """
     deadline_s =DEFAULT_REQUEST_DEADLINE_S if request_deadline_s is None else request_deadline_s
     if not deadline_s > 0:
         raise ValueError("request_deadline_s must be positive")
     log_path = LOG_PATH
     # task #80: answer_format None sends exactly what the code before it sent
-    augmented, response_format = answer_request(messages, schema, answer_format)
+    # task #90: what is sent is request_body, and what is hashed is the same dict
+    sent = request_body(model, messages, schema, session_id=session_id, max_tokens=max_tokens,
+                        temperature=temperature, reasoning_effort=reasoning_effort,
+                        provider=provider, answer_format=answer_format)
     # temperature=None: not sent, the provider's own default applies.
     extra = {} if temperature is None else {"temperature": temperature}
     if timeout is not None:
         extra["timeout"] = timeout
-    body = {"session_id": session_id[:256]}
-    if reasoning_effort is not None:
-        body["reasoning"] = {"effort": reasoning_effort}
-    if provider is not None:
-        body["provider"] = provider
+    body = {k: sent[k] for k in _EXTRA_BODY_KEYS if k in sent}
     effort_label = reasoning_effort_label(reasoning_effort)
     tag = {} if call_info is None else {"call": call_info}
     # task #80: only when set (the records of the default stay as before)
     if answer_format is not None:
         tag["answer_format"] = answer_format
+    tag["request_sha256"] = request_sha256(sent)
 
     last_err = None
     last_finish_reason = None
@@ -914,11 +1010,11 @@ def _call_llm_counted(
     n_provider_error = 0
     def create():
         return _client.chat.completions.create(
-            model=model,
-            messages=augmented,
-            max_tokens=max_tokens,
+            model=sent["model"],
+            messages=sent["messages"],
+            max_tokens=sent["max_tokens"],
             **extra,
-            response_format=response_format,
+            response_format=sent["response_format"],
             # X-OpenRouter-Metadata: the response then names the provider
             # that served it (openrouter_metadata, "Router Metadata" docs).
             extra_headers={"X-Title": "GABM public goods",

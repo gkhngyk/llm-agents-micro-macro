@@ -484,13 +484,21 @@ class CommitChangeOnResume(ResumeBase):
         return mock.patch.object(pgg_game, "code_version", return_value=cv)
 
     def test_other_commit_is_written_to_the_summary(self):
+        # task #90: the cut leaves 1 answer to reuse (unit 2, round 2, agent 1);
+        # another commit refuses its reuse unless --discard-reuse-on-code-change
         a, b = "a" * 40, "b" * 40
         with self.with_commit(a):
             self.interrupted_run()
         with self.with_commit(b):
-            engine, _ = self.resume()
+            engine, _ = self.resume(discard_reuse_on_code_change=True)
             engine.run(resume=True)
         summary = self.summary_now()
+        self.assertEqual([(e["reason"], e["call"]["round"], e["call"]["agent_id"])
+                          for e in self.raw_events("pgg_discarded")], [("code_changed", 2, 1)])
+        self.assertEqual(summary["n_answers_reused"], 0)
+        self.assertEqual(self.raw_events("pgg_run_resume")[0]["reuse_code_check"],
+                         {"now": b, "earlier": {"0": a}, "refused_segments": [0],
+                          "n_answers": 1})
         self.assertEqual(summary["units"]["n_remaining"], 0)
         change = {"now": b, "earlier": {"0": a}, "differs_from_segments": [0]}
         self.assertEqual(summary["segments"][-1]["code_change"], change)
@@ -522,7 +530,12 @@ class CommitChangeOnResume(ResumeBase):
         with mock.patch.object(pgg_game, "code_version", return_value=dict(UNKNOWN)):
             self.interrupted_run()                      # e.g. a copy run by the earlier code
         with self.with_commit("a" * 40):
-            engine, _ = self.resume()
+            # task #90: an unknown commit is another commit for the answer to reuse
+            engine, api = self.resume()
+            with self.assertRaisesRegex(ValueError, "not resumed, no call made: reuse refused"):
+                engine.run(resume=True)
+            self.assertEqual(api.calls, [])
+            engine, _ = self.resume(discard_reuse_on_code_change=True)
             engine.run(resume=True)
         change = self.summary_now()["segments"][-1]["code_change"]
         self.assertEqual(change["earlier"], {"0": None})

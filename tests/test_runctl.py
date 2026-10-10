@@ -17,6 +17,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -261,8 +262,9 @@ class StatusCommand(unittest.TestCase):
                  for a in n.names}
         names |= {n.module.split(".")[0] for n in ast.walk(tree)
                   if isinstance(n, ast.ImportFrom) and n.module}
-        self.assertEqual(names - {"__future__"}, {"argparse", "json", "os", "signal", "socket",
-                                                  "subprocess", "sys", "time", "pathlib"})
+        self.assertEqual(names - {"__future__"}, {"argparse", "json", "os", "shutil", "signal",
+                                                  "socket", "subprocess", "sys", "time",
+                                                  "pathlib"})
         self.assertEqual((runctl.STATUS_FILE, runctl.STOP_REQUEST_FILE,
                           runctl.DEFAULT_HEARTBEAT_S),
                          (pgg_game.STATUS_FILE, pgg_game.STOP_REQUEST_FILE,
@@ -302,10 +304,12 @@ class EndToEnd(unittest.TestCase):
         return subprocess.run([sys.executable, str(RUNCTL), *argv], capture_output=True,
                               text=True, env=env or self.env, timeout=timeout)
 
-    def start(self, run="r1", *extra, env=None):
+    def start(self, run="r1", *extra, env=None, caffeinate=False):
+        # task #90: caffeinate is on by default; off here unless a test asks for it
         p = self.runctl("start", "--config", str(self.config), "--run", run,
                         "--runs-dir", str(self.runs), "--entry", str(FAKE_RUN),
-                        "--heartbeat-interval", "0.3", "--wait", "30", *extra, env=env)
+                        "--heartbeat-interval", "0.3", "--wait", "30",
+                        *(() if caffeinate else ("--no-caffeinate",)), *extra, env=env)
         launch = runctl._last_jsonl(self.runs / run / "launcher.jsonl")
         if launch:
             self.pids.append(launch["pid"])
@@ -369,6 +373,48 @@ class EndToEnd(unittest.TestCase):
             _wait(0.1)
         self.assertEqual((st["segment"], st["outcome"], st["stop_reason"]), (1, "completed", None))
         self.assertEqual(st["units"]["n_complete"], st["units"]["n_units"])
+
+    def stop_and_wait(self, run="r1"):
+        stop = self.runctl("stop", "--runs-dir", str(self.runs), "--run", run, "--wait", "30")
+        self.assertEqual(stop.returncode, 0, stop.stdout + stop.stderr)
+        return self.status(run)
+
+    @unittest.skipUnless(shutil.which("caffeinate"), "no caffeinate (not macOS)")
+    def test_caffeinate_is_on_by_default_and_ends_with_the_run(self):
+        p, launch = self.start(caffeinate=True)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual((launch["caffeinate"], launch["caffeinate_missing"]), (True, False))
+        cpid = launch["caffeinate_pid"]
+        self.assertIsInstance(cpid, int)
+        self.pids.append(cpid)
+        self.assertIn(f"caffeinate pid {cpid}", p.stdout)
+        self.assertNotIn("caffeinate bulunamadı", p.stderr)
+        self.assertEqual(self.stop_and_wait()["outcome"], "stopped")
+        for _ in range(100):                   # caffeinate -w PID ends with the run
+            try:
+                os.kill(cpid, 0)
+            except ProcessLookupError:
+                break
+            except PermissionError:            # not ours to signal: cannot be watched
+                break
+            _wait(0.1)
+        else:
+            self.fail("caffeinate did not end with the run")
+
+    def test_no_caffeinate_and_missing_caffeinate(self):
+        p, launch = self.start("r1")                     # --no-caffeinate
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual((launch["caffeinate"], launch["caffeinate_pid"],
+                          launch["caffeinate_missing"]), (False, None, False))
+        self.assertNotIn("caffeinate", p.stderr)
+        self.stop_and_wait("r1")
+        # default on, but no caffeinate on PATH: a warning, and the run starts
+        p, launch = self.start("r2", caffeinate=True, env={**self.env, "PATH": "/nonexistent"})
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("UYARI: caffeinate bulunamadı", p.stderr)
+        self.assertEqual((launch["caffeinate"], launch["caffeinate_pid"],
+                          launch["caffeinate_missing"]), (True, None, True))
+        self.assertEqual(self.stop_and_wait("r2")["outcome"], "stopped")
 
     def test_stop_via_request_file(self):
         p, launch = self.start()
