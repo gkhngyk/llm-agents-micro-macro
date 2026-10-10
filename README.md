@@ -201,6 +201,22 @@ the calibration (reads the run directory only):
 .venv/bin/python pgg_cost_calibrate.py --run-dir /abs/workspace/runs/pilot_v2_20261005
 ```
 
+A config can price its dry run and its expected-cost gate from another
+calibration with `"cost_calibration"` (task #93): a path or `{"path",
+"sha256"}` (relative to the code directory) of an overlay file, applied over
+the default calibration only for that config; a file with other bytes than the
+locked sha256 stops the dry run and the real run. It changes no request. The
+main experiment (`configs/main.json`, stage configs `configs/main_s0a_*.json`,
+`configs/main_s0b.json`) uses `configs/cost_calibration_minipilot.json`: the
+mini-pilot's real token distribution per model x call type (group round 1,
+rounds 2-10, isolated, rule comprehension; abstract_v3 rows; the raw log is
+read for its model and usage fields only):
+
+```
+.venv/bin/python pgg_cost_calibrate.py --minipilot-run-dir /abs/workspace/runs/minipilot_20261008
+.venv/bin/python pgg_game.py --config configs/main.json --dry-run --groups-per-cell 10
+```
+
 ## Long runs outside any tool session (`scripts/runctl.py`, task #80)
 
 A paid run is started by the user in their own Terminal (outside orc's

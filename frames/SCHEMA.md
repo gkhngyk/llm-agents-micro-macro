@@ -11,6 +11,7 @@ in the code.
 |---|---|
 | `frames/abstract_v2.json` | The texts of the engine up to c0b91f5 (pilot v2), character for character. Default of every config without `frames`. Do not edit: earlier rows carry its sha256. Written before `kind` existed: the only file accepted without it (legacy, by its sha256), and only as the default frame of a config without `frames`. |
 | `frames/abstract_v3.json` | Mini-pilot main frame (goal C1): the card alone as system message, isolated question at a fixed round, two rule-comprehension questions (C4). `kind` `abstract`. |
+| `frames/abstract_v4.json` | Main experiment frame (EMIR 5 K1, task #93): abstract_v3 with the line "The following describes you:" before the card in the system message (`"system": "The following describes you:\n{card}"`); every other text the model sees is abstract_v3's. `kind` `abstract`. |
 | `frames/story_A.json` | Story draft A (goal C2, the jar). `kind` `story`: linted at every run start. |
 | `tests/fixtures/story_fixture.json` | Test fixture standing in for the story frame (C2). Not a story; `kind` `abstract` (it says "Player"). |
 
@@ -197,4 +198,7 @@ model and scales each kind's prompt tokens by the frame's prompt characters
 over abstract_v2's (isolated: over `repeated`; comprehension: over
 contribute_N), labelled (tahmin). Comprehension calls are counted (one per
 agent and group game, one per isolated schedule) and priced from
-contribute_N's completion tokens.
+contribute_N's completion tokens, unless the calibration measured them: the
+config's `"cost_calibration"` (task #93) may name an overlay such as
+`configs/cost_calibration_minipilot.json` (mini-pilot abstract_v3 rows, prompt
+tokens stored in abstract_v2 units, comprehension measured).

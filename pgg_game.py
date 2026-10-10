@@ -1060,6 +1060,36 @@ def check_cards_lock(path, sha256) -> str:
     return actual
 
 
+def cost_calibration_files(value) -> tuple[Path, ...]:
+    """Overlay files of config "cost_calibration" (task #93); () when unset.
+
+    A path or {"path": ..., "sha256": ...} (relative to the code directory, as
+    frame_files), or a list of them, applied in order over pgg_cost's default
+    overlays (pgg_cost.extra_overlays). It only changes the dry-run estimate
+    and the expected-cost gate, never a request. A file with other bytes than
+    the locked sha256 stops the dry run and the real run before any call
+    (ValueError).
+    """
+    if value is None:
+        return ()
+    items = value if isinstance(value, list) else [value]
+    out = []
+    for i, item in enumerate(items):
+        path, sha = frame_file_spec(f"cost_calibration[{i}]", item)
+        if path is None:
+            raise ValueError(f"cost_calibration[{i}] must be a path or {{\"path\", \"sha256\"}}")
+        file = Path(path) if Path(path).is_absolute() else PROJECT_DIR / path
+        try:
+            actual = hashlib.sha256(file.read_bytes()).hexdigest()
+        except OSError as e:
+            raise ValueError(f"cost_calibration file {str(file)!r} cannot be read ({e})") from None
+        if sha is not None and actual != sha:
+            raise ValueError(f"cost_calibration: sha256 of {path} is {actual}, but the config "
+                             f"locks {sha}: the file changed after it was locked")
+        out.append(file)
+    return tuple(out)
+
+
 def card_length(card: Card) -> dict:
     """Length of the card text: whitespace-separated words and characters."""
     return {"card_n_words": len(card.text.split()), "card_n_chars": len(card.text)}
@@ -1541,6 +1571,10 @@ class RunConfig:
     # (as before; not in the config record, rows or raw log then; an explicit
     # "schema_text" is in rows and raw log, not in the config record)
     answer_format: str | None = None
+    # task #93: config "cost_calibration" (cost_calibration_files): extra pgg_cost
+    # overlays of the dry-run estimate and the expected-cost gate; None = the
+    # default calibration. Not in the config record (no request depends on it).
+    cost_calibration: object = None
     _frame_cache: dict | None = field(default=None, init=False, repr=False, compare=False)
     _frame_audit: dict | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -1680,6 +1714,7 @@ class RunConfig:
                         or not value > 0):
                     raise ValueError(f"model_budget_usd[{key}] must be a positive number, "
                                      f"got {value!r}")
+        cost_calibration_files(self.cost_calibration)     # ValueError if unreadable / not locked
         if self.answer_format is not None and self.answer_format not in ANSWER_FORMATS:
             raise ValueError(f"answer_format must be one of {ANSWER_FORMATS}, "
                              f"got {self.answer_format!r}")
@@ -3365,13 +3400,15 @@ class Engine:
     def design_estimate(self) -> dict:
         """Dry-run estimate of the whole design (design_estimate; scaled only with frames)."""
         cfg = self.cfg
-        return design_estimate(
-            models=cfg.models, frame_models=cfg.frame_models(), frames=self.frames,
-            n_cells=len(cfg.cards), params=cfg.params, conditions=cfg.conditions, arms=cfg.arms,
-            groups_per_cell=cfg.groups_per_cell, isolated_reps=cfg.isolated_reps,
-            n_points=len(cfg.isolated_points), comprehension=cfg.comprehension,
-            isolated_frame=cfg.isolated_frame, isolated_round_no=cfg.isolated_round_no,
-            rationale=cfg.rationale, cards=cfg.cards, scale=cfg.frames is not None)
+        with pgg_cost.extra_overlays(cost_calibration_files(cfg.cost_calibration)):
+            return design_estimate(
+                models=cfg.models, frame_models=cfg.frame_models(), frames=self.frames,
+                n_cells=len(cfg.cards), params=cfg.params, conditions=cfg.conditions,
+                arms=cfg.arms, groups_per_cell=cfg.groups_per_cell,
+                isolated_reps=cfg.isolated_reps, n_points=len(cfg.isolated_points),
+                comprehension=cfg.comprehension, isolated_frame=cfg.isolated_frame,
+                isolated_round_no=cfg.isolated_round_no, rationale=cfg.rationale,
+                cards=cfg.cards, scale=cfg.frames is not None)
 
     def cost_gate_problem(self) -> str | None:
         """Why expected_cost_gate_usd stops this run (None: no gate or below it)."""
@@ -5243,9 +5280,12 @@ def format_design_report(est: dict, *, description: str = "", gate: float | None
                          "contribute_N ölçümünden oranla (tahmin)")
     lines += list(dict.fromkeys(notes))
     lines.append("  istem ölçeği: kalibrasyon abstract_v2 istemleriyle (izole: repeated) ölçüldü; "
-                 "başka çerçevede istem token'ı karakter oranıyla ölçeklendi (tahmin). "
-                 "comprehension: contribute_N token'ları, istem kendi uzunluğuna ölçekli (tahmin).")
-    lines.append(pgg_cost.SOURCE_NOTE)
+                 "başka çerçevede istem token'ı karakter oranıyla ölçeklendi (tahmin)."
+                 # task #93: a calibration that measured comprehension does not extrapolate it
+                 + (" comprehension: contribute_N token'ları, istem kendi uzunluğuna ölçekli "
+                    "(tahmin)." if any("comprehension" in (r.get("extrapolated_kinds") or ())
+                                       for r in est["rows"]) else ""))
+    lines.append(pgg_cost.source_note())
     return "\n".join(lines)
 
 
@@ -5624,6 +5664,7 @@ def run_config(run: str, s: dict, models: dict[str, str], output: dict) -> RunCo
         reasoning_cap_rule=resolve_model_keyed(s.get("reasoning_cap_rule"), models,
                                                "reasoning_cap_rule"),
         answer_format=s.get("answer_format"),
+        cost_calibration=s.get("cost_calibration"),
         **output)
 
 
@@ -5803,8 +5844,9 @@ def resume_report(engine: Engine, plan: ResumePlan) -> str:
         name = key if cfg.frames is None else f"{key}/{label}"
         per_key[name] = per_key.get(name, 0) + n
         try:
-            total_cost += pgg_cost.model_cost(cfg.models[key], by_kind,
-                                              scales.get(label))["cost_usd"]
+            with pgg_cost.extra_overlays(cost_calibration_files(cfg.cost_calibration)):
+                total_cost += pgg_cost.model_cost(cfg.models[key], by_kind,
+                                                  scales.get(label))["cost_usd"]
         except KeyError:
             priced = False
     parts = [f"{name} {n}" for name, n in per_key.items()]
@@ -5908,116 +5950,123 @@ def main(argv=None) -> int:
         print(resume_report(engine, plan))
         return 1 if plan.problems else 0
     if args.dry_run:
-        models = resolve_models(names, pgg_cost.KNOWN_MODELS)
-        blockers = count_blockers(s)
-        if blockers:
-            print("KURU ÇALIŞTIRMA — API çağrısı yapılmadı.\n"
-                  f"ÇAĞRI SAYISI HESAPLANAMADI: şu ayarlar henüz seçilmedi (yer tutucu): "
-                  f"{', '.join(blockers)}. Modeller: "
-                  + ", ".join(f"{k}={v}" for k, v in models.items()))
-            print("\n" + example_estimate_report(models, s.get("max_tokens")))
-        else:
-            cards = None
-            if s.get("cards") and not is_placeholder(s["cards"]):
-                try:                         # task #73: the cards lock fails the dry run too
-                    cards_line = cards_lock_line(s["cards"], s.get("cards_sha256"))
-                except ValueError as e:
-                    print(f"HATA: kartlar: {e}", file=sys.stderr)
-                    return 1
-                cards = load_cards(s["cards"], cities)
-                n_cells = len(cards)
+        try:                                 # task #93: the config's cost calibration
+            cal_files = cost_calibration_files(s.get("cost_calibration"))
+        except ValueError as e:
+            print(f"HATA: {e}", file=sys.stderr)
+            return 1
+        with pgg_cost.extra_overlays(cal_files):
+            models = resolve_models(names, pgg_cost.KNOWN_MODELS)
+            blockers = count_blockers(s)
+            if blockers:
+                print("KURU ÇALIŞTIRMA — API çağrısı yapılmadı.\n"
+                      f"ÇAĞRI SAYISI HESAPLANAMADI: şu ayarlar henüz seçilmedi (yer tutucu): "
+                      f"{', '.join(blockers)}. Modeller: "
+                      + ", ".join(f"{k}={v}" for k, v in models.items()))
+                print("\n" + example_estimate_report(models, s.get("max_tokens")))
             else:
-                n_cells = s.get("cells", 6)
-            gate = s.get("expected_cost_gate_usd")
-            gate = None if is_placeholder(gate) else gate
-            try:
-                model_budget = resolve_model_keyed(s.get("model_budget_usd"), models,
-                                                   "model_budget_usd")
-            except ValueError as e:
-                print(f"HATA: {e}", file=sys.stderr)
-                return 1
-            if s.get("frames") is not None:
+                cards = None
+                if s.get("cards") and not is_placeholder(s["cards"]):
+                    try:                         # task #73: the cards lock fails the dry run too
+                        cards_line = cards_lock_line(s["cards"], s.get("cards_sha256"))
+                    except ValueError as e:
+                        print(f"HATA: kartlar: {e}", file=sys.stderr)
+                        return 1
+                    cards = load_cards(s["cards"], cities)
+                    n_cells = len(cards)
+                else:
+                    n_cells = s.get("cells", 6)
+                gate = s.get("expected_cost_gate_usd")
+                gate = None if is_placeholder(gate) else gate
                 try:
-                    frame_models = resolve_frames(s["frames"], models)
-                    frames = dry_run_frames(frame_models, s.get("frame_files"), params)
+                    model_budget = (None if is_placeholder(s.get("model_budget_usd")) else
+                                    resolve_model_keyed(s.get("model_budget_usd"), models,
+                                                        "model_budget_usd"))
                 except ValueError as e:
-                    print(f"HATA: çerçeve: {e}", file=sys.stderr)
+                    print(f"HATA: {e}", file=sys.stderr)
                     return 1
-                iso = s.get("isolated_frame")
-                rationale = s.get("rationale", True)
-                est = design_estimate(
-                    models=models, frame_models=frame_models, frames=frames, n_cells=n_cells,
-                    params=params, conditions=conditions, arms=arms,
-                    groups_per_cell=groups_per_cell, isolated_reps=isolated_reps,
-                    n_points=len(points), comprehension=s.get("comprehension", False),
-                    isolated_frame=None if is_placeholder(iso) else iso,
-                    isolated_round_no=s.get("isolated_round_no", 5),
-                    rationale=True if is_placeholder(rationale) else rationale, cards=cards)
-                print(format_design_report(
-                    est, gate=gate, budget=s.get("budget_usd"), max_tokens=s.get("max_tokens"),
-                    model_budget=model_budget, description=(
-                        f"Tasarım: {n_cells} kart x stil hücresi, çerçeveler "
-                        + "; ".join(f"{k}: {', '.join(v)}" for k, v in frame_models.items())
-                        + f", koşul {'+'.join(conditions)}, kollar {'+'.join(arms)}, hücre "
-                        f"başına {groups_per_cell} homojen grup ({params.group_size} ajan x "
-                        f"{params.rounds} tur), izole çizelge {isolated_reps} tekrar x "
-                        f"{len(points)} değer, kural anlama "
-                        + ("açık (ajan başına grup öncesi 1, izole çizelge başına 1 çağrı)"
-                           if s.get("comprehension") else "kapalı") + ".")))
-                for line in frame_lock_lines(frames, s.get("frame_files"), params):
-                    print(line)
-                if cards is not None:
-                    print(cards_line)
-            else:
-                print(dry_run_report(
-                    models=models, n_cells=n_cells, params=params, conditions=conditions,
-                    arms=arms, groups_per_cell=groups_per_cell, isolated_reps=isolated_reps,
-                    n_points=len(points), max_tokens=s.get("max_tokens")))
-                if gate is not None:
+                if s.get("frames") is not None:
+                    try:
+                        frame_models = resolve_frames(s["frames"], models)
+                        frames = dry_run_frames(frame_models, s.get("frame_files"), params)
+                    except ValueError as e:
+                        print(f"HATA: çerçeve: {e}", file=sys.stderr)
+                        return 1
+                    iso = s.get("isolated_frame")
+                    rationale = s.get("rationale", True)
                     est = design_estimate(
-                        models=models, frame_models={DEFAULT_FRAME: list(models)}, frames={},
-                        n_cells=n_cells, params=params, conditions=conditions, arms=arms,
+                        models=models, frame_models=frame_models, frames=frames, n_cells=n_cells,
+                        params=params, conditions=conditions, arms=arms,
                         groups_per_cell=groups_per_cell, isolated_reps=isolated_reps,
-                        n_points=len(points), scale=False)
-                    problem = gate_problem(est, gate)
-                    print(f"Beklenti kapısı expected_cost_gate_usd={gate:g} USD: "
-                          + ("GEÇER" if problem is None else
-                             f"AŞILIYOR — gerçek koşu BAŞLAMAZ: {problem}"))
-        guards = {k: s[k] for k in ("max_tokens", "request_timeout_s", "request_deadline_s",
-                                    "stall_timeout_s", "budget_usd", "model_budget_usd",
-                                    "expected_cost_gate_usd",
-                                    "invalid_rate_cap", "stop_on_length", "check_snapshot",
-                                    "snapshot_version_models", "reasoning_cap_rule",
-                                    "answer_format",
-                                    "seed_namespace", "parallel_units", "workers",
-                                    "isolated_frame", "isolated_round_no", "comprehension")
-                  if s.get(k) is not None}
-        print(f"Ayarlar: reasoning_effort={s.get('reasoning_effort') or 'gönderilmez'}, "
-              + ", ".join(f"{k}={v}" for k, v in guards.items()))
-        print(code_version_line(code_version()))
-        if is_run_template(run):
-            try:
-                print(f"Run adı: şablon {run} — yeni gerçek koşuda koşu günüyle çözülür (bugün: "
-                      f"{resolve_run_name(run)}); --resume açık adla (--run) çalışır")
-            except ValueError as e:
-                print(f"HATA: {e}", file=sys.stderr)
-                return 1
-        elif run:
-            print(f"Run adı: {run}")
-        if "prereg_approved" in s:
-            problem = prereg_problem(s)
-            print("Ön kayıt: onaylı (prereg_approved=true)" if problem is None else
-                  f"ÖN KAYIT ONAYI YOK (gerçek koşu başlamaz): {problem}")
-        open_ = open_choices(s)
-        if open_:
-            print("SEÇİLMEMİŞ (gerçek koşu başlamaz): " + ", ".join(open_))
-        else:
-            try:
-                where = next(iter(resolve_output(s).values()))
-                print(f"Çıktı dizini: {where} (mevcut)")
-            except ValueError as e:
-                print(f"ÇIKTI DİZİNİ KULLANILAMIYOR (gerçek koşu başlamaz): {e}")
-        return 0
+                        n_points=len(points), comprehension=s.get("comprehension", False),
+                        isolated_frame=None if is_placeholder(iso) else iso,
+                        isolated_round_no=s.get("isolated_round_no", 5),
+                        rationale=True if is_placeholder(rationale) else rationale, cards=cards)
+                    print(format_design_report(
+                        est, gate=gate, budget=s.get("budget_usd"), max_tokens=s.get("max_tokens"),
+                        model_budget=model_budget, description=(
+                            f"Tasarım: {n_cells} kart x stil hücresi, çerçeveler "
+                            + "; ".join(f"{k}: {', '.join(v)}" for k, v in frame_models.items())
+                            + f", koşul {'+'.join(conditions)}, kollar {'+'.join(arms)}, hücre "
+                            f"başına {groups_per_cell} homojen grup ({params.group_size} ajan x "
+                            f"{params.rounds} tur), izole çizelge {isolated_reps} tekrar x "
+                            f"{len(points)} değer, kural anlama "
+                            + ("açık (ajan başına grup öncesi 1, izole çizelge başına 1 çağrı)"
+                               if s.get("comprehension") else "kapalı") + ".")))
+                    for line in frame_lock_lines(frames, s.get("frame_files"), params):
+                        print(line)
+                    if cards is not None:
+                        print(cards_line)
+                else:
+                    print(dry_run_report(
+                        models=models, n_cells=n_cells, params=params, conditions=conditions,
+                        arms=arms, groups_per_cell=groups_per_cell, isolated_reps=isolated_reps,
+                        n_points=len(points), max_tokens=s.get("max_tokens")))
+                    if gate is not None:
+                        est = design_estimate(
+                            models=models, frame_models={DEFAULT_FRAME: list(models)}, frames={},
+                            n_cells=n_cells, params=params, conditions=conditions, arms=arms,
+                            groups_per_cell=groups_per_cell, isolated_reps=isolated_reps,
+                            n_points=len(points), scale=False)
+                        problem = gate_problem(est, gate)
+                        print(f"Beklenti kapısı expected_cost_gate_usd={gate:g} USD: "
+                              + ("GEÇER" if problem is None else
+                                 f"AŞILIYOR — gerçek koşu BAŞLAMAZ: {problem}"))
+            guards = {k: s[k] for k in ("max_tokens", "request_timeout_s", "request_deadline_s",
+                                        "stall_timeout_s", "budget_usd", "model_budget_usd",
+                                        "expected_cost_gate_usd",
+                                        "invalid_rate_cap", "stop_on_length", "check_snapshot",
+                                        "snapshot_version_models", "reasoning_cap_rule",
+                                        "answer_format",
+                                        "seed_namespace", "parallel_units", "workers",
+                                        "isolated_frame", "isolated_round_no", "comprehension")
+                      if s.get(k) is not None}
+            print(f"Ayarlar: reasoning_effort={s.get('reasoning_effort') or 'gönderilmez'}, "
+                  + ", ".join(f"{k}={v}" for k, v in guards.items()))
+            print(code_version_line(code_version()))
+            if is_run_template(run):
+                try:
+                    print(f"Run adı: şablon {run} — yeni gerçek koşuda koşu günüyle çözülür (bugün: "
+                          f"{resolve_run_name(run)}); --resume açık adla (--run) çalışır")
+                except ValueError as e:
+                    print(f"HATA: {e}", file=sys.stderr)
+                    return 1
+            elif run:
+                print(f"Run adı: {run}")
+            if "prereg_approved" in s:
+                problem = prereg_problem(s)
+                print("Ön kayıt: onaylı (prereg_approved=true)" if problem is None else
+                      f"ÖN KAYIT ONAYI YOK (gerçek koşu başlamaz): {problem}")
+            open_ = open_choices(s)
+            if open_:
+                print("SEÇİLMEMİŞ (gerçek koşu başlamaz): " + ", ".join(open_))
+            else:
+                try:
+                    where = next(iter(resolve_output(s).values()))
+                    print(f"Çıktı dizini: {where} (mevcut)")
+                except ValueError as e:
+                    print(f"ÇIKTI DİZİNİ KULLANILAMIYOR (gerçek koşu başlamaz): {e}")
+            return 0
 
     # Everything that can stop a real run is checked here, before llm_client is
     # imported and before any call; the pre-registration lock first.

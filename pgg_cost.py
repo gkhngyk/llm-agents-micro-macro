@@ -11,7 +11,11 @@ of a future run. Mistral has no pilot data; its entry in that file is marked
 configs/cost_calibration_minipilot_m1.json (CALIBRATION_OVERLAYS) replaces
 it with an entry from the M1 plumbing measurement (round 1 and isolated X =
 10 measured, later rounds from pilot v2's round profile, labelled tahmin; its
-"report_note" goes into the dry-run report). Deliberately does not import
+"report_note" goes into the dry-run report). Task #93: a config may add
+overlays with "cost_calibration" (pgg_game; extra_overlays below), e.g.
+configs/cost_calibration_minipilot.json from the mini-pilot's real token
+distribution (comprehension measured, not extrapolated); the default stays
+as it was. Deliberately does not import
 llm_client: importing it needs the API key and reads ../.env, and a dry run
 must touch neither.
 
@@ -42,6 +46,7 @@ Call kinds:
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 
@@ -125,16 +130,51 @@ def load_calibration(path: Path = CALIBRATION_PATH, overlays=CALIBRATION_OVERLAY
 
 CALIBRATION = load_calibration()
 
-SOURCE_NOTE = (
-    f"Kaynak: configs/{CALIBRATION_PATH.name} (pgg_cost_calibrate.py, koşu "
-    f"{CALIBRATION['source']['run']}: model x çağrı türü ortalama/p95 token, gerçek "
-    "usage.cost). Tüm sayılar (tahmin): pilot v2 dağılımı yeni koşuda aynı kalmayabilir; "
-    "\"estimate\": true olan modeller ölçülmedi, kesin bütçe değil."
-    + "".join(f" Üzerine yazılan: configs/{o['file']} (koşu {o['run']}: "
-              f"{', '.join(o['models'])})." for o in CALIBRATION["overlays"])
-    + "".join(f" EKSİK kalibrasyon dosyası: configs/{name} (yerine pilot v2 girdisi)."
-              for name in CALIBRATION["overlays_missing"])
-)
+
+def source_note(cal: dict | None = None) -> str:
+    """The report's source line of a calibration (default: the one in use)."""
+    cal = CALIBRATION if cal is None else cal
+    return (
+        f"Kaynak: configs/{CALIBRATION_PATH.name} (pgg_cost_calibrate.py, koşu "
+        f"{cal['source']['run']}: model x çağrı türü ortalama/p95 token, gerçek "
+        "usage.cost). Tüm sayılar (tahmin): pilot v2 dağılımı yeni koşuda aynı kalmayabilir; "
+        "\"estimate\": true olan modeller ölçülmedi, kesin bütçe değil."
+        + "".join(f" Üzerine yazılan: configs/{o['file']} (koşu {o['run']}: "
+                  f"{', '.join(o['models'])})." for o in cal["overlays"])
+        + "".join(f" EKSİK kalibrasyon dosyası: configs/{name} (yerine pilot v2 girdisi)."
+                  for name in cal["overlays_missing"])
+    )
+
+
+SOURCE_NOTE = source_note()
+
+
+@contextlib.contextmanager
+def extra_overlays(paths):
+    """Price with CALIBRATION_OVERLAYS plus these overlay files while inside (task #93).
+
+    A config's "cost_calibration" (pgg_game) names them: the main experiment
+    is priced from the mini-pilot's token distribution
+    (configs/cost_calibration_minipilot.json) while the default stays as
+    before, so earlier configs keep their estimates and gates. A missing file
+    is an error here (not listed as missing). Not thread-safe: dry runs and
+    the gate check at a run's start are single-threaded. No paths: the
+    calibration in use is left as it is (not reloaded).
+    """
+    global CALIBRATION
+    paths = tuple(Path(p) for p in paths)
+    if not paths:
+        yield CALIBRATION
+        return
+    for p in paths:
+        if not p.is_file():
+            raise ValueError(f"cost calibration file {str(p)!r} not found")
+    saved = CALIBRATION
+    CALIBRATION = load_calibration(overlays=CALIBRATION_OVERLAYS + paths)
+    try:
+        yield CALIBRATION
+    finally:
+        CALIBRATION = saved
 
 
 def _model(slug: str) -> dict:
@@ -339,5 +379,5 @@ def format_report(est: dict, *, description: str = "") -> str:
     lines.extend(notes)
     lines.append("p95 üst sınır: her çağrı türünde p95 istem ve p95 completion token'ı "
                  "(akıl yürütme dahil) birlikte, artı ödenmiş-geçersiz payı.")
-    lines.append(SOURCE_NOTE)
+    lines.append(source_note())
     return "\n".join(lines)

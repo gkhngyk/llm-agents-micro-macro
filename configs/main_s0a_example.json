@@ -1,0 +1,90 @@
+{
+  "_notes": "Stage 0a of the main experiment, answer-format test, option A (answer_format example_object; EMIR 5 P1, task #93). Paid, small, NOT analysis data: its rows never enter the main analysis. Design the engine runs as it is: Boston + Riyadh (6 cards) x 3 models, isolated arm only, one point X = 10 ('round 5 of 10') x 2 repetitions, comprehension on (one rule-comprehension call before every isolated schedule): per card 2 isolated + 2 rule-comprehension calls, 24 calls per model, 72 per format. The round-1 contribution of P1's list has no engine mode yet (a group game plays all 10 rounds): see the task #93 report. Selection rule (written before the data, prereg_main P1): default A; B if A's invalid + parse_fail rate is above 2 % in any model and B's is lower; A stays if a provider does not support B. Run name main_s0a_example_<run day>, seed namespace pgg-main-s0a-example; separate from stage 1. Budget (proposal by the EMIR 3 rule, final with the prereg approval; workspace/main_dryrun_tablosu.md): budget_usd 1 >= the run's p95 upper bound, model_budget_usd >= each model's p95, expected_cost_gate_usd 0.5 >= mean x 1.1. Models (EMIR 5 K2): deepseek/deepseek-v4.1-flash pinned to deepinfra/fp8 (DeepInfra fp8), mistralai/mistral-large-4-0 pinned to mistral, openai/gpt-6-luna pinned to openai; allow_fallbacks false and require_parameters true for all three (pgg_game.provider_routing); temperature and reasoning_effort are not sent (logged \"default\"); max_tokens 16000; check_snapshot true (snapshot_version_models = [mistral], as in the mini-pilot). Frame abstract_v4 (EMIR 5 K1) = abstract_v3 + the line 'The following describes you:' before the card in the system message, locked by sha256 (frame_files); kind abstract (exempt from the frame linter). Cards: cards/main_cards_v1.json (EMIR 5 K3: Boston, Copenhagen, Athens, Riyadh x minimal / value / factual; minimal = v3, value = v2, factual = D2 C1 court-time card), locked by cards_sha256. comprehension true: the two rule-comprehension questions of the frame (key 28 / -6, neutral q2 ending); no exclusion, sensitivity only (EMIR 5 K6). Isolated arm: fixed_round, 'round 5 of 10' (isolated_round_no 5). answer_format: chosen by stage 0a (prereg_main P1); until then a placeholder (no real run starts). cost_calibration: the mini-pilot overlay (configs/cost_calibration_minipilot.json, sha256-locked) prices the dry run and the expected-cost gate; it changes no request. prereg_approved stays false until the user approves prereg_main.md: until then no real run (also --resume) starts; dry runs work. Paid runs are started from the user's own Terminal with scripts/runctl.py (EMIR 5 M3, README). Outputs go to runs_dir/<run>/ (outside the worktree).",
+  "prereg_approved": false,
+  "run": "main_s0a_example_{run_date}",
+  "cards": "cards/main_cards_v1.json",
+  "cards_sha256": "bb2be483d1cb860df43d46675a0b798acc240f5d022ee36a5e5d272a12d7f1dc",
+  "cities": [
+    "Boston",
+    "Riyadh"
+  ],
+  "models": [
+    "deepseek/deepseek-v4.1-flash",
+    "mistralai/mistral-large-4-0",
+    "openai/gpt-6-luna"
+  ],
+  "conditions": [
+    "N"
+  ],
+  "arms": [
+    "isolated"
+  ],
+  "groups_per_cell": 1,
+  "isolated_reps": 2,
+  "isolated_points": [
+    10
+  ],
+  "isolated_frame": "fixed_round",
+  "isolated_round_no": 5,
+  "frames": {
+    "abstract_v4": [
+      "deepseek",
+      "mistral",
+      "gpt"
+    ]
+  },
+  "frame_files": {
+    "abstract_v4": {
+      "path": "frames/abstract_v4.json",
+      "sha256": "c00db315d9c3141b78b04de5ece650e4b922db907cb90ae124666c439633a9f4"
+    }
+  },
+  "comprehension": true,
+  "rationale": true,
+  "answer_format": "example_object",
+  "max_tokens": 16000,
+  "request_deadline_s": 900,
+  "stall_timeout_s": 1800,
+  "providers": {
+    "deepseek": {
+      "slug": "deepinfra/fp8",
+      "name": "DeepInfra",
+      "quantizations": [
+        "fp8"
+      ]
+    },
+    "mistral": {
+      "slug": "mistral",
+      "name": "Mistral"
+    },
+    "gpt": {
+      "slug": "openai",
+      "name": "OpenAI"
+    }
+  },
+  "runs_dir": "/Users/karbon/Desktop/Veri Bilimi/complexity-prj/orc/data/projects/PublicGoods/workspace/runs",
+  "seed_namespace": "pgg-main-s0a-example",
+  "max_invalid": 3,
+  "budget_usd": 1,
+  "model_budget_usd": {
+    "deepseek": 0.5,
+    "mistral": 0.5,
+    "gpt": 0.5
+  },
+  "expected_cost_gate_usd": 0.5,
+  "cost_calibration": {
+    "path": "configs/cost_calibration_minipilot.json",
+    "sha256": "d26eb4107aa7ae0ec828bffb912dc5e59d23933347cdf3a8f737858b5ec040c8"
+  },
+  "invalid_rate_cap": 0.05,
+  "stop_on_length": true,
+  "check_snapshot": true,
+  "snapshot_version_models": [
+    "mistral"
+  ],
+  "reasoning_cap_rule": {
+    "mistral": "max_reasoning_completion"
+  },
+  "workers": 4,
+  "parallel_units": 3
+}

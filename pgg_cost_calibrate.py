@@ -28,10 +28,21 @@ Its later rounds and other isolated values come from pilot v2's round
 profile (--later-rounds, every choice labelled tahmin). pgg_cost.py loads
 the pilot v2 file and replaces its Mistral entry with the overlay's.
 
+Task #93 (EMIR 5): --minipilot-run-dir writes the overlay
+configs/cost_calibration_minipilot.json from the mini-pilot's real token
+distribution (runs/minipilot_<date>), per model x call type: group round 1,
+group rounds 2-10, isolated, rule comprehension (mean and p95), from the
+abstract_v3 rows (the main frame abstract_v4 differs from it only by one
+system line). Story rows are summarised apart (information). The raw log is
+read for its "model" and "usage" fields only (paid cost per model); nothing
+of it is written. A config names the overlay with "cost_calibration"
+(pgg_game); the default calibration of pgg_cost is not changed by it.
+
 Usage:
   python pgg_cost_calibrate.py --run-dir <workspace>/runs/pilot_v2_20261005
   python pgg_cost_calibrate.py --m1-run-dir <workspace>/runs/tesisat_olcum_20261007 \
       --ratio-run-dir <workspace>/runs/pilot_v2_20261005
+  python pgg_cost_calibrate.py --minipilot-run-dir <workspace>/runs/minipilot_20261008
 """
 
 from __future__ import annotations
@@ -47,6 +58,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 DEFAULT_OUT = ROOT / "configs" / "cost_calibration_pilot_v2.json"
 MINIPILOT_M1_OUT = ROOT / "configs" / "cost_calibration_minipilot_m1.json"
+MINIPILOT_OUT = ROOT / "configs" / "cost_calibration_minipilot.json"
+MINIPILOT_CONFIG = ROOT / "configs" / "minipilot.json"
 
 MISTRAL = "mistralai/mistral-large-4-0"
 # Listed price of the only endpoint (tag "mistral"), GET
@@ -578,12 +591,247 @@ def calibrate_mistral_m1(m1_dir: Path, ratio_run_dir: Path, base_path: Path = DE
     }
 
 
+# Call types of the mini-pilot calibration (task #93): name -> (pgg_cost kind, row test)
+MP_TYPES = {
+    "group_round_1": ("contribute_N", lambda r: r["step"] == "contribute" and r["round"] == 1),
+    "group_rounds_2_10": ("contribute_N",
+                          lambda r: r["step"] == "contribute" and r["round"] != 1),
+    "isolated": ("isolated", lambda r: r["step"] == "isolated"),
+    "comprehension": ("comprehension", lambda r: r["step"] == "comprehension"),
+}
+MP_FRAME = "abstract_v3"
+
+
+def _mp_stats(rows: list[dict]) -> dict:
+    toks = [usage_tokens(r["usage"]) for r in rows]
+    return {"n": len(rows), **{f: stats(t[f] for t in toks) for f in TOKEN_FIELDS},
+            "cost_usd": stats((_cost(r["usage"]) for r in rows), digits=12),
+            "cost_usd_sum": round(sum(_cost(r["usage"]) for r in rows), 10)}
+
+
+def _mp_measured(rows: list[dict]) -> dict:
+    return {name: _mp_stats([r for r in rows if test(r)])
+            for name, (_, test) in MP_TYPES.items() if any(test(r) for r in rows)}
+
+
+def raw_paid_by_model(raw_path: Path) -> tuple[dict, int]:
+    """({model slug: summed usage.cost}, number of call records) of a raw log.
+
+    Reads only the "model" and "usage" fields of call records (no event); the
+    rest of a record (messages, response, ids) is not kept.
+    """
+    paid, n = Counter(), 0
+    with open(raw_path, encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            if "event" in rec or "model" not in rec:
+                continue
+            model, cost = rec["model"], _cost(rec.get("usage"))
+            del rec
+            n += 1
+            if cost is not None:
+                paid[model] += cost
+    return dict(paid), n
+
+
+def calibrate_minipilot(run_dir: Path, base_path: Path = DEFAULT_OUT,
+                        config_path: Path = MINIPILOT_CONFIG) -> dict:
+    """Overlay of base_path from the mini-pilot's token distribution (task #93).
+
+    Per model, from the valid abstract_v3 rows: mean and p95 of prompt,
+    completion, reasoning and visible tokens and of usage.cost for group
+    round 1, group rounds 2-10, isolated and rule comprehension ("measured",
+    abstract_v3 prompt units). The pgg_cost kinds:
+      contribute_N  = round 1 x 1/10 + rounds 2-10 x 9/10 (rounds = 10), mean
+                      and p95 each;
+      isolated, comprehension as measured;
+    prompt tokens divided by abstract_v3's prompt scale to abstract_v2
+    (pgg_game.prompt_scales, the mini-pilot's cards), the unit pgg_game
+    scales to a run's frame. Price: billed cost_details / tokens of the same
+    rows. Paid-but-invalid share: (paid usage.cost of the raw log - usage.cost
+    of every valid row, both frames) / the latter, per model.
+    """
+    import pgg_frames
+    import pgg_game
+
+    run_dir, base_path = Path(run_dir), Path(base_path)
+    summary_path = next(iter(sorted(run_dir.glob("*_summary.json"))))
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    run = summary["run"]
+    results_path, raw_path = run_dir / f"{run}.jsonl", run_dir / "raw_calls.jsonl"
+    if summary["superseded_rows"] or summary["truncated_lines"]:
+        raise ValueError(f"{run}: superseded or cut-off rows; every row is taken as valid here")
+    rows = read_jsonl(results_path)
+    cfg = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    models = summary["config"]["models"]                       # key -> slug
+    paid_raw, n_raw = raw_paid_by_model(raw_path)
+    paid_summary = {slug: summary["per_model"][slug]["cost_usd"] for slug in models.values()}
+    for slug, cost in paid_summary.items():
+        if abs(paid_raw.get(slug, 0.0) - cost) > 1e-6:
+            raise ValueError(f"{run}: paid cost of {slug} in the raw log {paid_raw.get(slug)} != "
+                             f"summary {cost}")
+
+    params = pgg_game.GameParams()
+    if params.rounds != 10 or summary["config"]["params"]["rounds"] != 10:
+        raise ValueError("the round weights 1/10 and 9/10 assume 10 rounds")
+    frame_file = ROOT / cfg["frame_files"][MP_FRAME]["path"]
+    frame = pgg_frames.load_frame(frame_file)
+    sha = {r["frame_sha256"] for r in rows if r["frame"] == MP_FRAME}
+    if sha != {frame.sha256}:
+        raise ValueError(f"{run}: abstract_v3 rows have frame sha256 {sha}, the file "
+                         f"{frame.sha256}")
+    cards = pgg_game.load_cards(ROOT / cfg["cards"], cfg["cities"])
+    scale = pgg_game.prompt_scales(frame, params, cards, isolated_frame=cfg["isolated_frame"],
+                                   isolated_round_no=cfg["isolated_round_no"],
+                                   rationale=cfg["rationale"])
+    w1 = 1 / params.rounds
+
+    out_models = {}
+    for key, slug in models.items():
+        m_rows = [r for r in rows if r["model"] == slug]
+        a_rows = [r for r in m_rows if r["frame"] == MP_FRAME]
+        measured = _mp_measured(a_rows)
+        r1, rl = measured["group_round_1"], measured["group_rounds_2_10"]
+        kinds = {"contribute_N": {
+            "n": r1["n"] + rl["n"],
+            "rule": "round 1 x 1/10 + rounds 2-10 x 9/10 (mean and p95 each)",
+            **{f: {s: round(w1 * r1[f][s] + (1 - w1) * rl[f][s], 6) for s in ("mean", "p95")}
+               for f in ("prompt_tokens", "completion_tokens")}}}
+        for name in ("isolated", "comprehension"):
+            kinds[name] = {"n": measured[name]["n"],
+                           **{f: dict(measured[name][f])
+                              for f in ("prompt_tokens", "completion_tokens")}}
+        for kind, k in kinds.items():
+            k["prompt_tokens_abstract_v3"] = dict(k["prompt_tokens"])
+            k["prompt_scale_abstract_v3"] = round(scale[kind], 6)
+            k["prompt_tokens"] = {s: round(v / scale[kind], 6)
+                                  for s, v in k["prompt_tokens"].items()}
+
+        prompt_cost = sum(r["usage"]["cost_details"]["upstream_inference_prompt_cost"]
+                          for r in a_rows)
+        compl_cost = sum(r["usage"]["cost_details"]["upstream_inference_completions_cost"]
+                         for r in a_rows)
+        n_prompt = sum(r["usage"]["prompt_tokens"] for r in a_rows)
+        n_compl = sum(r["usage"]["completion_tokens"] for r in a_rows)
+        cached = sum((r["usage"].get("prompt_tokens_details") or {}).get("cached_tokens") or 0
+                     for r in a_rows)
+        valid_cost = sum(_cost(r["usage"]) for r in m_rows)
+        pm = summary["per_model"][slug]
+        paid_total = paid_summary[slug]
+        entry = {
+            "key": key,
+            "estimate": False,
+            "provider": ", ".join(sorted(pm["providers"])),
+            "model_version": ", ".join(sorted(pm["model_versions"])),
+            "price_usd_per_m": {
+                "input": round(prompt_cost / n_prompt * 1e6, 6),
+                "output": round(compl_cost / n_compl * 1e6, 6),
+                "source": (f"calibration: billed usage.cost_details (prompt / completions) / "
+                           f"tokens of the {len(a_rows)} valid {MP_FRAME} rows of {run}"),
+            },
+            "cached_prompt_token_share": round(cached / n_prompt, 6),
+            "kinds": kinds,
+            "measured": measured,
+            "measured_story": _mp_measured([r for r in m_rows if r["frame"] != MP_FRAME]) or None,
+            "paid": {
+                "n_responses": pm["n_responses"],
+                "n_valid_rows": len(m_rows),
+                "n_invalid": pm["n_invalid"],
+                "n_parse_fail": pm["n_parse_fail"],
+                "n_provider_error": pm["n_provider_error"],
+                "n_discarded": pm["n_discarded"],
+                "total_cost_usd": round(paid_total, 10),
+                "valid_cost_usd": round(valid_cost, 10),
+                "paid_invalid_cost_usd": round(paid_total - valid_cost, 10),
+                "paid_invalid_call_rate": round((pm["n_responses"] - len(m_rows)) / len(m_rows),
+                                                6),
+                "paid_invalid_cost_ratio": round((paid_total - valid_cost) / valid_cost, 6),
+                "source": (f"{run}: paid = usage.cost summed over the raw log's call records "
+                           f"(equal to the summary's per_model cost_usd), valid = usage.cost "
+                           f"of the model's valid rows of every frame"),
+            },
+            "report_note": (f"kalibrasyon mini-pilot {run} ({MP_FRAME}, {len(a_rows)} geçerli "
+                            f"satır: tur 1 {r1['n']}, tur 2-10 {rl['n']}, izole "
+                            f"{measured['isolated']['n']}, kural anlama "
+                            f"{measured['comprehension']['n']}); ödenmiş-geçersiz payı "
+                            f"{(paid_total - valid_cost) / valid_cost:.4f} (tahmin)"),
+            "assumptions": [
+                "every number is (tahmin) for a future run: the mini-pilot's distribution may "
+                "not hold in another design, frame or card set",
+                f"from the {MP_FRAME} rows only (the main frame abstract_v4 adds one system "
+                "line to it); story rows are in measured_story, not in kinds",
+                "contribute_N = round 1 x 1/10 + rounds 2-10 x 9/10 (rounds = 10), mean and p95 "
+                "each; the p95 of a kind is a per-call p95, so calls x p95 is an upper bound, "
+                "not the p95 of a total",
+                "prompt tokens in abstract_v2 units: the measured mean / p95 divided by "
+                "abstract_v3's prompt scale (pgg_game.prompt_scales, mini-pilot cards); a "
+                "run's frame scales them back by its character ratio (tahmin)",
+                "comprehension measured (group and isolated rule-comprehension calls pooled; the "
+                "same prompt), no longer extrapolated from contribute_N",
+                "paid-but-invalid share of the mini-pilot (re-requests, provider errors, "
+                "answers discarded at the resumes of its 23 segments) per model",
+            ],
+        }
+        if any(v["visible_tokens"]["mean"] < 0 for v in measured.values()):
+            entry["assumptions"].append(
+                "visible_tokens = completion - reasoning is negative where the provider "
+                "reports reasoning_tokens above completion_tokens (EMIR 3 3a); the cost uses "
+                "completion_tokens, which are billed")
+        if key == "mistral":
+            entry["assumptions"].append(
+                f"Mistral: incomplete data, {len(m_rows)} valid rows of the planned 600 (the run "
+                f"stopped Mistral at its invalid-rate cap: {pm['n_invalid']} invalid > "
+                f"{summary['model_stops']['mistral']['limit']}); rounds 2-10 from {rl['n']} rows "
+                "of 8 groups (the 8th cut off), only abstract_v3, isolated "
+                f"{measured['isolated']['n']} rows; its paid-invalid share includes the "
+                "invalid answers that stopped it")
+            entry["report_note"] += (f"; Mistral eksik veri: {len(m_rows)}/600 satır "
+                                     "(geçersiz oranı tavanında durdu)")
+        out_models[slug] = entry
+
+    return {
+        "_notes": ("pgg_cost.py calibration overlay (task #93, EMIR 5). Generated by "
+                   "pgg_cost_calibrate.py --minipilot-run-dir from the mini-pilot run below; "
+                   "aggregates only, no account id, no text; of raw_calls.jsonl only the model "
+                   "and usage fields of call records are read (paid cost per model). Not a "
+                   "default overlay of pgg_cost: a config names it with \"cost_calibration\" "
+                   "(configs/main.json). kinds: what pgg_cost uses (prompt in abstract_v2 "
+                   "units); measured: per call type, abstract_v3 prompt units, as billed; "
+                   "measured_story: the story arm (information). See assumptions."),
+        "schema": 1,
+        "overlay_of": base_path.name,
+        "p95_method": "linear interpolation between order statistics (numpy default)",
+        "source": {
+            "run": run,
+            "results_file": results_path.name,
+            "results_sha256": sha256(results_path),
+            "results_lines": len(rows),
+            "summary_file": summary_path.name,
+            "summary_sha256": sha256(summary_path),
+            "raw_log_call_records": n_raw,
+            "frame": MP_FRAME,
+            "frame_sha256": frame.sha256,
+            "config": Path(config_path).name,
+            "cards": cfg["cards"],
+            "base_sha256": sha256(base_path),
+        },
+        "actual_total_cost_usd": round(summary["total_cost_usd"], 10),
+        "recomputed_total_cost_usd": round(sum(paid_summary.values()), 10),
+        "models": out_models,
+    }
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--run-dir", type=Path,
                      help="run directory (read only): <run>.jsonl, <run>_summary.json, "
                           "raw_calls.jsonl")
+    src.add_argument("--minipilot-run-dir", type=Path,
+                     help="mini-pilot run directory (read only): writes the overlay "
+                          "configs/cost_calibration_minipilot.json (task #93)")
     src.add_argument("--m1-run-dir", type=Path,
                      help="M1 plumbing measurement (read only): results.jsonl, summary.json; "
                           "writes the Mistral overlay (task #71)")
@@ -593,7 +841,10 @@ def main(argv=None) -> int:
     ap.add_argument("--later-rounds", choices=sorted(LATER_ROUNDS), default="pilot_v2_max")
     ap.add_argument("--out", type=Path)
     args = ap.parse_args(argv)
-    if args.m1_run_dir is not None:
+    if args.minipilot_run_dir is not None:
+        read_only = [args.minipilot_run_dir.resolve()]
+        out = (args.out or MINIPILOT_OUT).resolve()
+    elif args.m1_run_dir is not None:
         if args.ratio_run_dir is None:
             ap.error("--m1-run-dir needs --ratio-run-dir")
         read_only = [args.m1_run_dir.resolve(), args.ratio_run_dir.resolve()]
@@ -604,14 +855,26 @@ def main(argv=None) -> int:
     if any(out.parent == d or d in out.parents for d in read_only):
         print("HATA: çıktı koşu dizininin içine yazılmaz (salt okunur)", file=sys.stderr)
         return 1
-    if args.m1_run_dir is not None:
+    if args.minipilot_run_dir is not None:
+        cal = calibrate_minipilot(args.minipilot_run_dir)
+    elif args.m1_run_dir is not None:
         cal = calibrate_mistral_m1(args.m1_run_dir, args.ratio_run_dir,
                                    later_rounds=args.later_rounds)
     else:
         cal = calibrate(args.run_dir)
     out.write_text(json.dumps(cal, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"yazıldı: {out}")
-    if args.m1_run_dir is not None:
+    if args.minipilot_run_dir is not None:
+        print(f"mini-pilot {cal['source']['run']}: gerçek toplam "
+              f"{cal['actual_total_cost_usd']:.6f} USD, ham logdan "
+              f"{cal['recomputed_total_cost_usd']:.6f} USD")
+        for slug, m in cal["models"].items():
+            for name, k in m["measured"].items():
+                print(f"  {m['key']:<9} {name:<18} n={k['n']:>4} istem ort "
+                      f"{k['prompt_tokens']['mean']:.1f} / p95 {k['prompt_tokens']['p95']:.1f}, "
+                      f"completion ort {k['completion_tokens']['mean']:.1f} / p95 "
+                      f"{k['completion_tokens']['p95']:.1f}")
+    elif args.m1_run_dir is not None:
         m = cal["models"][MISTRAL]
         print(f"Mistral M1 ({cal['source']['run']}, {cal['source']['n_mistral_rows']} çağrı), "
               f"sonraki turlar: {args.later_rounds}")
