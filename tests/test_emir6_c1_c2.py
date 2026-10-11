@@ -285,7 +285,7 @@ class StageConfigs(unittest.TestCase):
         for name, stage in STAGE_CONFIGS.items():
             raw = json.loads((ROOT / "configs" / name).read_text(encoding="utf-8"))
             self.assertEqual(raw["stage"], stage, name)
-            self.assertIs(raw["prereg_approved"], False, name)
+            self.assertIs(raw["prereg_approved"], True, name)    # task #99
             self.assertNotIn("allow_code_change", raw)
 
     def test_dry_run_reports_the_lock(self):

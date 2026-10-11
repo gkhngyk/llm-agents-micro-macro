@@ -97,7 +97,7 @@ class Stage0aConfigs(GuardTestBase):
         for fmt, path in S0A.items():
             with self.subTest(fmt):
                 a = _json(path)
-                self.assertIs(a["prereg_approved"], False)
+                self.assertIs(a["prereg_approved"], True)    # task #99
                 self.assertEqual((a["stage"], a["answer_format"]), ("0a", fmt))
                 self.assertEqual(a["params"], {"rounds": 3})
                 self.assertEqual((a["cities"], a["arms"], a["groups_per_cell"], a["isolated_reps"],
@@ -473,7 +473,7 @@ class Budgets(unittest.TestCase):
                          (10, {"deepseek": 2, "mistral": 8, "gpt": 0.5}, 5.5))
         for path in (MAIN, S0B, *S0A.values()):
             raw = _json(path)
-            self.assertIs(raw["prereg_approved"], False, path)
+            self.assertIs(raw["prereg_approved"], True, path)    # task #99
             self.assertNotIn("main_dryrun_tablosu.md", raw["_notes"], path)
             self.assertNotIn("placeholders until the user chooses", raw["_notes"], path)
 

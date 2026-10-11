@@ -233,7 +233,7 @@ class MainConfigs(unittest.TestCase):
 
     def test_stage1_design(self):
         m = self.main
-        self.assertIs(m["prereg_approved"], False)
+        self.assertIs(m["prereg_approved"], True)    # task #99: prereg_main.md approved
         self.assertEqual((m["run"], m["seed_namespace"]), ("main_s1_{run_date}", "pgg-main-s1"))
         self.assertEqual(m["models"], list(SLUGS.values()))
         self.assertEqual(m["providers"], {
@@ -262,13 +262,13 @@ class MainConfigs(unittest.TestCase):
         self.assertTrue(pgg_game.is_placeholder(m["answer_format"]))
         self.assertIn("TBD", m["answer_format"])
         self.assertEqual(pgg_game.open_choices(m), ["answer_format"])
-        self.assertIsNotNone(pgg_game.prereg_problem(m))
+        self.assertIsNone(pgg_game.prereg_problem(m))  # the placeholder still blocks a real run
 
     def test_stage_configs(self):
         names = {MAIN: ("main_s1_{run_date}", "pgg-main-s1")}
         for fmt, path in S0A.items():
             a = _json(path)
-            self.assertIs(a["prereg_approved"], False)
+            self.assertIs(a["prereg_approved"], True)    # task #99
             self.assertEqual(a["answer_format"], fmt)
             # task #96 (EMIR 6 C3): + 1 group of a 3-round game per card
             self.assertEqual((a["cities"], a["arms"], a["isolated_points"], a["isolated_reps"],
@@ -277,7 +277,7 @@ class MainConfigs(unittest.TestCase):
                               {"rounds": 3}))
             names[path] = (a["run"], a["seed_namespace"])
         b = _json(S0B)
-        self.assertIs(b["prereg_approved"], False)
+        self.assertIs(b["prereg_approved"], True)    # task #99
         self.assertEqual((b["groups_per_cell"], b["isolated_reps"], b["isolated_points"],
                           b["arms"], b["comprehension"]),
                          (1, 1, [0, 5, 10, 15, 20], ["group", "isolated"], True))
@@ -321,7 +321,9 @@ class MainConfigs(unittest.TestCase):
             totals[g] = self.total(text)
             self.assertIn("Üzerine yazılan: configs/cost_calibration_minipilot.json", text)
             self.assertIn("kilitli, beklenenle aynı", text)
-            self.assertIn("ÖN KAYIT ONAYI YOK", text)
+            # task #99: approved; stage 1 still waits for the answer_format of stage 0a
+            self.assertIn("Ön kayıt: onaylı (prereg_approved=true)", text)
+            self.assertNotIn("ÖN KAYIT ONAYI YOK", text)
             self.assertIn("SEÇİLMEMİŞ (gerçek koşu başlamaz): answer_format", text)
         self.assertLess(totals[6], totals[10])
         self.assertLess(totals[10], totals[16])
@@ -329,9 +331,14 @@ class MainConfigs(unittest.TestCase):
             text = self.dry(path)
             self.assertIn("360 çağrı", text)             # task #96: 3-round group + isolated
             self.assertIn("GEÇER", text)
+            self.assertIn("Ön kayıt: onaylı (prereg_approved=true)", text)
+            self.assertNotIn("ÖN KAYIT ONAYI YOK", text)
+            self.assertNotIn("SEÇİLMEMİŞ", text)
         text = self.dry(S0B)
         self.assertIn("1800 çağrı", text)
         self.assertIn("GEÇER", text)
+        self.assertIn("Ön kayıt: onaylı (prereg_approved=true)", text)
+        self.assertIn("SEÇİLMEMİŞ (gerçek koşu başlamaz): answer_format", text)
 
     def test_calibration_file_lock(self):
         raw = dict(self.main, cost_calibration={"path": str(CAL), "sha256": "0" * 64})
