@@ -1,5 +1,5 @@
 {
-  "_notes": "Main experiment, stage 1 (EMIR 5 K4, task #93, 2026-10-10; before any data). Condition N, homogeneous groups, 12 cards x 3 models, group arm + isolated arm (5 points 0, 5, 10, 15, 20 x 4 repetitions, EMIR 5 K5). groups_per_cell = G is the user's decision (prereg_main P7: G = 6 / 10 / 16, manager's proposal 10): a placeholder until then; the dry run takes it with --groups-per-cell G. budget_usd, model_budget_usd and expected_cost_gate_usd depend on G: placeholders until the user chooses (proposal per G: workspace/main_dryrun_tablosu.md). Run name main_s1_<run day YYYYMMDD>, seed namespace pgg-main-s1. Models (EMIR 5 K2): deepseek/deepseek-v4.1-flash pinned to deepinfra/fp8 (DeepInfra fp8), mistralai/mistral-large-4-0 pinned to mistral, openai/gpt-6-luna pinned to openai; allow_fallbacks false and require_parameters true for all three (pgg_game.provider_routing); temperature and reasoning_effort are not sent (logged \"default\"); max_tokens 16000; check_snapshot true (snapshot_version_models = [mistral], as in the mini-pilot). Frame abstract_v4 (EMIR 5 K1) = abstract_v3 + the line 'The following describes you:' before the card in the system message, locked by sha256 (frame_files); kind abstract (exempt from the frame linter). Cards: cards/main_cards_v1.json (EMIR 5 K3: Boston, Copenhagen, Athens, Riyadh x minimal / value / factual; minimal = v3, value = v2, factual = D2 C1 court-time card), locked by cards_sha256. comprehension true: the two rule-comprehension questions of the frame (key 28 / -6, neutral q2 ending); no exclusion, sensitivity only (EMIR 5 K6). Isolated arm: fixed_round, 'round 5 of 10' (isolated_round_no 5). answer_format: chosen by stage 0a (prereg_main P1); until then a placeholder (no real run starts). cost_calibration: the mini-pilot overlay (configs/cost_calibration_minipilot.json, sha256-locked) prices the dry run and the expected-cost gate; it changes no request. prereg_approved stays false until the user approves prereg_main.md: until then no real run (also --resume) starts; dry runs work. Paid runs are started from the user's own Terminal with scripts/runctl.py (EMIR 5 M3, README). Outputs go to runs_dir/<run>/ (outside the worktree). Stage (task #95, EMIR 6 C1): \"stage\": \"1\"; analysis data: --resume runs only the git commit of the first segment, and --allow-code-change refuses the run.",
+  "_notes": "Main experiment, stage 1 (EMIR 5 K4, task #93, 2026-10-10; before any data). Condition N, homogeneous groups, 12 cards x 3 models, group arm + isolated arm (5 points 0, 5, 10, 15, 20 x 4 repetitions, EMIR 5 K5). Groups per card (user decision, EMIR 6 Soru 1, 2026-10-11): DeepSeek 16, GPT 16, Mistral 10, set per model in groups_per_cell_by_model (task #96; groups_per_cell 10 is the value of a model missing from it; both are in the config record, so --resume refuses another G). Budget (EMIR 6 Soru 2 rule on the calibrated dry run of this design, task #96, workspace/gorev_emir6_c3_dryrun.md; answer_format is not chosen yet, so the larger of A / B, rounded up to whole USD): budget_usd 91 >= the run's p95 upper bound (A 90.63 / B 90.84), model_budget_usd deepseek 22 / mistral 68 / gpt 3 >= each model's p95 (B 21.21 / 67.63 / 2.00), expected_cost_gate_usd 52 = mean x 1.1 rounded up (B 47.06 x 1.1 = 51.77; A 46.89). Run name main_s1_<run day YYYYMMDD>, seed namespace pgg-main-s1. Models (EMIR 5 K2): deepseek/deepseek-v4.1-flash pinned to deepinfra/fp8 (DeepInfra fp8), mistralai/mistral-large-4-0 pinned to mistral, openai/gpt-6-luna pinned to openai; allow_fallbacks false and require_parameters true for all three (pgg_game.provider_routing); temperature and reasoning_effort are not sent (logged \"default\"); max_tokens 16000; check_snapshot true (snapshot_version_models = [mistral], as in the mini-pilot). Frame abstract_v4 (EMIR 5 K1) = abstract_v3 + the line 'The following describes you:' before the card in the system message, locked by sha256 (frame_files); kind abstract (exempt from the frame linter). Cards: cards/main_cards_v1.json (EMIR 5 K3: Boston, Copenhagen, Athens, Riyadh x minimal / value / factual; minimal = v3, value = v2, factual = D2 C1 court-time card), locked by cards_sha256. comprehension true: the two rule-comprehension questions of the frame (key 28 / -6, neutral q2 ending); no exclusion, sensitivity only (EMIR 5 K6). Isolated arm: fixed_round, 'round 5 of 10' (isolated_round_no 5). answer_format: chosen by stage 0a (prereg_main P1); until then a placeholder (no real run starts). cost_calibration: the mini-pilot overlay (configs/cost_calibration_minipilot.json, sha256-locked) prices the dry run and the expected-cost gate; it changes no request. prereg_approved stays false until the user approves prereg_main.md: until then no real run (also --resume) starts; dry runs work. Paid runs are started from the user's own Terminal with scripts/runctl.py (EMIR 5 M3, README). Outputs go to runs_dir/<run>/ (outside the worktree). Stage (task #95, EMIR 6 C1): \"stage\": \"1\"; analysis data: --resume runs only the git commit of the first segment, and --allow-code-change refuses the run.",
   "prereg_approved": false,
   "stage": "1",
   "run": "main_s1_{run_date}",
@@ -23,7 +23,12 @@
     "group",
     "isolated"
   ],
-  "groups_per_cell": "<G: hücre başına grup sayısı, kullanıcı kararı (prereg_main P7): 6 / 10 / 16; öneri 10>",
+  "groups_per_cell": 10,
+  "groups_per_cell_by_model": {
+    "deepseek": 16,
+    "mistral": 10,
+    "gpt": 16
+  },
   "isolated_reps": 4,
   "isolated_points": [
     0,
@@ -73,9 +78,13 @@
   "runs_dir": "/Users/karbon/Desktop/Veri Bilimi/complexity-prj/orc/data/projects/PublicGoods/workspace/runs",
   "seed_namespace": "pgg-main-s1",
   "max_invalid": 3,
-  "budget_usd": "<G'ye göre kullanıcı kararı (main_dryrun_tablosu.md): toplam sert tavan USD>",
-  "model_budget_usd": "<G'ye göre kullanıcı kararı (main_dryrun_tablosu.md): {deepseek, mistral, gpt} alt tavanları USD>",
-  "expected_cost_gate_usd": "<G'ye göre kullanıcı kararı (main_dryrun_tablosu.md): ortalama beklenti kapısı USD>",
+  "budget_usd": 91,
+  "model_budget_usd": {
+    "deepseek": 22,
+    "mistral": 68,
+    "gpt": 3
+  },
+  "expected_cost_gate_usd": 52,
   "cost_calibration": {
     "path": "configs/cost_calibration_minipilot.json",
     "sha256": "d26eb4107aa7ae0ec828bffb912dc5e59d23933347cdf3a8f737858b5ec040c8"

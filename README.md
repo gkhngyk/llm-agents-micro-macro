@@ -160,6 +160,20 @@ tested. Design choices are in the module docstring; the main ones:
   units that then span two commits carry `"code_change_span": true` and
   `code_commits`; the summary lists those units (`code_change_span_units`,
   `n_code_change_span_units`). With runctl: `runctl.py start --resume ... -- --allow-code-change`.
+- **Per-model groups** (task #96, EMIR 6 Soru 1): config
+  `groups_per_cell_by_model` (`{model: G}`, CLI `--groups-per-cell-by-model
+  deepseek=16,gpt=16`) overrides `groups_per_cell` for those models; units,
+  planned calls, the dry run (a `G=` column) and the config record follow it,
+  so `--resume` with other groups is refused. `--groups-per-cell` alone sets
+  every model's G. `configs/main.json`: DeepSeek 16, GPT 16, Mistral 10.
+- **Answer-format test** (task #96, EMIR 6 C3): `"stage": "0a"`
+  (`configs/main_s0a_*.json`: 1 group of a 3-round game per card, config
+  `"params": {"rounds": 3}`, + isolated X = 10 x 2 + rule comprehension;
+  `invalid_rate_cap` null, `max_invalid` 8). There a call without a valid
+  answer stops only its model (`stopped_models` "format_failed" for invalid /
+  unparseable answers; the other models go on; it stays stopped on
+  `--resume`); the summary's `format_test` gives per model the invalid and
+  parse counts, `invalid_parse_rate`, `run_aborted` and `format_failed`.
 
 - **Answer instruction** (task #80, off by default): config `answer_format`.
   Unset or `"schema_text"` sends exactly the requests of 811fdcc (schema text
@@ -227,7 +241,7 @@ read for its model and usage fields only):
 
 ```
 .venv/bin/python pgg_cost_calibrate.py --minipilot-run-dir /abs/workspace/runs/minipilot_20261008
-.venv/bin/python pgg_game.py --config configs/main.json --dry-run --groups-per-cell 10
+.venv/bin/python pgg_game.py --config configs/main.json --dry-run --answer-format example_object
 ```
 
 ## Long runs outside any tool session (`scripts/runctl.py`, task #80)

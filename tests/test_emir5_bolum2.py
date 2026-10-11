@@ -253,14 +253,15 @@ class MainConfigs(unittest.TestCase):
                                                             "sha256": _sha(V4)}})
         self.assertEqual(m["cost_calibration"], {"path": "configs/cost_calibration_minipilot.json",
                                                  "sha256": _sha(CAL)})
-        # the user's decisions are placeholders: no real run starts
-        for key in ("groups_per_cell", "budget_usd", "model_budget_usd", "expected_cost_gate_usd",
-                    "answer_format"):
-            self.assertTrue(pgg_game.is_placeholder(m[key]), key)
+        # task #96 (EMIR 6 Soru 1-2): G 16 / 10 / 16 and the budgets are the user's
+        # decisions now; only answer_format (stage 0a) is still a placeholder
+        self.assertEqual((m["groups_per_cell"], m["groups_per_cell_by_model"]),
+                         (10, {"deepseek": 16, "mistral": 10, "gpt": 16}))
+        self.assertEqual((m["budget_usd"], m["model_budget_usd"], m["expected_cost_gate_usd"]),
+                         (91, {"deepseek": 22, "mistral": 68, "gpt": 3}, 52))
+        self.assertTrue(pgg_game.is_placeholder(m["answer_format"]))
         self.assertIn("TBD", m["answer_format"])
-        self.assertEqual(sorted(pgg_game.open_choices(m)),
-                         sorted(["answer_format", "budget_usd", "expected_cost_gate_usd",
-                                 "groups_per_cell", "model_budget_usd"]))
+        self.assertEqual(pgg_game.open_choices(m), ["answer_format"])
         self.assertIsNotNone(pgg_game.prereg_problem(m))
 
     def test_stage_configs(self):
@@ -269,8 +270,11 @@ class MainConfigs(unittest.TestCase):
             a = _json(path)
             self.assertIs(a["prereg_approved"], False)
             self.assertEqual(a["answer_format"], fmt)
+            # task #96 (EMIR 6 C3): + 1 group of a 3-round game per card
             self.assertEqual((a["cities"], a["arms"], a["isolated_points"], a["isolated_reps"],
-                              a["comprehension"]), (["Boston", "Riyadh"], ["isolated"], [10], 2, True))
+                              a["comprehension"], a["groups_per_cell"], a["params"]),
+                             (["Boston", "Riyadh"], ["group", "isolated"], [10], 2, True, 1,
+                              {"rounds": 3}))
             names[path] = (a["run"], a["seed_namespace"])
         b = _json(S0B)
         self.assertIs(b["prereg_approved"], False)
@@ -287,9 +291,13 @@ class MainConfigs(unittest.TestCase):
                 "max_tokens", "check_snapshot", "isolated_frame", "isolated_round_no",
                 "cost_calibration", "rationale", "runs_dir", "reasoning_cap_rule",
                 "snapshot_version_models", "invalid_rate_cap", "max_invalid")
+        # task #96 (EMIR 6 C3): 0a has its own round of the isolated question (2 of 3),
+        # no invalid-rate cap and max_invalid 8
+        s0a_own = ("isolated_round_no", "invalid_rate_cap", "max_invalid")
         for path in (S0B, *S0A.values()):
             raw = _json(path)
-            self.assertEqual({k: raw[k] for k in same}, {k: self.main[k] for k in same}, path)
+            keys = [k for k in same if path == S0B or k not in s0a_own]
+            self.assertEqual({k: raw[k] for k in keys}, {k: self.main[k] for k in keys}, path)
 
     def dry(self, path, *extra) -> str:
         with contextlib.redirect_stdout(io.StringIO()) as out, \
@@ -302,9 +310,8 @@ class MainConfigs(unittest.TestCase):
         return float(re.search(r"^TOPLAM .*?(\d+) çağrı +~([0-9.]+) USD", text, re.M).group(2))
 
     def test_dry_runs(self):
-        text = self.dry(MAIN)            # G a placeholder: no count, an example only
-        self.assertIn("ÇAĞRI SAYISI HESAPLANAMADI", text)
-        self.assertIn("groups_per_cell", text)
+        text = self.dry(MAIN)            # task #96: G 16 / 10 / 16 (tests/test_emir6_c3.py)
+        self.assertRegex(text, r"(?m)^TOPLAM .*? 23040 çağrı")
         totals = {}
         for g in (6, 10, 16):
             text = self.dry(MAIN, "--groups-per-cell", str(g))
@@ -320,7 +327,7 @@ class MainConfigs(unittest.TestCase):
         self.assertLess(totals[10], totals[16])
         for path in S0A.values():
             text = self.dry(path)
-            self.assertIn("72 çağrı", text)
+            self.assertIn("360 çağrı", text)             # task #96: 3-round group + isolated
             self.assertIn("GEÇER", text)
         text = self.dry(S0B)
         self.assertIn("1800 çağrı", text)
@@ -342,6 +349,7 @@ class MainConfigs(unittest.TestCase):
     def test_run_config_validates(self):
         # stage 1 with G = 10 and a chosen format builds a valid RunConfig (no call)
         s = dict(self.main, groups_per_cell=10, answer_format="example_object", budget_usd=85,
+                 groups_per_cell_by_model=None,
                  model_budget_usd={"deepseek": 14, "mistral": 68, "gpt": 2},
                  expected_cost_gate_usd=49, runs_dir=str(self.tmp))
         s["cards"] = str(ROOT / s["cards"])

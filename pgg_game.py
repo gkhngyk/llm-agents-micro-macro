@@ -172,7 +172,15 @@ llm_client's before_call / on_response hooks:
 Provider errors (finish_reason "error", or 0 tokens at 0 cost) are retried and
 counted as n_provider_error, apart from n_parse_fail and outside the
 invalid-rate cap. A RunAborted (no valid decision for one call) also stops
-the other units. Units = one group game or one isolated schedule;
+the other units; task #96 (EMIR 6 C3): in a config of stage 0a
+(FORMAT_TEST_STAGES, the answer-format test) it stops only its model
+("pgg_model_stopped", reason "format_failed" when the call failed on its
+answers, else the abort's reason), the other models go on, a format_failed
+model stays stopped on --resume, and the summary's "format_test" holds the
+invalid / parse counts, the rate and the abort per model. Per-model groups
+(task #96): config "groups_per_cell_by_model" {model: G} overrides
+groups_per_cell for those models (units, planned calls, dry run, config
+record). Units = one group game or one isolated schedule;
 parallel_units of them run at the same time, each with its own `workers`.
 Run order: shuffled round-robin over the cells (card x model), keyed by
 stable_seed(seed_namespace, run, "order", ...): every block of len(cards)
@@ -466,6 +474,11 @@ ALL_FIELDS_REQUIRED_FORMATS = ("example_object", "json_schema_strict")
 # only they may go on with another git commit (--allow-code-change).
 STAGES = ("0a", "0b", "1")
 CODE_CHANGE_STAGES = ("0a", "0b")
+# Task #96 (EMIR 6 C3): stages that measure the answer format. A RunAborted
+# (a call without a valid answer) stops only its model there ("format_failed"
+# when the answers were invalid / unparseable), the other models go on, and
+# the summary has the "format_test" counts per model.
+FORMAT_TEST_STAGES = ("0a",)
 # Operational limits compared with the previous segment on --resume (a
 # difference needs allow_timeout_change / --allow-timeout-change).
 TIMEOUT_SETTINGS = ("request_deadline_s", "stall_timeout_s")
@@ -837,11 +850,21 @@ class RunAborted(RuntimeError):
 
     reason: the run's stop_reason, "run_aborted", or "provider_mismatch_limit"
     when the last attempt of the failed call was a provider mismatch (A4).
+    Task #96: model_key of the failed call; failure "max_invalid" (every
+    payload outside the schema, max_invalid + 1 of them) or "parse_fail" (its
+    last request's attempts all failed to parse), None for other failures;
+    n_invalid / n_parse_fail of the failed call. In a stage of
+    FORMAT_TEST_STAGES it stops only its model (Engine._run_unit).
     """
 
-    def __init__(self, message: str, reason: str = "run_aborted"):
+    def __init__(self, message: str, reason: str = "run_aborted", *, model_key: str | None = None,
+                 failure: str | None = None, n_invalid: int = 0, n_parse_fail: int = 0):
         super().__init__(message)
         self.reason = reason
+        self.model_key = model_key
+        self.failure = failure
+        self.n_invalid = n_invalid
+        self.n_parse_fail = n_parse_fail
 
 
 # Not RuntimeError subclasses: Engine._ask turns RuntimeError into RunAborted.
@@ -1545,6 +1568,11 @@ class RunConfig:
     conditions: tuple[str, ...] = ("N",)
     arms: tuple[str, ...] = ("group", "isolated")
     groups_per_cell: int = 2                   # homogeneous groups per card x condition
+    # task #96 (EMIR 6 Soru 1): {model key: groups per card x condition} of the
+    # models that differ from groups_per_cell (a model missing from it has
+    # groups_per_cell); None = groups_per_cell for every model. In the config
+    # record when set.
+    groups_per_cell_by_model: dict | None = None
     isolated_reps: int = 2                     # schedule repetitions per card
     isolated_points: tuple[int, ...] = ISOLATED_POINTS
     # None = provider default (not sent); a string for all models, or a
@@ -1664,6 +1692,14 @@ class RunConfig:
             self._frame_cache = out
         return self._frame_cache
 
+    def groups_for(self, model_key: str) -> int:
+        """Homogeneous groups per card x condition of a model (task #96)."""
+        return (self.groups_per_cell_by_model or {}).get(model_key, self.groups_per_cell)
+
+    def groups_per_model(self) -> dict[str, int]:
+        """{model key: groups per card x condition} of every model (task #96)."""
+        return {k: self.groups_for(k) for k in self.models}
+
     def effort_for(self, model_key: str) -> str | None:
         if isinstance(self.reasoning_effort, dict):
             return self.reasoning_effort.get(model_key)
@@ -1748,6 +1784,19 @@ class RunConfig:
             raise ValueError(f"arms must be a non-empty subset of {ARMS}")
         if not self.models:
             raise ValueError("no models")
+        if self.groups_per_cell_by_model is not None:
+            # task #96: per-model groups per card x condition
+            if not isinstance(self.groups_per_cell_by_model, dict) or not self.groups_per_cell_by_model:
+                raise ValueError("groups_per_cell_by_model must be a non-empty "
+                                 "{model key: groups} object")
+            extra = set(self.groups_per_cell_by_model) - set(self.models)
+            if extra:
+                raise ValueError(f"groups_per_cell_by_model for models not in the run: "
+                                 f"{sorted(extra)}")
+            for key, value in self.groups_per_cell_by_model.items():
+                if not _is_int_in(value, 1, 10**6):
+                    raise ValueError(f"groups_per_cell_by_model[{key}] must be a positive "
+                                     f"integer, got {value!r}")
         validate_cards(self.cards)
         if not self.cards:
             raise ValueError("no cards")
@@ -1874,7 +1923,7 @@ class RunConfig:
         counts = pgg_cost.call_counts(
             n_cells=len(self.cards) * len(self.frames_of(model_key)),
             conditions=self.conditions,
-            groups_per_cell=self.groups_per_cell, isolated_reps=self.isolated_reps,
+            groups_per_cell=self.groups_for(model_key), isolated_reps=self.isolated_reps,
             n_points=len(self.isolated_points), group_size=self.params.group_size,
             rounds=self.params.rounds, arms=self.arms,
             comprehension=self.comprehension if comprehension is None else comprehension)
@@ -2191,6 +2240,10 @@ class ResumePlan:
     # segment span more than one git_commit (code_span_units); their rows of
     # this segment say code_change_span: true and code_commits
     code_span: dict = field(default_factory=dict)
+    # task #96 (EMIR 6 C3): model key -> its "pgg_model_stopped" event of
+    # reason "format_failed" in the earlier segments; such a model stays
+    # stopped (its answer format failed; that is the format test's result)
+    format_failed: dict = field(default_factory=dict)
 
     @property
     def prior_cost_usd(self) -> float:
@@ -2937,12 +2990,18 @@ class Engine:
                 return ans
             mismatch = getattr(e, "last_error_kind", None) == "provider_mismatch"
             reason = "provider_mismatch_limit" if mismatch else "run_aborted"
+            failure = self._answer_failure(e, counts)
+            model_only = self.cfg.stage in FORMAT_TEST_STAGES
             self.llm._append_log({
                 "ts": time.time(), "event": "pgg_run_aborted", "run": self.cfg.run,
                 "model": self.cfg.models[model_key], "session_id": session_id,
                 "error": str(e), "reason": reason,
                 "n_provider_mismatch": counts.get("n_provider_mismatch", 0),
                 "n_provider_missing": counts.get("n_provider_missing", 0), **ctx,
+                # task #96: what failed; in a format test only the model stops
+                "failure": failure, "n_invalid": counts.get("n_invalid", 0),
+                "n_parse_fail": counts.get("n_parse_fail", 0),
+                **({"model_only": True} if model_only else {}),
             })
             raise RunAborted(
                 f"run {self.cfg.run!r} stopped: no valid decision for {ctx} "
@@ -2950,7 +3009,9 @@ class Engine:
                 + (f" [{counts.get('n_provider_mismatch', 0)} response(s) from another provider "
                    f"than {pinned['name']!r}, {counts.get('n_provider_missing', 0)} of them "
                    "without a provider name; attempt limit reached]" if mismatch else ""),
-                reason=reason) from e
+                reason=reason, model_key=model_key, failure=failure,
+                n_invalid=counts.get("n_invalid", 0),
+                n_parse_fail=counts.get("n_parse_fail", 0)) from e
         finally:
             # connection errors and deadlines also when the call failed or was stopped
             with self._lock:
@@ -2979,6 +3040,12 @@ class Engine:
         """
         if ctx.get("step") != "comprehension":
             return None
+        return self._answer_failure(e, counts)
+
+    def _answer_failure(self, e: RuntimeError, counts: dict) -> str | None:
+        """Whether a failed call failed on its answers: "max_invalid" (max_invalid + 1
+        payloads outside the schema), "parse_fail" (the attempts of its last request
+        all failed to parse), else None (provider mismatch, transport / HTTP errors)."""
         if counts.get("n_invalid", 0) > self.cfg.max_invalid:
             return "max_invalid"
         if getattr(e, "last_error_kind", None) == "parse":
@@ -3333,7 +3400,7 @@ class Engine:
         groups, schedules = [], []
         if "group" in cfg.arms:
             groups = [self._spec(model_key, card, condition, "group", idx, frame)
-                      for condition in cfg.conditions for idx in range(cfg.groups_per_cell)]
+                      for condition in cfg.conditions for idx in range(cfg.groups_for(model_key))]
         if "isolated" in cfg.arms:
             schedules = [self._spec(model_key, card, "N", "isolated", rep, frame)
                          for rep in range(cfg.isolated_reps)]
@@ -3352,7 +3419,9 @@ class Engine:
         (Latin square), so every block of len(cards) consecutive units has
         every card once and the pass has every cell once. Without frames the
         pairs are the models and the keys are those of the code before frames.
-        Never hash().
+        With groups_per_cell_by_model (task #96) a model with fewer units has
+        none in the later passes: those passes hold the other models' units in
+        the same order (every card of them per pass). Never hash().
         """
         cfg = self.cfg
         pairs = sorted(((m, label) for label, keys in cfg.frame_models().items() for m in keys),
@@ -3394,10 +3463,32 @@ class Engine:
         except (RunStopped, ModelStopped):
             pass
         except RunAborted as e:
+            if self.cfg.stage in FORMAT_TEST_STAGES:
+                self._model_aborted(model_key, e)
+                return
             with self._lock:
                 if self.aborted is None:
                     self.aborted = e
             self._stop(getattr(e, "reason", "run_aborted"), error=str(e))
+
+    def _model_aborted(self, model_key: str, e: RunAborted) -> None:
+        """Task #96 (EMIR 6 C3): a RunAborted of a format test stops only its model.
+
+        Reason "format_failed" when the call failed on its answers (max_invalid
+        invalid payloads exceeded, or unparseable answers), else the abort's
+        own reason (run_aborted, provider_mismatch_limit). The failed call's
+        invalid / unparseable responses are added to the model's n_invalid /
+        n_parse_fail (they were received; the raw log's invalid_payload events
+        count them on --resume too). The other models go on.
+        """
+        with self._lock:
+            s = self.stats[model_key]
+            s["n_invalid"] += e.n_invalid
+            s["n_parse_fail"] += e.n_parse_fail
+        self._stop_model(model_key, "format_failed" if e.failure else e.reason,
+                         failure=e.failure, abort_reason=e.reason,
+                         failed_call_n_invalid=e.n_invalid,
+                         failed_call_n_parse_fail=e.n_parse_fail, error=str(e)[:500])
 
     # -- resume ------------------------------------------------------------
 
@@ -3438,6 +3529,9 @@ class Engine:
             "isolated_frame": cfg.isolated_frame, "reasoning_effort": self._effort_summary(),
             "params": dataclasses.asdict(cfg.params), "conditions": list(cfg.conditions),
             "arms": list(cfg.arms), "groups_per_cell": cfg.groups_per_cell,
+            # task #96, only when set (earlier runs resume with their record)
+            **({"groups_per_cell_by_model": dict(cfg.groups_per_cell_by_model)}
+               if cfg.groups_per_cell_by_model is not None else {}),
             "isolated_reps": cfg.isolated_reps, "isolated_points": list(cfg.isolated_points),
             "max_invalid": cfg.max_invalid, "rationale": cfg.rationale,
             "budget_usd": cfg.budget_usd, "invalid_rate_cap": cfg.invalid_rate_cap,
@@ -3501,6 +3595,7 @@ class Engine:
                 models=cfg.models, frame_models=cfg.frame_models(), frames=self.frames,
                 n_cells=len(cfg.cards), params=cfg.params, conditions=cfg.conditions,
                 arms=cfg.arms, groups_per_cell=cfg.groups_per_cell,
+                groups_per_cell_by_model=cfg.groups_per_cell_by_model,
                 isolated_reps=cfg.isolated_reps, n_points=len(cfg.isolated_points),
                 comprehension=cfg.comprehension, isolated_frame=cfg.isolated_frame,
                 isolated_round_no=cfg.isolated_round_no, rationale=cfg.rationale,
@@ -3860,6 +3955,7 @@ class Engine:
         # segment -> estimates taken back after its last summary was written
         # (that summary still holds them; resume_plan's cost check adds them)
         replaced_after_summary: dict[int, float] = {}
+        format_failed: dict[str, dict] = {}    # task #96: model key -> its stop event
         n_unparsed = 0
         seg = 0
         lines, ends_with_newline = _read_jsonl(path)
@@ -3876,6 +3972,15 @@ class Engine:
             if (event in ("pgg_run_end", "pgg_run_summary_updated")
                     and rec.get("run") == self.cfg.run):
                 replaced_after_summary[seg] = 0.0          # this summary holds them
+                continue
+            if (event == "pgg_model_stopped" and rec.get("run") == self.cfg.run
+                    and rec.get("reason") == "format_failed"):
+                # task #96: a model whose answer format failed stays stopped
+                key = next((k for k, slug in self.cfg.models.items()
+                            if slug == rec.get("model")), None)
+                if key is not None and key not in format_failed:
+                    format_failed[key] = {k: v for k, v in rec.items()
+                                          if k not in ("event", "run", "model")}
                 continue
             spec = sessions.get(rec.get("session_id"))
             if spec is None:
@@ -4002,6 +4107,7 @@ class Engine:
                 "model_version_reference": first_version,
                 "replaced_after_summary": replaced_after_summary,
                 "attempt_segments": sorted({seg_a for seg_a, _, _ in attempts.values()}),
+                "format_failed": format_failed,
                 "problems": list(dict.fromkeys(problems))}
 
     def _scan_journal(self, specs: list[UnitSpec], rows: dict) -> dict:
@@ -4382,6 +4488,7 @@ class Engine:
             code_change=code_change, reuse_code_check=reuse_code_check,
             code_lock=code_lock, code_span=code_span,
             model_version_reference=dict(log["model_version_reference"]) if log else {},
+            format_failed=dict(log["format_failed"]) if log else {},
             reuse=journal["reuse"], journal=journal["info"],
             rows_done={label: set(prog["pending"]) for label, prog in rows["progress"].items()
                        if prog["pending"]})
@@ -4410,7 +4517,14 @@ class Engine:
         caps = self.cfg.model_budget_usd or {}
         for key, s in self.prior_stats.items():
             limit = self.invalid_limits[key]
-            if limit is not None and s["n_invalid"] + s["n_parse_fail"] > limit:
+            if key in plan.format_failed:
+                # task #96: the answer format failed in an earlier segment
+                self.stopped_models[key] = "format_failed"
+                self.model_stops[key] = self._stop_record(
+                    key, "format_failed", at_resume=True,
+                    failed_in_segment=plan.format_failed[key].get("segment"),
+                    failure=plan.format_failed[key].get("failure"))
+            elif limit is not None and s["n_invalid"] + s["n_parse_fail"] > limit:
                 self.stopped_models[key] = "invalid_rate_cap"
                 self.model_stops[key] = self._stop_record(
                     key, "invalid_rate_cap", at_resume=True, n_invalid=s["n_invalid"],
@@ -4698,6 +4812,10 @@ class Engine:
             "invalid_rate_cap": self.cfg.invalid_rate_cap,
             "invalid_limit_per_model": self.invalid_limit,
             "planned_calls_per_model": self.cfg.planned_calls_per_model(),
+            # task #96: G and planned calls of every model (G may differ per model)
+            "groups_per_cell": self.cfg.groups_per_model(),
+            "planned_calls_by_model": {k: self.cfg.planned_calls_per_model(k)
+                                       for k in self.cfg.models},
             "max_tokens": self.max_tokens, "request_timeout_s": self.timeout,
             "request_deadline_s": self.deadline, "stall_timeout_s": self.stall_timeout,
             "stalled": self.stalled, "code_version": self.code_version,
@@ -4806,10 +4924,60 @@ class Engine:
         }
         if self.cfg.comprehension:
             out["comprehension"] = self.comprehension_summary(results_path)
+        if self.cfg.stage in FORMAT_TEST_STAGES:
+            out["format_test"] = self.format_test_summary(per_model, model_stops, rows)
         if self.prior_extra_cost:
             out["prior_cost_not_in_raw_log_usd"] = self.prior_extra_cost
         if rows and rows["problems"]:
             out["row_problems"] = rows["problems"]
+        return out
+
+    def format_test_summary(self, per_model: dict, model_stops: dict, rows: dict | None) -> dict:
+        """Summary "format_test" of a FORMAT_TEST_STAGES run (task #96, EMIR 6 C3).
+
+        Per model (all segments): the counts the selection rule of prereg_main
+        §3 reads, nothing decided here. invalid_parse_rate = (n_invalid +
+        n_parse_fail + n_comp_invalid + n_comp_parse_fail) / n_responses
+        (every billed response, re-requests included; None without one);
+        decision_invalid_parse_rate the same without the rule-comprehension
+        calls. run_aborted: a call of the model got no valid answer (the
+        model stopped, the others went on); format_failed: that call failed
+        on its answers (invalid / unparseable).
+        """
+        done = rows["complete"] if rows is not None else None
+        out = {"answer_format": self.cfg.answer_format or "schema_text",
+               "max_invalid": self.cfg.max_invalid, "invalid_rate_cap": self.cfg.invalid_rate_cap,
+               "rule": (
+                   "invalid_parse_rate = (n_invalid + n_parse_fail + n_comp_invalid + "
+                   "n_comp_parse_fail) / n_responses per model (all segments; n_responses = "
+                   "every billed response, re-requests included). A call that gets no valid "
+                   "answer (max_invalid + 1 invalid payloads, or unparseable answers) stops only "
+                   "its model: run_aborted and format_failed true, the failed call's responses "
+                   "are in the counts; another abort (provider mismatch limit, transport) stops "
+                   "the model with run_aborted true and format_failed false. The choice between "
+                   "the formats is prereg_main's rule, not made here"),
+               "models": {}}
+        for key, slug in self.cfg.models.items():
+            s = per_model[slug]
+            bad_dec = s["n_invalid"] + s["n_parse_fail"]
+            bad = bad_dec + s["n_comp_invalid"] + s["n_comp_parse_fail"]
+            n = s["n_responses"]
+            stop = model_stops.get(key) or {}
+            reason = self.stopped_models.get(key) or stop.get("reason")
+            aborted = reason in ("format_failed", "run_aborted", "provider_mismatch_limit")
+            labels = [sp.label for sp in self._specs if sp.model_key == key]
+            out["models"][key] = {
+                "slug": slug, "n_responses": n, "n_accepted": s["n_accepted"],
+                "n_invalid": s["n_invalid"], "n_parse_fail": s["n_parse_fail"],
+                "n_comp_invalid": s["n_comp_invalid"], "n_comp_parse_fail": s["n_comp_parse_fail"],
+                "n_invalid_parse": bad,
+                "invalid_parse_rate": bad / n if n else None,
+                "decision_invalid_parse_rate": bad_dec / n if n else None,
+                "run_aborted": aborted, "format_failed": reason == "format_failed",
+                "stop_reason": reason, "failure": stop.get("failure"),
+                "n_units": len(labels),
+                "n_units_complete": (sum(1 for label in labels if label in done)
+                                     if done is not None else None)}
         return out
 
     def _journal_summary(self, rows: dict | None) -> dict:
@@ -5204,6 +5372,9 @@ def dry_run_report(*, models: dict[str, str], n_cells: int, params: GameParams,
 SCHEMA_PROMPT_SUFFIX = "\n\nRespond with ONLY a JSON object matching this schema:\n"
 # Isolated wording of the calibration run (pilot v2, configs/pilot.json).
 CALIBRATION_ISOLATED_FRAME = "repeated"
+# Game of the calibration runs (pilot v2, mini-pilot: 4 players, 10 rounds);
+# the reference prompts of prompt_scales are rendered with it (task #96).
+CALIBRATION_PARAMS = GameParams()
 # Cards of the calibration run: the reference card length of prompt_scales
 # when a config's cards are not chosen yet.
 CALIBRATION_CARDS = (PROJECT_DIR / "cards" / "pilot_cards_v2.json", ("Boston", "Riyadh"))
@@ -5351,12 +5522,16 @@ def prompt_scales(frame: Frame, params: GameParams, cards: list[Card], *,
     is priced from contribute_N, so its ratio is to abstract_v2's
     contribute_N prompt. A kind the frame does not have is left out (not
     scaled). isolated_frame None or not offered by the frame: the frame's
-    first isolated wording.
+    first isolated wording. Task #96: the reference is rendered with the
+    calibration's game (CALIBRATION_PARAMS, 10 rounds), so that a game of
+    other params (stage 0a: 3 rounds, shorter histories) is scaled to its own
+    prompt length; for the default params nothing changes.
     """
     ref = default_frame()
     if isolated_frame not in frame.isolated_frames:
         isolated_frame = frame.isolated_frames[0]
     kw = {"isolated_round_no": isolated_round_no, "rationale": rationale}
+    ref_kw = {**kw, "isolated_round_no": min(isolated_round_no, CALIBRATION_PARAMS.rounds)}
     out = {}
     for kind in pgg_cost.CALL_KINDS:
         mine = mean_prompt_chars(frame, kind, params, cards, isolated_frame=isolated_frame,
@@ -5364,8 +5539,8 @@ def prompt_scales(frame: Frame, params: GameParams, cards: list[Card], *,
         if mine is None:
             continue
         ref_kind = "contribute_N" if kind == "comprehension" else kind
-        base = mean_prompt_chars(ref, ref_kind, params, cards,
-                                 isolated_frame=CALIBRATION_ISOLATED_FRAME, **kw)
+        base = mean_prompt_chars(ref, ref_kind, CALIBRATION_PARAMS, cards,
+                                 isolated_frame=CALIBRATION_ISOLATED_FRAME, **ref_kw)
         out[kind] = mine / base
     return out
 
@@ -5376,21 +5551,30 @@ def design_estimate(*, models: dict[str, str], frame_models: dict[str, list[str]
                     comprehension: bool = False, isolated_frame: str | None = None,
                     isolated_round_no: int = 5, rationale: bool = True,
                     cards: list[Card] | None = None, scale: bool = True,
-                    answer_format: str | None = None) -> dict:
+                    answer_format: str | None = None,
+                    groups_per_cell_by_model: dict | None = None) -> dict:
     """Calls and estimated cost per frame x model of a design (pgg_cost, tahmin).
 
     frames: {label: Frame, or None when its file is not chosen yet (not
     scaled)}. scale False: no prompt scaling (configs without frames: the
     same numbers as before frames). answer_format (task #95): the prompts are
-    measured with that answer instruction (prompt_scales). Returns {"rows":
-    [{"frame", "model", "slug", "calls", "calls_by_kind", "prompt_scale",
-    "frame_known", **pgg_cost.model_cost}], "counts", "total_calls",
-    "total_cost_usd", "total_p95_upper_usd", "unpriced", "answer_format"}.
+    measured with that answer instruction (prompt_scales).
+    groups_per_cell_by_model (task #96): {model key: groups} of the models
+    whose groups per card x condition differ from groups_per_cell. Returns
+    {"rows": [{"frame", "model", "slug", "groups_per_cell", "calls",
+    "calls_by_kind", "counts", "prompt_scale", "frame_known",
+    **pgg_cost.model_cost}], "counts" (at groups_per_cell), "total_calls",
+    "total_cost_usd", "total_p95_upper_usd", "unpriced", "answer_format",
+    "groups_per_model"}.
     """
-    counts = pgg_cost.call_counts(
-        n_cells=n_cells, conditions=conditions, groups_per_cell=groups_per_cell,
-        isolated_reps=isolated_reps, n_points=n_points, group_size=params.group_size,
-        rounds=params.rounds, arms=arms, comprehension=comprehension)
+    def counts_for(groups: int) -> dict:
+        return pgg_cost.call_counts(
+            n_cells=n_cells, conditions=conditions, groups_per_cell=groups,
+            isolated_reps=isolated_reps, n_points=n_points, group_size=params.group_size,
+            rounds=params.rounds, arms=arms, comprehension=comprehension)
+
+    by_model = groups_per_cell_by_model or {}
+    counts = counts_for(groups_per_cell)
     if cards is None:
         cards = load_cards(CALIBRATION_CARDS[0], CALIBRATION_CARDS[1])
     rows = []
@@ -5402,13 +5586,15 @@ def design_estimate(*, models: dict[str, str], frame_models: dict[str, list[str]
                   if scale and f is not None else None)
         for key in keys:
             slug = models[key]
+            groups = by_model.get(key, groups_per_cell)
+            mine = counts if groups == groups_per_cell else counts_for(groups)
             try:
-                cost = pgg_cost.model_cost(slug, counts, scales)
+                cost = pgg_cost.model_cost(slug, mine, scales)
             except KeyError:
                 cost = {"cost_usd": None, "p95_upper_usd": None}
-            rows.append({"frame": label, "model": key, "slug": slug,
-                         "calls": sum(counts.values()),
-                         "calls_by_kind": {k: v for k, v in counts.items() if v},
+            rows.append({"frame": label, "model": key, "slug": slug, "groups_per_cell": groups,
+                         "calls": sum(mine.values()),
+                         "calls_by_kind": {k: v for k, v in mine.items() if v}, "counts": mine,
                          "prompt_scale": scales, "frame_known": f is not None, **cost})
     priced = [r for r in rows if r["cost_usd"] is not None]
     per_model: dict = {}
@@ -5429,7 +5615,8 @@ def design_estimate(*, models: dict[str, str], frame_models: dict[str, list[str]
             "total_p95_upper_usd": sum(r["p95_upper_usd"] for r in priced),
             "per_model": per_model,
             "unpriced": [f"{r['model']}/{r['frame']}" for r in rows if r["cost_usd"] is None],
-            "answer_format": answer_format}
+            "answer_format": answer_format,
+            "groups_per_model": {r["model"]: r["groups_per_cell"] for r in rows}}
 
 
 def gate_problem(est: dict, gate: float | None) -> str | None:
@@ -5490,7 +5677,7 @@ def format_design_report(est: dict, *, description: str = "", gate: float | None
             cost = (f"~{r['cost_usd']:.4f} USD (tahmin" + (", ALT SINIR" if r["lower_bound"] else "")
                     + f"); p95 üst sınır ~{r['p95_upper_usd']:.4f} USD")
             if max_tokens:
-                ceiling += pgg_cost.ceiling({r["model"]: r["slug"]}, est["counts"], max_tokens,
+                ceiling += pgg_cost.ceiling({r["model"]: r["slug"]}, r["counts"], max_tokens,
                                             r["prompt_scale"])["total"]
         if not r["frame_known"]:
             scale = "istem ölçeği yok: çerçeve dosyası seçilmedi, abstract_v2 uzunluğu varsayıldı"
@@ -5498,8 +5685,11 @@ def format_design_report(est: dict, *, description: str = "", gate: float | None
             scale = "istem ölçeği (karakter oranı, tahmin): " + ", ".join(
                 f"{k} x{v:.2f}" for k, v in (r["prompt_scale"] or {}).items()
                 if k in r["calls_by_kind"])
-        lines.append(f"{r['frame']:<12} {r['model']:<9} {r['slug']:<30} {r['calls']:>6} çağrı "
-                     f"({kinds})  {cost}")
+        # task #96: G of the row when the models differ in it
+        groups = (f"G={r['groups_per_cell']} "
+                  if len(set((est.get("groups_per_model") or {}).values())) > 1 else "")
+        lines.append(f"{r['frame']:<12} {r['model']:<9} {r['slug']:<30} {groups}{r['calls']:>6} "
+                     f"çağrı ({kinds})  {cost}")
         lines.append(f"{'':<12} {scale}")
     lines.append(f"{'TOPLAM':<12} {'':<9} {'':<30} {est['total_calls']:>6} çağrı  "
                  f"~{est['total_cost_usd']:.4f} USD (tahmin"
@@ -5592,8 +5782,8 @@ def open_choices(s: dict) -> list[str]:
 
 
 # Settings the call counts of a dry run depend on (besides "params").
-COUNT_SETTINGS = ("conditions", "arms", "groups_per_cell", "isolated_reps", "isolated_points",
-                  "frames", "comprehension")
+COUNT_SETTINGS = ("conditions", "arms", "groups_per_cell", "groups_per_cell_by_model",
+                  "isolated_reps", "isolated_points", "frames", "comprehension")
 
 
 def count_blockers(s: dict) -> list[str]:
@@ -5753,6 +5943,22 @@ def _parse_effort(value: str):
     return dict(item.split("=", 1) for item in _csv(value))
 
 
+def _parse_groups(value: str) -> dict:
+    """--groups-per-cell-by-model "deepseek=16,gpt=16" -> {model: groups} (task #96)."""
+    out = {}
+    for item in _csv(value):
+        if "=" not in item:
+            raise argparse.ArgumentTypeError(f"--groups-per-cell-by-model item {item!r} is not "
+                                             "model=groups")
+        name, groups = item.split("=", 1)
+        try:
+            out[name.strip()] = int(groups)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"--groups-per-cell-by-model: {groups!r} is not "
+                                             "an integer") from None
+    return out
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description="Public goods game engine. --dry-run prints call counts and an "
@@ -5774,7 +5980,11 @@ def build_parser() -> argparse.ArgumentParser:
                                      "models)")
     ap.add_argument("--conditions", help="comma-separated, N and/or P (default N)")
     ap.add_argument("--arms", help="comma-separated, group and/or isolated (default both)")
-    ap.add_argument("--groups-per-cell", type=int)
+    ap.add_argument("--groups-per-cell", type=int,
+                    help="groups per card x condition of every model (drops the config's "
+                         "groups_per_cell_by_model unless --groups-per-cell-by-model is given)")
+    ap.add_argument("--groups-per-cell-by-model", type=_parse_groups,
+                    help="per-model groups, e.g. deepseek=16,gpt=16 (others: groups_per_cell)")
     ap.add_argument("--isolated-reps", type=int)
     ap.add_argument("--points", help="isolated conditioning values (default 0,5,10,15,20)")
     ap.add_argument("--isolated-frame", choices=ISOLATED_FRAMES,
@@ -5884,6 +6094,11 @@ def settings_from_args(args) -> dict:
         "rationale": False if args.no_rationale else None, "workers": args.workers,
         "runs_dir": args.runs_dir, "results_dir": args.results_dir,
     }
+    if args.groups_per_cell is not None and args.groups_per_cell_by_model is None:
+        # task #96: --groups-per-cell alone sets every model's G
+        s.pop("groups_per_cell_by_model", None)
+    if args.groups_per_cell_by_model is not None:
+        s["groups_per_cell_by_model"] = args.groups_per_cell_by_model
     s.update({k: v for k, v in cli.items() if v is not None})
     params = dict(s.get("params", {}))
     params.update({k: v for k, v in (
@@ -5905,6 +6120,8 @@ def run_config(run: str, s: dict, models: dict[str, str], output: dict) -> RunCo
         run=run, cards=load_cards(s["cards"], s.get("cities")),
         models=models, params=s["params"], conditions=tuple(s.get("conditions", ("N",))),
         arms=tuple(s.get("arms", ARMS)), groups_per_cell=s.get("groups_per_cell", 2),
+        groups_per_cell_by_model=resolve_model_keyed(s.get("groups_per_cell_by_model"), models,
+                                                     "groups_per_cell_by_model"),
         isolated_reps=s.get("isolated_reps", 2),
         isolated_points=tuple(s.get("isolated_points", ISOLATED_POINTS)),
         reasoning_effort=s.get("reasoning_effort"),
@@ -6287,7 +6504,19 @@ def main(argv=None) -> int:
                     print(f"HATA: answer_format must be one of {ANSWER_FORMATS}, got {fmt!r}",
                           file=sys.stderr)
                     return 1
-                if s.get("frames") is not None or scales_answer_format(fmt):
+                try:                             # task #96: per-model G
+                    groups_by_model = resolve_model_keyed(s.get("groups_per_cell_by_model"),
+                                                          models, "groups_per_cell_by_model")
+                except ValueError as e:
+                    print(f"HATA: {e}", file=sys.stderr)
+                    return 1
+                if groups_by_model:
+                    per_model_g = {k: groups_by_model.get(k, groups_per_cell) for k in models}
+                    groups_text = ("model başına " + ", ".join(f"{k} {g}" for k, g in
+                                                               per_model_g.items()))
+                else:
+                    groups_text = str(groups_per_cell)
+                if s.get("frames") is not None or scales_answer_format(fmt) or groups_by_model:
                     try:
                         if s.get("frames") is not None:
                             frame_models = resolve_frames(s["frames"], models)
@@ -6308,14 +6537,15 @@ def main(argv=None) -> int:
                         isolated_frame=None if is_placeholder(iso) else iso,
                         isolated_round_no=s.get("isolated_round_no", 5),
                         rationale=True if is_placeholder(rationale) else rationale, cards=cards,
-                        answer_format=fmt)
+                        answer_format=fmt, groups_per_cell_by_model=groups_by_model,
+                        scale=s.get("frames") is not None or scales_answer_format(fmt))
                     print(format_design_report(
                         est, gate=gate, budget=s.get("budget_usd"), max_tokens=s.get("max_tokens"),
                         model_budget=model_budget, description=(
                             f"Tasarım: {n_cells} kart x stil hücresi, çerçeveler "
                             + "; ".join(f"{k}: {', '.join(v)}" for k, v in frame_models.items())
                             + f", koşul {'+'.join(conditions)}, kollar {'+'.join(arms)}, hücre "
-                            f"başına {groups_per_cell} homojen grup ({params.group_size} ajan x "
+                            f"başına {groups_text} homojen grup ({params.group_size} ajan x "
                             f"{params.rounds} tur), izole çizelge {isolated_reps} tekrar x "
                             f"{len(points)} değer, kural anlama "
                             + ("açık (ajan başına grup öncesi 1, izole çizelge başına 1 çağrı)"
@@ -6351,8 +6581,14 @@ def main(argv=None) -> int:
                                         "snapshot_version_models", "reasoning_cap_rule",
                                         "answer_format",
                                         "seed_namespace", "parallel_units", "workers",
-                                        "isolated_frame", "isolated_round_no", "comprehension")
+                                        "isolated_frame", "isolated_round_no", "comprehension",
+                                        "max_invalid", "groups_per_cell_by_model")
                       if s.get(k) is not None}
+            if "invalid_rate_cap" in s and s["invalid_rate_cap"] is None:
+                guards["invalid_rate_cap"] = "kapalı (null)"       # task #96: stage 0a
+            if params != GameParams():
+                guards["params"] = {k: v for k, v in dataclasses.asdict(params).items()
+                                    if v != getattr(GameParams(), k)}
             print(f"Ayarlar: reasoning_effort={s.get('reasoning_effort') or 'gönderilmez'}, "
                   + ", ".join(f"{k}={v}" for k, v in guards.items()))
             print(code_version_line(code_version()))
