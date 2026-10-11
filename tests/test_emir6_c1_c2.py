@@ -17,6 +17,7 @@ import contextlib
 import io
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -452,11 +453,24 @@ class CostEstimateFollowsTheAnswerFormat(unittest.TestCase):
         self.assertEqual(float(line.split("~")[1].split(" ")[0]), totals["main_s0a_schema.json"])
 
     def test_cli_main_json_with_a_placeholder_format_says_so(self):
-        code, out, _ = _cli(["--dry-run", "--config", str(ROOT / "configs" / "main.json"),
-                             "--groups-per-cell", "10"])
+        # task #101 (EMIR 8): the committed main.json has example_object now, so the
+        # placeholder path is checked on a copy with the old placeholder value
+        raw = json.loads((ROOT / "configs" / "main.json").read_text(encoding="utf-8"))
+        raw["answer_format"] = "<TBD: answer format>"
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "main_placeholder.json"
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            code, out, _ = _cli(["--dry-run", "--config", str(path), "--groups-per-cell", "10"])
         self.assertEqual(code, 0)
         self.assertIn("answer_format seçilmedi (yer tutucu): istem schema_text talimatıyla ölçüldü",
                       out)
+        self.assertIn("SEÇİLMEMİŞ (gerçek koşu başlamaz): answer_format", out)
+        code, out, _ = _cli(["--dry-run", "--config", str(ROOT / "configs" / "main.json"),
+                             "--groups-per-cell", "10"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("answer_format seçilmedi", out)
+        self.assertIn("cevap biçimi (answer_format) example_object: kalibrasyon schema_text ile "
+                      "ölçüldü", out)
 
 
 

@@ -467,8 +467,10 @@ class Budgets(unittest.TestCase):
                          (10, {"deepseek": 16, "mistral": 10, "gpt": 16}))
         self.assertEqual((m["budget_usd"], m["model_budget_usd"], m["expected_cost_gate_usd"]),
                          (91, {"deepseek": 22, "mistral": 68, "gpt": 3}, 52))
-        self.assertEqual(sorted(pgg_game.open_choices(m)), ["answer_format"])
+        # task #101 (EMIR 8): stage 0a chose A; nothing is open in stage 0b / 1
+        self.assertEqual(pgg_game.open_choices(m), [])
         b = _json(S0B)
+        self.assertEqual(pgg_game.open_choices(b), [])
         self.assertEqual((b["budget_usd"], b["model_budget_usd"], b["expected_cost_gate_usd"]),
                          (10, {"deepseek": 2, "mistral": 8, "gpt": 0.5}, 5.5))
         for path in (MAIN, S0B, *S0A.values()):

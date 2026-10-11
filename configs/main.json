@@ -54,7 +54,7 @@
   },
   "comprehension": true,
   "rationale": true,
-  "answer_format": "<TBD: Aşama 0a ile seçilir (prereg_main P1): example_object (A, varsayılan) ya da json_schema_strict (B)>",
+  "answer_format": "example_object",
   "max_tokens": 16000,
   "request_deadline_s": 900,
   "stall_timeout_s": 1800,

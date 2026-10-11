@@ -254,15 +254,15 @@ class MainConfigs(unittest.TestCase):
         self.assertEqual(m["cost_calibration"], {"path": "configs/cost_calibration_minipilot.json",
                                                  "sha256": _sha(CAL)})
         # task #96 (EMIR 6 Soru 1-2): G 16 / 10 / 16 and the budgets are the user's
-        # decisions now; only answer_format (stage 0a) is still a placeholder
+        # decisions now; task #101 (EMIR 8): stage 0a chose A, nothing is open any more
         self.assertEqual((m["groups_per_cell"], m["groups_per_cell_by_model"]),
                          (10, {"deepseek": 16, "mistral": 10, "gpt": 16}))
         self.assertEqual((m["budget_usd"], m["model_budget_usd"], m["expected_cost_gate_usd"]),
                          (91, {"deepseek": 22, "mistral": 68, "gpt": 3}, 52))
-        self.assertTrue(pgg_game.is_placeholder(m["answer_format"]))
-        self.assertIn("TBD", m["answer_format"])
-        self.assertEqual(pgg_game.open_choices(m), ["answer_format"])
-        self.assertIsNone(pgg_game.prereg_problem(m))  # the placeholder still blocks a real run
+        self.assertEqual(m["answer_format"], "example_object")
+        self.assertFalse(pgg_game.is_placeholder(m["answer_format"]))
+        self.assertEqual(pgg_game.open_choices(m), [])
+        self.assertIsNone(pgg_game.prereg_problem(m))
 
     def test_stage_configs(self):
         names = {MAIN: ("main_s1_{run_date}", "pgg-main-s1")}
@@ -281,7 +281,10 @@ class MainConfigs(unittest.TestCase):
         self.assertEqual((b["groups_per_cell"], b["isolated_reps"], b["isolated_points"],
                           b["arms"], b["comprehension"]),
                          (1, 1, [0, 5, 10, 15, 20], ["group", "isolated"], True))
-        self.assertTrue(pgg_game.is_placeholder(b["answer_format"]))
+        # task #101 (EMIR 8): the format stage 0a chose, the same as stage 1's
+        self.assertEqual(b["answer_format"], "example_object")
+        self.assertEqual(b["answer_format"], self.main["answer_format"])
+        self.assertEqual(pgg_game.open_choices(b), [])
         names[S0B] = (b["run"], b["seed_namespace"])
         # every stage has its own run name and seed namespace
         self.assertEqual(len({r for r, _ in names.values()}), 4)
@@ -321,10 +324,11 @@ class MainConfigs(unittest.TestCase):
             totals[g] = self.total(text)
             self.assertIn("Üzerine yazılan: configs/cost_calibration_minipilot.json", text)
             self.assertIn("kilitli, beklenenle aynı", text)
-            # task #99: approved; stage 1 still waits for the answer_format of stage 0a
+            # task #99: approved; task #101: answer_format of stage 0a (A) is set
             self.assertIn("Ön kayıt: onaylı (prereg_approved=true)", text)
             self.assertNotIn("ÖN KAYIT ONAYI YOK", text)
-            self.assertIn("SEÇİLMEMİŞ (gerçek koşu başlamaz): answer_format", text)
+            self.assertNotIn("SEÇİLMEMİŞ", text)
+            self.assertIn("answer_format=example_object", text)
         self.assertLess(totals[6], totals[10])
         self.assertLess(totals[10], totals[16])
         for path in S0A.values():
@@ -338,7 +342,8 @@ class MainConfigs(unittest.TestCase):
         self.assertIn("1800 çağrı", text)
         self.assertIn("GEÇER", text)
         self.assertIn("Ön kayıt: onaylı (prereg_approved=true)", text)
-        self.assertIn("SEÇİLMEMİŞ (gerçek koşu başlamaz): answer_format", text)
+        self.assertNotIn("SEÇİLMEMİŞ", text)                 # task #101
+        self.assertIn("answer_format=example_object", text)
 
     def test_calibration_file_lock(self):
         raw = dict(self.main, cost_calibration={"path": str(CAL), "sha256": "0" * 64})
