@@ -486,11 +486,13 @@ class CommitChangeOnResume(ResumeBase):
     def test_other_commit_is_written_to_the_summary(self):
         # task #90: the cut leaves 1 answer to reuse (unit 2, round 2, agent 1);
         # another commit refuses its reuse unless --discard-reuse-on-code-change
+        # task #95: another commit goes on only with --allow-code-change (stage 0a / 0b)
         a, b = "a" * 40, "b" * 40
         with self.with_commit(a):
-            self.interrupted_run()
+            self.interrupted_run(stage="0a")
         with self.with_commit(b):
-            engine, _ = self.resume(discard_reuse_on_code_change=True)
+            engine, _ = self.resume(discard_reuse_on_code_change=True, stage="0a",
+                                    allow_code_change=True)
             engine.run(resume=True)
         summary = self.summary_now()
         self.assertEqual([(e["reason"], e["call"]["round"], e["call"]["agent_id"])
@@ -528,14 +530,18 @@ class CommitChangeOnResume(ResumeBase):
 
     def test_segments_without_a_recorded_commit_count_as_different(self):
         with mock.patch.object(pgg_game, "code_version", return_value=dict(UNKNOWN)):
-            self.interrupted_run()                      # e.g. a copy run by the earlier code
+            self.interrupted_run(stage="0b")            # e.g. a copy run by the earlier code
         with self.with_commit("a" * 40):
-            # task #90: an unknown commit is another commit for the answer to reuse
-            engine, api = self.resume()
-            with self.assertRaisesRegex(ValueError, "not resumed, no call made: reuse refused"):
+            # task #90: an unknown commit is another commit for the answer to reuse;
+            # task #95: and for the code version lock
+            engine, api = self.resume(stage="0b")
+            with self.assertRaisesRegex(ValueError, "not resumed, no call made: reuse refused.*"
+                                                    "code version lock: segment 0 .* ran "
+                                                    "git_commit None"):
                 engine.run(resume=True)
             self.assertEqual(api.calls, [])
-            engine, _ = self.resume(discard_reuse_on_code_change=True)
+            engine, _ = self.resume(discard_reuse_on_code_change=True, stage="0b",
+                                    allow_code_change=True)
             engine.run(resume=True)
         change = self.summary_now()["segments"][-1]["code_change"]
         self.assertEqual(change["earlier"], {"0": None})

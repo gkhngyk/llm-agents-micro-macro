@@ -151,6 +151,15 @@ tested. Design choices are in the module docstring; the main ones:
   tracked .py file changed, or the stamp does not match); a dry run only
   warns. A resumed segment with another commit is recorded (`code_change`,
   `code_changes`).
+- **Code version lock** (task #95, EMIR 6 C1): `--resume` runs only the
+  `git_commit` of the run's first segment and is refused otherwise (both
+  commits in the message, nothing written), answers to reuse or not. Only
+  `--allow-code-change` (CLI only, never a config value), and only for a
+  config with `"stage": "0a"` or `"0b"` (no analysis data), goes on with
+  another commit; `"stage": "1"` (configs/main.json) refuses the flag. Rows of
+  units that then span two commits carry `"code_change_span": true` and
+  `code_commits`; the summary lists those units (`code_change_span_units`,
+  `n_code_change_span_units`). With runctl: `runctl.py start --resume ... -- --allow-code-change`.
 
 - **Answer instruction** (task #80, off by default): config `answer_format`.
   Unset or `"schema_text"` sends exactly the requests of 811fdcc (schema text
@@ -163,7 +172,11 @@ tested. Design choices are in the module docstring; the main ones:
   `rationale` is required in the prompt and in the check (task #90). A or B is
   in the config record (a resume with another value stops); any set value is
   in rows and raw log; it changes `request_sha256`. Comparison:
-  `notes/cevap_talimati_tasarim.md`.
+  `notes/cevap_talimati_tasarim.md`. Task #95: the dry-run cost and the
+  deadline worst case measure the prompt with its answer instruction (one
+  function, `pgg_game._prompt_chars`); the calibration was measured with
+  `schema_text`, A / B are scaled by prompt length (`--answer-format` gives
+  a dry run of the other format).
 - **Reuse safety** (task #90): every row, raw-log record and
   `<run>.accepted.jsonl` record carries `request_sha256`, the sha256 of the
   canonical JSON (keys sorted, separators `,` `:`) of the whole request body

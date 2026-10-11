@@ -379,8 +379,23 @@ start event and its git_commit is never empty for a real run:
     dry run (also --resume --dry-run) only prints a warning.
   * --resume records a git_commit other than (or unknown in) the earlier
     segments': "code_change" in the segment entry and in the start event,
-    "code_changes" in the summary. It refuses it only when an answer of such
-    a segment would be reused (task #90; "Reuse safety" above).
+    "code_changes" in the summary.
+  * Code version lock (task #95, EMIR 6 C1): a segment whose git_commit is not
+    the FIRST segment's (an unknown one counts as another) is refused, before
+    the lock, any write and any call, whether answers would be reused or not
+    (resume_plan problem "code version lock", naming both commits). Only the
+    CLI flag --allow-code-change lets it go on, and only for a config whose
+    "stage" (STAGES) is 0a or 0b (no analysis data; CODE_CHANGE_STAGES); with
+    stage 1 or without a stage the flag refuses the run (validate), and a
+    config cannot set it. "stage" is in the config record when set. Each
+    resumed segment records "code_lock" (first commit, now, decision same /
+    allowed / refused; "not_recorded" when the first segment ran the code
+    before A5, which recorded no code version: not checked). A unit whose kept rows and this segment span more than
+    one commit gets "code_change_span": true and "code_commits" on its rows of
+    this segment; the summary lists every such unit of the file
+    ("code_change_span_units": unit, segments, commits, n_rows) and counts them,
+    since the earlier rows stay as written (append-only). An answer of another
+    commit is still not reused (task #90; "Reuse safety" above).
 
 Per row and summary (A2, A3). Every row has elapsed_s (seconds of the accepted
 attempt), n_transport and n_deadline (connection errors and attempts past the
@@ -446,6 +461,11 @@ DEFAULT_HEARTBEAT_S = 30.0
 # notes/cevap_talimati_tasarim.md compares the options.
 ANSWER_FORMATS = ("schema_text", "example_object", "json_schema_strict")
 ALL_FIELDS_REQUIRED_FORMATS = ("example_object", "json_schema_strict")
+# Stage of the main experiment a config runs (task #95, EMIR 6 C1; config
+# "stage"): 0a answer-format test and 0b smoke test hold no analysis data, so
+# only they may go on with another git commit (--allow-code-change).
+STAGES = ("0a", "0b", "1")
+CODE_CHANGE_STAGES = ("0a", "0b")
 # Operational limits compared with the previous segment on --resume (a
 # difference needs allow_timeout_change / --allow-timeout-change).
 TIMEOUT_SETTINGS = ("request_deadline_s", "stall_timeout_s")
@@ -654,6 +674,40 @@ def code_version_problem(cv: dict) -> str | None:
                 f"commit {cv.get('git_commit')} ({', '.join(cv.get('dirty_files') or [])}); "
                 "commit them first")
     return None
+
+
+def code_change_flag_problem(allow_code_change, stage) -> str | None:
+    """Why --allow-code-change is refused for a config of this stage (task #95); None if not.
+
+    Only a run without analysis data (stage in CODE_CHANGE_STAGES) may go on
+    with another git commit; stage 1 (analysis data) and a config without a
+    stage refuse the flag, for a new run too.
+    """
+    if not isinstance(allow_code_change, bool):
+        return "allow_code_change must be true or false"
+    if not allow_code_change or stage in CODE_CHANGE_STAGES:
+        return None
+    return (f"--allow-code-change is refused: config stage {stage!r} "
+            + ("holds analysis data" if stage == "1" else "is not a stage without analysis data")
+            + f"; only stages {list(CODE_CHANGE_STAGES)} (no analysis data) may go on with another "
+            "git commit than their first segment's. No run starts")
+
+
+def code_span_units(unit_segments: dict, commits: dict) -> dict:
+    """Units whose kept rows come from segments of more than one git_commit (task #95).
+
+    unit_segments: {unit label: segments of its accepted and pending rows};
+    commits: {segment: git_commit} (None = unknown, a commit of its own).
+    Returns {unit label: {"segments": [...], "commits": [...]}}, the commits
+    in segment order.
+    """
+    out = {}
+    for label, segs in unit_segments.items():
+        segs = sorted(segs)
+        seen = list(dict.fromkeys(commits.get(s) for s in segs))
+        if len(seen) > 1:
+            out[label] = {"segments": segs, "commits": seen}
+    return out
 
 
 def write_code_version(target_dir, commit: str = "HEAD", repo_dir: Path | None = None) -> Path:
@@ -1532,6 +1586,15 @@ class RunConfig:
     # git_commit are discarded ("code_changed") and asked again; otherwise
     # such answers stop the resume before any call. Not in the config record.
     discard_reuse_on_code_change: bool = False
+    # task #95 (EMIR 6 C1): STAGES entry of the config ("stage"); None = not a
+    # stage of the main experiment (pilot, mini-pilot). In the config record
+    # when set.
+    stage: str | None = None
+    # --resume (task #95): a segment may run another git_commit than the
+    # first segment (code version lock). Only CLI --allow-code-change sets it,
+    # and only a run of CODE_CHANGE_STAGES may have it (validate). Not in the
+    # config record.
+    allow_code_change: bool = False
     # {model key: {"slug", "name"[, "quantizations"]}}: pins one provider per
     # model (order + only, allow_fallbacks false, require_parameters true); a
     # response from another provider is re-requested (A4; it changes prereg
@@ -1661,6 +1724,11 @@ class RunConfig:
             raise ValueError("allow_timeout_change must be true or false")
         if not isinstance(self.discard_reuse_on_code_change, bool):
             raise ValueError("discard_reuse_on_code_change must be true or false")
+        if self.stage is not None and self.stage not in STAGES:
+            raise ValueError(f"stage must be one of {STAGES}, got {self.stage!r}")
+        problem = code_change_flag_problem(self.allow_code_change, self.stage)
+        if problem is not None:
+            raise ValueError(problem)
         if self.providers is not None:
             if not isinstance(self.providers, dict):
                 raise ValueError("providers must be a {model key: spec} object")
@@ -2115,6 +2183,14 @@ class ResumePlan:
     journal: dict = field(default_factory=dict)
     # task #90: Engine._reuse_code_check of the answers in reuse
     reuse_code_check: dict = field(default_factory=dict)
+    # task #95 (code version lock): {"first_segment", "first_commit", "now",
+    # "same_as_first", "allow_code_change", "stage", "decision"}; decision
+    # "same" | "allowed" | "refused" (refused = a problem)
+    code_lock: dict = field(default_factory=dict)
+    # task #95: units this segment goes on with whose kept rows and this
+    # segment span more than one git_commit (code_span_units); their rows of
+    # this segment say code_change_span: true and code_commits
+    code_span: dict = field(default_factory=dict)
 
     @property
     def prior_cost_usd(self) -> float:
@@ -2261,6 +2337,9 @@ class Engine:
         # Task #90: earlier segments whose answers are not reused (another
         # git_commit, with discard_reuse_on_code_change)
         self._reuse_refused_segments: set = set()
+        # Task #95: unit label -> git_commits its kept rows and this segment
+        # span (resume with allow_code_change); its rows say code_change_span
+        self._code_span: dict[str, list] = {}
         # Task #80: status.json and its heartbeat (written from the start of
         # _run_locked's segment on; nothing before the checks have passed).
         self.heartbeat_s = DEFAULT_HEARTBEAT_S
@@ -2640,10 +2719,18 @@ class Engine:
         s["deadline_cost_estimated_usd"] += usd
         s["n_deadline_cost_estimated"] += n
 
+    def prompt_chars(self, messages, schema) -> int:
+        """_prompt_chars of a request of this run (its answer_format; task #95).
+
+        The same measure as the dry-run estimate (mean_prompt_chars).
+        """
+        return _prompt_chars(messages, schema, self.cfg.answer_format)
+
     def deadline_estimate(self, model_key: str, prompt_chars: int) -> dict:
         """Worst-case cost of an attempt abandoned without usage (task #68, tahmin).
 
-        Prompt tokens = ceil(prompt_chars / DEADLINE_CHARS_PER_TOKEN) at the
+        prompt_chars: prompt_chars() of the request (task #95: with its answer
+        instruction). Prompt tokens = ceil(prompt_chars / DEADLINE_CHARS_PER_TOKEN) at the
         listed input price, plus max_tokens at the listed output price
         (pgg_cost.PRICES_USD_PER_M; a model without a listed price gets the
         highest one, as _response_cost).
@@ -2786,7 +2873,8 @@ class Engine:
                 attempt = info.get("attempt")
                 if (info.get("cost_unknown", True) and info.get("usage") is None
                         and not info.get("late_response") and attempt not in late_first):
-                    estimate = self.deadline_estimate(model_key, _prompt_chars(messages, schema))
+                    estimate = self.deadline_estimate(model_key,
+                                                      self.prompt_chars(messages, schema))
                     estimates[attempt] = estimate["estimated_cost_usd"]
                     n_estimated[0] += 1
             self._on_deadline(model_key, info, estimate=estimate, session_id=session_id,
@@ -2948,6 +3036,11 @@ class Engine:
             # task #80, only when set
             **({"answer_format": self.cfg.answer_format}
                if self.cfg.answer_format is not None else {}),
+            # task #95: a unit whose kept rows ran another git_commit (resume
+            # with --allow-code-change); its rows of earlier segments are listed
+            # in the summary (code_change_span_units), the file is append-only
+            **({"code_change_span": True, "code_commits": list(self._code_span[unit])}
+               if unit in self._code_span else {}),
         }
 
     # -- frames ------------------------------------------------------------
@@ -3369,6 +3462,9 @@ class Engine:
             # default's request, so it has the default's record
             **({"answer_format": cfg.answer_format}
                if cfg.answer_format not in (None, "schema_text") else {}),
+            # task #95, only when set: a resume cannot change the stage (and so
+            # whether --allow-code-change may be given)
+            **({"stage": cfg.stage} if cfg.stage is not None else {}),
         })
 
     def frames_summary(self) -> dict:
@@ -3408,7 +3504,9 @@ class Engine:
                 isolated_reps=cfg.isolated_reps, n_points=len(cfg.isolated_points),
                 comprehension=cfg.comprehension, isolated_frame=cfg.isolated_frame,
                 isolated_round_no=cfg.isolated_round_no, rationale=cfg.rationale,
-                cards=cfg.cards, scale=cfg.frames is not None)
+                cards=cfg.cards, answer_format=cfg.answer_format,
+                # task #95: an answer format other than schema_text is scaled too
+                scale=cfg.frames is not None or scales_answer_format(cfg.answer_format))
 
     def cost_gate_problem(self) -> str | None:
         """Why expected_cost_gate_usd stops this run (None: no gate or below it)."""
@@ -4152,7 +4250,7 @@ class Engine:
             # operational settings and code version, as the segment recorded them
             # (summary entry, else its start / resume event; absent before #46)
             for k in ("stalled", "request_deadline_s", "stall_timeout_s", "code_version", "lock",
-                      "resume_points", "n_discarded", "timeout_change", "code_change",
+                      "resume_points", "n_discarded", "timeout_change", "code_change", "code_lock",
                       "provider_policy", "run_template", "model_stops", "frame_audit"):
                 if k in entry:
                     item[k] = entry[k]
@@ -4198,8 +4296,7 @@ class Engine:
                         "same values (config / --request-deadline / --stall-timeout) or allow the "
                         "change with --allow-timeout-change")
 
-        # A5: the code of this segment against the earlier segments' (recorded,
-        # never refused: pilot_v2_20261005 went on with other commits too)
+        # A5: the code of this segment against the earlier segments' (recorded)
         now_commit = (self.code_version if self.code_version is not None
                       else code_version()).get("git_commit")
         earlier_commits = {e["segment"]: (e.get("code_version") or {}).get("git_commit")
@@ -4210,6 +4307,32 @@ class Engine:
             code_change = {"now": now_commit,
                            "earlier": {str(seg): c for seg, c in earlier_commits.items()},
                            "differs_from_segments": differs}
+
+        # task #95 (EMIR 6 C1): code version lock. Every segment runs the
+        # git_commit of the first segment (an unknown commit, now or there, is
+        # another one), whether answers are reused or not; only
+        # --allow-code-change in a run without analysis data (stage 0a / 0b,
+        # checked by validate) goes on with another commit. A first segment
+        # of the code before A5 recorded no code version at all (pilot v2): the
+        # lock cannot be checked ("not_recorded"; the change is still in
+        # code_change). Every segment of this code records one.
+        first_seg = min(earlier_commits)
+        first_commit = earlier_commits[first_seg]
+        recorded = "code_version" in next(e for e in segments if e["segment"] == first_seg)
+        same = now_commit is not None and first_commit == now_commit
+        code_lock = {"first_segment": first_seg, "first_commit": first_commit,
+                     "now": now_commit, "same_as_first": same,
+                     "allow_code_change": cfg.allow_code_change, "stage": cfg.stage,
+                     "decision": "same" if same else "not_recorded" if not recorded else
+                     "allowed" if cfg.allow_code_change else "refused"}
+        checked.append(f"git_commit of the first segment ({first_seg})" if recorded else
+                       f"git_commit of the first segment ({first_seg}): not recorded (code "
+                       "before A5), not checked")
+        # units that go on with kept rows of segments of another commit
+        unit_segs = {label: {*prog["segments"],
+                             *(r.get("segment", 0) for r in prog["pending"].values()), segment}
+                     for label, prog in rows["progress"].items()}
+        code_span = code_span_units(unit_segs, {**earlier_commits, segment: now_commit})
 
         # task #90 (M1): an answer is reused only by the code that obtained it
         reuse_code_check = self._reuse_code_check(journal["reuse"], earlier_commits, now_commit)
@@ -4225,6 +4348,14 @@ class Engine:
                     "they are not reused and not asked again silently. Resume with the code of "
                     "that commit, or discard and ask them again with "
                     "--discard-reuse-on-code-change")
+        if code_lock["decision"] == "refused":
+            problems.append(
+                f"code version lock: segment {first_seg} (the first) of this run ran git_commit "
+                f"{first_commit}, this segment would run {now_commit}; every segment of a run "
+                f"runs the code of its first segment. Resume with the code of commit "
+                f"{first_commit} (e.g. git archive + --write-code-version); another commit is "
+                f"allowed only with --allow-code-change and only in a run without analysis "
+                f"data (config stage {' / '.join(CODE_CHANGE_STAGES)})")
 
         if previous is not None:
             backup = self._backup_path(previous)
@@ -4249,6 +4380,7 @@ class Engine:
             lock=read_run_lock(self._lock_path()),
             timeout_change=timeout_change, timeout_check=timeout_check,
             code_change=code_change, reuse_code_check=reuse_code_check,
+            code_lock=code_lock, code_span=code_span,
             model_version_reference=dict(log["model_version_reference"]) if log else {},
             reuse=journal["reuse"], journal=journal["info"],
             rows_done={label: set(prog["pending"]) for label, prog in rows["progress"].items()
@@ -4271,6 +4403,8 @@ class Engine:
         self._rows_done = {label: set(keys) for label, keys in plan.rows_done.items()}
         # task #90: only reached with discard_reuse_on_code_change (else a problem)
         self._reuse_refused_segments = set(plan.reuse_code_check.get("refused_segments") or ())
+        # task #95: only reached with allow_code_change when the commit changed
+        self._code_span = {label: list(v["commits"]) for label, v in plan.code_span.items()}
         self.model_version_reference = {k: v for k, v in plan.model_version_reference.items()
                                         if k in self.cfg.snapshot_version_models}
         caps = self.cfg.model_budget_usd or {}
@@ -4514,6 +4648,8 @@ class Engine:
             "timeout_change": self.plan.timeout_change if self.plan else None,
             "code_version": self.code_version,
             "code_change": self.plan.code_change if self.plan else None,
+            # task #95: the code version lock of a resumed segment
+            "code_lock": self.plan.code_lock if self.plan else None,
             "provider_policy": dict(PROVIDER_POLICY),
             "lock": lock, "resume_points": resume_points,
             "run_template": self.cfg.run_template,
@@ -4522,6 +4658,23 @@ class Engine:
             "frame_audit": self.cfg.frame_audit(),
         }
         segments = [*(self.plan.segments if self.plan else []), current]
+        # task #95: units whose kept rows (accepted and pending) come from
+        # segments of more than one git_commit, over the whole results file
+        span: list = []
+        if rows is not None:
+            unit_segs: dict = {}
+            n_kept: dict = {}
+            for label, seg, _ in rows["accepted_rows"]:
+                unit_segs.setdefault(label, set()).add(seg)
+                n_kept[label] = n_kept.get(label, 0) + 1
+            for label, prog in rows["progress"].items():
+                for r in prog["pending"].values():
+                    unit_segs.setdefault(label, set()).add(r.get("segment", 0))
+                    n_kept[label] = n_kept.get(label, 0) + 1
+            commits = {s["segment"]: (s.get("code_version") or {}).get("git_commit")
+                       for s in segments}
+            span = [{"unit": label, **v, "n_rows": n_kept[label]}
+                    for label, v in code_span_units(unit_segs, commits).items()]
         # per model, the latest stop of any segment (reason and moment)
         model_stops: dict = {}
         for seg in segments:
@@ -4598,6 +4751,22 @@ class Engine:
             "timeout_changes": [s["timeout_change"] for s in segments if s.get("timeout_change")],
             "code_changes": [{"segment": s["segment"], **s["code_change"]}
                              for s in segments if s.get("code_change")],
+            # task #95 (EMIR 6 C1): code version lock and the units it marks
+            "stage": self.cfg.stage,
+            "code_change_span_units": span,
+            "n_code_change_span_units": len(span),
+            "n_code_change_span_rows": sum(u["n_rows"] for u in span),
+            "code_lock_rule": (
+                "every segment of a run runs the git_commit of its first segment (an unknown "
+                "commit counts as another); otherwise --resume is refused before any call or "
+                "write, answers to reuse or not. Only --allow-code-change, and only in a run "
+                f"without analysis data (config stage {' / '.join(CODE_CHANGE_STAGES)}), goes on "
+                "with another commit (segment code_lock decision \"allowed\"); stage 1 refuses "
+                "the flag; a first segment of the code before A5 (no code version recorded) "
+                "cannot be checked (decision \"not_recorded\"). code_change_span_units: units whose kept rows come from segments of "
+                "more than one commit; their rows written after the change say "
+                "code_change_span: true and code_commits (earlier rows stay as written: the "
+                "results file is append-only)"),
             "provider_mismatch_rule": (
                 "a response of a pinned model from another provider, or without a provider name "
                 "(task #68: provider_missing: true, n_provider_missing; before it was accepted and "
@@ -4770,7 +4939,10 @@ class Engine:
                 # task #90: answers of segments with another git_commit (only
                 # here when discard_reuse_on_code_change let the resume start)
                 reuse_code_check=p.reuse_code_check,
-                discard_reuse_on_code_change=self.cfg.discard_reuse_on_code_change)
+                discard_reuse_on_code_change=self.cfg.discard_reuse_on_code_change,
+                # task #95: the code version lock and the units it marks
+                code_lock=p.code_lock, allow_code_change=self.cfg.allow_code_change,
+                code_change_span_units=p.code_span)
         return event
 
     def _log_state(self):
@@ -5037,21 +5209,91 @@ CALIBRATION_ISOLATED_FRAME = "repeated"
 CALIBRATION_CARDS = (PROJECT_DIR / "cards" / "pilot_cards_v2.json", ("Boston", "Riyadh"))
 
 
-def _prompt_chars(messages: list[dict], schema: dict) -> int:
-    """Characters of a request's prompt as sent: messages plus the schema request."""
-    return (sum(len(m["content"]) for m in messages) + len(SCHEMA_PROMPT_SUFFIX)
-            + len(json.dumps(schema, ensure_ascii=False)))
+# Copy of the text llm_client.augment_with_example appends (option A, task #95);
+# a test checks that answer_prompt_messages renders what llm_client sends.
+EXAMPLE_PROMPT_SUFFIX = ("\n\nRespond with ONLY a JSON object of this form, with your own values "
+                         "in place of the <...> parts (every field is required):\n")
+
+
+def _offline_example_template(schema: dict) -> str:
+    """Copy of llm_client.example_template for dry runs (task #95; a test checks both agree)."""
+    t = schema.get("type")
+    if t == "object":
+        return "{" + ", ".join(f"{json.dumps(k, ensure_ascii=False)}: "
+                               f"{_offline_example_template(v)}"
+                               for k, v in schema.get("properties", {}).items()) + "}"
+    if t == "integer":
+        if "minimum" in schema and "maximum" in schema:
+            return f"<whole number from {schema['minimum']} to {schema['maximum']}>"
+        return "<whole number>"
+    return json.dumps(f"<{schema.get('description') or 'text'}>", ensure_ascii=False)
+
+
+def _offline_strict_json_schema(schema: dict) -> dict:
+    """Copy of llm_client.strict_json_schema for dry runs (task #95; a test checks both agree)."""
+    out = dict(schema)
+    if schema.get("type") == "object":
+        props = {k: _offline_strict_json_schema(v) for k, v in schema.get("properties", {}).items()}
+        out["properties"] = props
+        required = list(schema.get("required", []))
+        out["required"] = required + [k for k in props if k not in required]
+        out["additionalProperties"] = False
+    return out
+
+
+def answer_prompt_messages(messages: list[dict], schema: dict,
+                           answer_format: str | None = None) -> list[dict]:
+    """The messages llm_client.answer_request sends for an answer_format (task #95).
+
+    Offline copy (dry runs must not import llm_client): schema_text / None
+    appends SCHEMA_PROMPT_SUFFIX + the schema, example_object (A)
+    EXAMPLE_PROMPT_SUFFIX + the placeholder example, json_schema_strict (B)
+    SCHEMA_PROMPT_SUFFIX + the strict schema. A test checks it against
+    llm_client.answer_request.
+    """
+    if answer_format in (None, "schema_text"):
+        suffix = SCHEMA_PROMPT_SUFFIX + json.dumps(schema, ensure_ascii=False)
+    elif answer_format == "example_object":
+        suffix = EXAMPLE_PROMPT_SUFFIX + _offline_example_template(schema)
+    elif answer_format == "json_schema_strict":
+        suffix = SCHEMA_PROMPT_SUFFIX + json.dumps(_offline_strict_json_schema(schema),
+                                                   ensure_ascii=False)
+    else:
+        raise ValueError(f"answer_format must be one of {ANSWER_FORMATS}, got {answer_format!r}")
+    out = list(messages)
+    out[-1] = {**out[-1], "content": out[-1]["content"] + suffix}
+    return out
+
+
+def _prompt_chars(messages: list[dict], schema: dict, answer_format: str | None = None) -> int:
+    """Characters of a request's prompt as sent: the messages with the answer instruction.
+
+    The one measure of prompt length (task #95): the dry-run estimate
+    (mean_prompt_chars, prompt_scales) and the deadline estimate of a run
+    (Engine._ask -> deadline_estimate) both count it, for the run's
+    answer_format (answer_prompt_messages). In json_schema_strict the schema
+    also goes as response_format; how a provider counts that is not known and
+    it is not counted here (tahmin). None / schema_text: the count of the code
+    before task #95.
+    """
+    return sum(len(m["content"]) for m in answer_prompt_messages(messages, schema, answer_format))
+
+
+def scales_answer_format(answer_format) -> bool:
+    """True when the prompts of this answer_format differ from the calibration's (schema_text)."""
+    return answer_format in ALL_FIELDS_REQUIRED_FORMATS
 
 
 def mean_prompt_chars(frame: Frame, kind: str, params: GameParams, cards: list[Card], *,
                       isolated_frame: str | None = None, isolated_round_no: int = 5,
-                      rationale: bool = True) -> float | None:
+                      rationale: bool = True, answer_format: str | None = None) -> float | None:
     """Mean prompt characters of one call kind in a frame (None: the frame has no such call).
 
     Group kinds: mean over rounds 1..rounds of player 1's prompt, with a fixed
     synthetic history (everybody contributes half the endowment, nobody
     punishes); isolated: mean over the default conditioning values;
-    comprehension: the group arm's call. Means over the cards.
+    comprehension: the group arm's call. Means over the cards. answer_format:
+    the answer instruction of the prompt (_prompt_chars, task #95).
     """
     n = params.group_size
     history = []
@@ -5069,7 +5311,7 @@ def mean_prompt_chars(frame: Frame, kind: str, params: GameParams, cards: list[C
             cond = kind[-1]
             schema = contribution_schema(params, rationale, prompt_frame=frame)
             sizes += [_prompt_chars(contribution_messages(params, cond, card, history[:r - 1], 0, r,
-                                                          prompt_frame=frame), schema)
+                                                          prompt_frame=frame), schema, answer_format)
                       for r in range(1, params.rounds + 1)]
         elif kind == "punish_P":
             targets = list(range(2, n + 1))
@@ -5077,7 +5319,7 @@ def mean_prompt_chars(frame: Frame, kind: str, params: GameParams, cards: list[C
             c = [params.endowment // 2] * n
             e = project_payoffs(params, c)[0]
             sizes += [_prompt_chars(punishment_messages(params, card, history[:r - 1], 0, r, c, e,
-                                                        prompt_frame=frame), schema)
+                                                        prompt_frame=frame), schema, answer_format)
                       for r in range(1, params.rounds + 1)]
         elif kind == "isolated":
             if isolated_frame not in frame.isolated_frames:
@@ -5085,12 +5327,12 @@ def mean_prompt_chars(frame: Frame, kind: str, params: GameParams, cards: list[C
             schema = contribution_schema(params, rationale, prompt_frame=frame)
             sizes += [_prompt_chars(isolated_messages(params, card, x, isolated_frame,
                                                       isolated_round_no, prompt_frame=frame),
-                                    schema) for x in ISOLATED_POINTS]
+                                    schema, answer_format) for x in ISOLATED_POINTS]
         elif kind == "comprehension":
             if not frame.has_comprehension:
                 return None
             sizes.append(_prompt_chars(frame.comprehension_messages(params, card, "N"),
-                                       frame.comprehension_schema(rationale)))
+                                       frame.comprehension_schema(rationale), answer_format))
         else:
             raise ValueError(f"unknown call kind {kind!r}")
     return sum(sizes) / len(sizes)
@@ -5098,15 +5340,18 @@ def mean_prompt_chars(frame: Frame, kind: str, params: GameParams, cards: list[C
 
 def prompt_scales(frame: Frame, params: GameParams, cards: list[Card], *,
                   isolated_frame: str | None, isolated_round_no: int = 5,
-                  rationale: bool = True) -> dict:
+                  rationale: bool = True, answer_format: str | None = None) -> dict:
     """{call kind: prompt characters of the frame / of the calibration's} (tahmin).
 
     The cost calibration measured abstract_v2 prompts of pilot v2 (isolated
-    wording "repeated"); its prompt tokens are scaled by these character
-    ratios for another frame or wording. comprehension is priced from
-    contribute_N, so its ratio is to abstract_v2's contribute_N prompt. A
-    kind the frame does not have is left out (not scaled). isolated_frame
-    None or not offered by the frame: the frame's first isolated wording.
+    wording "repeated") with the schema_text answer instruction; its prompt
+    tokens are scaled by these character ratios for another frame, wording
+    or answer_format (task #95: the frame's prompts are rendered with the
+    run's answer instruction, the reference stays schema_text). comprehension
+    is priced from contribute_N, so its ratio is to abstract_v2's
+    contribute_N prompt. A kind the frame does not have is left out (not
+    scaled). isolated_frame None or not offered by the frame: the frame's
+    first isolated wording.
     """
     ref = default_frame()
     if isolated_frame not in frame.isolated_frames:
@@ -5114,7 +5359,8 @@ def prompt_scales(frame: Frame, params: GameParams, cards: list[Card], *,
     kw = {"isolated_round_no": isolated_round_no, "rationale": rationale}
     out = {}
     for kind in pgg_cost.CALL_KINDS:
-        mine = mean_prompt_chars(frame, kind, params, cards, isolated_frame=isolated_frame, **kw)
+        mine = mean_prompt_chars(frame, kind, params, cards, isolated_frame=isolated_frame,
+                                 answer_format=answer_format, **kw)
         if mine is None:
             continue
         ref_kind = "contribute_N" if kind == "comprehension" else kind
@@ -5129,15 +5375,17 @@ def design_estimate(*, models: dict[str, str], frame_models: dict[str, list[str]
                     groups_per_cell: int, isolated_reps: int, n_points: int,
                     comprehension: bool = False, isolated_frame: str | None = None,
                     isolated_round_no: int = 5, rationale: bool = True,
-                    cards: list[Card] | None = None, scale: bool = True) -> dict:
+                    cards: list[Card] | None = None, scale: bool = True,
+                    answer_format: str | None = None) -> dict:
     """Calls and estimated cost per frame x model of a design (pgg_cost, tahmin).
 
     frames: {label: Frame, or None when its file is not chosen yet (not
     scaled)}. scale False: no prompt scaling (configs without frames: the
-    same numbers as before frames). Returns {"rows": [{"frame", "model",
-    "slug", "calls", "calls_by_kind", "prompt_scale", "frame_known",
-    **pgg_cost.model_cost}], "counts", "total_calls", "total_cost_usd",
-    "total_p95_upper_usd", "unpriced"}.
+    same numbers as before frames). answer_format (task #95): the prompts are
+    measured with that answer instruction (prompt_scales). Returns {"rows":
+    [{"frame", "model", "slug", "calls", "calls_by_kind", "prompt_scale",
+    "frame_known", **pgg_cost.model_cost}], "counts", "total_calls",
+    "total_cost_usd", "total_p95_upper_usd", "unpriced", "answer_format"}.
     """
     counts = pgg_cost.call_counts(
         n_cells=n_cells, conditions=conditions, groups_per_cell=groups_per_cell,
@@ -5149,7 +5397,8 @@ def design_estimate(*, models: dict[str, str], frame_models: dict[str, list[str]
     for label, keys in frame_models.items():
         f = frames.get(label)
         scales = (prompt_scales(f, params, cards, isolated_frame=isolated_frame,
-                                isolated_round_no=isolated_round_no, rationale=rationale)
+                                isolated_round_no=isolated_round_no, rationale=rationale,
+                                answer_format=answer_format)
                   if scale and f is not None else None)
         for key in keys:
             slug = models[key]
@@ -5179,7 +5428,8 @@ def design_estimate(*, models: dict[str, str], frame_models: dict[str, list[str]
             "total_cost_usd": sum(r["cost_usd"] for r in priced),
             "total_p95_upper_usd": sum(r["p95_upper_usd"] for r in priced),
             "per_model": per_model,
-            "unpriced": [f"{r['model']}/{r['frame']}" for r in rows if r["cost_usd"] is None]}
+            "unpriced": [f"{r['model']}/{r['frame']}" for r in rows if r["cost_usd"] is None],
+            "answer_format": answer_format}
 
 
 def gate_problem(est: dict, gate: float | None) -> str | None:
@@ -5285,6 +5535,10 @@ def format_design_report(est: dict, *, description: str = "", gate: float | None
                  + (" comprehension: contribute_N token'ları, istem kendi uzunluğuna ölçekli "
                     "(tahmin)." if any("comprehension" in (r.get("extrapolated_kinds") or ())
                                        for r in est["rows"]) else ""))
+    # task #95 (EMIR 6 C2): the answer instruction is part of the measured prompt
+    lines.append(f"  cevap biçimi (answer_format) {est.get('answer_format') or 'schema_text'}: "
+                 "kalibrasyon schema_text ile ölçüldü; A/B farkı istem uzunluğundan ölçeklendi "
+                 "(tahmin; istem, cevap talimatıyla birlikte render edilip ölçüldü).")
     lines.append(pgg_cost.source_note())
     return "\n".join(lines)
 
@@ -5555,9 +5809,18 @@ def build_parser() -> argparse.ArgumentParser:
                     help="--resume: accepted answers of a segment that ran another git commit "
                          "are discarded (code_changed) and asked again; without it such "
                          "answers stop the resume before any call")
+    ap.add_argument("--allow-code-change", action="store_true", default=None,
+                    help="--resume: go on with another git commit than the run's first "
+                         "segment ran (else refused); only for a config of stage "
+                         f"{' / '.join(CODE_CHANGE_STAGES)} (no analysis data), refused for "
+                         "stage 1; rows of units that span two commits are marked "
+                         "(code_change_span)")
     ap.add_argument("--heartbeat-interval", type=float, dest="heartbeat_s",
                     help=f"seconds between the heartbeats of <runs-dir>/<run>/{STATUS_FILE} "
                          f"(default {DEFAULT_HEARTBEAT_S:g}; not part of the config record)")
+    ap.add_argument("--answer-format", choices=ANSWER_FORMATS,
+                    help="answer instruction (else config answer_format; default schema_text); "
+                         "e.g. a dry run of a config whose format is not chosen yet")
     ap.add_argument("--max-invalid", type=int)
     ap.add_argument("--no-rationale", action="store_true", default=None)
     ap.add_argument("--workers", type=int)
@@ -5586,6 +5849,10 @@ def settings_from_args(args) -> dict:
     s = {}
     if args.config:
         s.update(json.loads(Path(args.config).read_text(encoding="utf-8")))
+        if "allow_code_change" in s:
+            # task #95: an explicit CLI flag only, never a config value
+            raise ValueError(f"{args.config}: \"allow_code_change\" cannot be set in a config; "
+                             "give --allow-code-change on the command line (stage 0a / 0b only)")
         # a relative cards path of a config is relative to the code directory (as
         # frame_files paths are): the committed configs name repository files
         cards = s.get("cards")
@@ -5613,6 +5880,7 @@ def settings_from_args(args) -> dict:
         "request_deadline_s": args.request_deadline_s, "stall_timeout_s": args.stall_timeout_s,
         "allow_timeout_change": args.allow_timeout_change,
         "discard_reuse_on_code_change": args.discard_reuse_on_code_change,
+        "allow_code_change": args.allow_code_change, "answer_format": args.answer_format,
         "rationale": False if args.no_rationale else None, "workers": args.workers,
         "runs_dir": args.runs_dir, "results_dir": args.results_dir,
     }
@@ -5655,6 +5923,7 @@ def run_config(run: str, s: dict, models: dict[str, str], output: dict) -> RunCo
         request_deadline_s=s.get("request_deadline_s"), stall_timeout_s=s.get("stall_timeout_s"),
         allow_timeout_change=bool(s.get("allow_timeout_change", False)),
         discard_reuse_on_code_change=bool(s.get("discard_reuse_on_code_change", False)),
+        stage=s.get("stage"), allow_code_change=bool(s.get("allow_code_change", False)),
         providers=resolve_providers(s.get("providers"), models),
         isolated_frame=s.get("isolated_frame", "one_shot"),
         frames=resolve_frames(s.get("frames"), models), frame_files=s.get("frame_files"),
@@ -5831,11 +6100,13 @@ def resume_report(engine: Engine, plan: ResumePlan) -> str:
                 key[0], key[0])
             if by_kind.get(kind, 0) > 0:
                 by_kind[kind] -= 1
-    # without frames: per model, no prompt scaling (as before frames)
+    # without frames: per model, no prompt scaling (as before frames), unless
+    # the answer format is not the calibration's (task #95)
     scales = ({label: prompt_scales(f, cfg.params, cfg.cards, isolated_frame=cfg.isolated_frame,
                                     isolated_round_no=cfg.isolated_round_no,
-                                    rationale=cfg.rationale)
-               for label, f in engine.frames.items()} if cfg.frames is not None else {})
+                                    rationale=cfg.rationale, answer_format=cfg.answer_format)
+               for label, f in engine.frames.items()}
+              if cfg.frames is not None or scales_answer_format(cfg.answer_format) else {})
     total_calls, total_cost, priced = 0, 0.0, True
     per_key: dict[str, int] = {}
     for (key, label), by_kind in calls.items():
@@ -5881,8 +6152,29 @@ def resume_report(engine: Engine, plan: ResumePlan) -> str:
         lines.append(
             f"Kod commit'i önceki segment(ler)den farklı ya da onlarda bilinmiyor: segment "
             f"{change['differs_from_segments']} (önceki: {change['earlier']}; şimdi: "
-            f"{change['now']}); yeniden kullanılacak cevap yoksa engellemez, özete "
-            "code_change olarak yazılır")
+            f"{change['now']}); özete code_change olarak yazılır")
+    lock = plan.code_lock or {}
+    if lock:
+        # task #95: the code version lock
+        head = (f"Kod sürümü kilidi: ilk segment ({lock['first_segment']}) commit'i "
+                f"{lock['first_commit']}, bu segment {lock['now']}: ")
+        if lock["decision"] == "same":
+            lines.append(head + "aynı, sürdürülebilir")
+        elif lock["decision"] == "not_recorded":
+            lines.append(head + "ilk segment kod sürümü kaydetmemiş (A5 öncesi kod): kilit "
+                         "denetlenemez, değişiklik code_change olarak yazılır")
+        elif lock["decision"] == "allowed":
+            lines.append(head + f"FARKLI; --allow-code-change verildi (aşama {lock['stage']}, "
+                         "analiz verisi yok): sürdürmeye izin var; iki sürüme yayılan birimlerin "
+                         "bu segmentteki satırları code_change_span ile işaretlenir")
+        else:
+            lines.append(head + "FARKLI — sürdürme REDDEDİLİR (ilk segmentin commit'iyle "
+                         "sürdürün; yalnız aşama 0a / 0b config'inde --allow-code-change ile "
+                         "izin verilebilir)")
+    if plan.code_span:
+        lines.append(f"İki ya da daha çok kod sürümüne yayılacak birimler: {len(plan.code_span)} "
+                     + "(" + "; ".join(f"{label}: {v['commits']}"
+                                       for label, v in plan.code_span.items()) + ")")
     check = plan.reuse_code_check or {}
     if check.get("refused_segments"):
         lines.append(
@@ -5917,7 +6209,11 @@ def main(argv=None) -> int:
         return 0
     if args.code_commit:
         build_parser().error("--code-commit needs --write-code-version")
-    s = settings_from_args(args)
+    try:
+        s = settings_from_args(args)
+    except ValueError as e:
+        print(f"HATA: {e}", file=sys.stderr)
+        return 1
     params = s["params"]
     conditions = tuple(s.get("conditions", ("N",)))
     arms = tuple(s.get("arms", ARMS))
@@ -5985,10 +6281,20 @@ def main(argv=None) -> int:
                 except ValueError as e:
                     print(f"HATA: {e}", file=sys.stderr)
                     return 1
-                if s.get("frames") is not None:
+                # task #95: the prompts are measured with the answer instruction
+                fmt = None if is_placeholder(s.get("answer_format")) else s.get("answer_format")
+                if fmt is not None and fmt not in ANSWER_FORMATS:
+                    print(f"HATA: answer_format must be one of {ANSWER_FORMATS}, got {fmt!r}",
+                          file=sys.stderr)
+                    return 1
+                if s.get("frames") is not None or scales_answer_format(fmt):
                     try:
-                        frame_models = resolve_frames(s["frames"], models)
-                        frames = dry_run_frames(frame_models, s.get("frame_files"), params)
+                        if s.get("frames") is not None:
+                            frame_models = resolve_frames(s["frames"], models)
+                            frames = dry_run_frames(frame_models, s.get("frame_files"), params)
+                        else:                    # answer format A / B without frames
+                            frame_models = {DEFAULT_FRAME: list(models)}
+                            frames = {DEFAULT_FRAME: default_frame()}
                     except ValueError as e:
                         print(f"HATA: çerçeve: {e}", file=sys.stderr)
                         return 1
@@ -6001,7 +6307,8 @@ def main(argv=None) -> int:
                         n_points=len(points), comprehension=s.get("comprehension", False),
                         isolated_frame=None if is_placeholder(iso) else iso,
                         isolated_round_no=s.get("isolated_round_no", 5),
-                        rationale=True if is_placeholder(rationale) else rationale, cards=cards)
+                        rationale=True if is_placeholder(rationale) else rationale, cards=cards,
+                        answer_format=fmt)
                     print(format_design_report(
                         est, gate=gate, budget=s.get("budget_usd"), max_tokens=s.get("max_tokens"),
                         model_budget=model_budget, description=(
@@ -6013,7 +6320,12 @@ def main(argv=None) -> int:
                             f"{len(points)} değer, kural anlama "
                             + ("açık (ajan başına grup öncesi 1, izole çizelge başına 1 çağrı)"
                                if s.get("comprehension") else "kapalı") + ".")))
-                    for line in frame_lock_lines(frames, s.get("frame_files"), params):
+                    if is_placeholder(s.get("answer_format")):
+                        print("answer_format seçilmedi (yer tutucu): istem schema_text talimatıyla "
+                              "ölçüldü; A / B için --answer-format example_object / "
+                              "json_schema_strict")
+                    for line in (frame_lock_lines(frames, s.get("frame_files"), params)
+                                 if s.get("frames") is not None else []):
                         print(line)
                     if cards is not None:
                         print(cards_line)
@@ -6057,6 +6369,15 @@ def main(argv=None) -> int:
                 problem = prereg_problem(s)
                 print("Ön kayıt: onaylı (prereg_approved=true)" if problem is None else
                       f"ÖN KAYIT ONAYI YOK (gerçek koşu başlamaz): {problem}")
+            if s.get("stage") is not None or s.get("allow_code_change"):
+                # task #95: the code version lock of --resume
+                stage = s.get("stage")
+                problem = code_change_flag_problem(bool(s.get("allow_code_change")), stage)
+                flag = ("verilebilir (analiz verisi yok)" if stage in CODE_CHANGE_STAGES
+                        else "REDDEDİLİR (analiz verisi var ya da aşama yok)")
+                print(f"Aşama: {stage} — kod sürümü kilidi: --resume ilk segmentin commit'iyle "
+                      f"sürer; --allow-code-change {flag}"
+                      + (f"; HATA (gerçek koşu başlamaz): {problem}" if problem else ""))
             open_ = open_choices(s)
             if open_:
                 print("SEÇİLMEMİŞ (gerçek koşu başlamaz): " + ", ".join(open_))
@@ -6073,6 +6394,11 @@ def main(argv=None) -> int:
     problem = prereg_problem(s)
     if problem is not None:
         print(f"HATA: {problem}; gerçek koşu başlamadı, çağrı yapılmadı", file=sys.stderr)
+        return 1
+    # task #95: --allow-code-change only for stage 0a / 0b
+    problem = code_change_flag_problem(bool(s.get("allow_code_change")), s.get("stage"))
+    if problem is not None:
+        print(f"HATA: {problem}; çağrı yapılmadı", file=sys.stderr)
         return 1
     if not run or not s.get("cards"):
         build_parser().error("a real run needs --run and --cards (or use --dry-run)")

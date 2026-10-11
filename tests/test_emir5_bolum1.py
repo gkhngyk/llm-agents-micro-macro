@@ -204,10 +204,12 @@ class CodeChangeRefusesReuse(ResumeBase):
         self.assertIn("SORUN (sürdürme başlamaz)", text)
 
     def test_discard_option_asks_them_again(self):
+        # task #95: another commit needs --allow-code-change (stage 0a / 0b only)
         with _with_commit(self.A):
-            self.interrupted_run()
+            self.interrupted_run(stage="0a")
         with _with_commit(self.B):
-            engine, api = self.resume(discard_reuse_on_code_change=True)
+            engine, api = self.resume(discard_reuse_on_code_change=True, stage="0a",
+                                      allow_code_change=True)
             engine.run(resume=True)
         self.assertEqual(len(api.calls), 32)
         summary = self.summary_now()
@@ -230,27 +232,38 @@ class CodeChangeRefusesReuse(ResumeBase):
                          {"now": self.A, "earlier": {}, "refused_segments": [], "n_answers": 0})
 
     def test_another_commit_without_answers_to_reuse_resumes(self):
+        # task #95 (EMIR 6 C1): refused now, answers to reuse or not (code version
+        # lock); the name is kept from task #90
         with _with_commit(self.A):
             self.interrupted_run(at=21)                  # round 2 of unit 2: nothing answered
+        before = _tree(self.run_dir)
         with _with_commit(self.B):
             plan = Engine(self.rcfg(), llm=pgg_game.OfflineLLM()).resume_plan()
-            self.assertEqual((plan.problems, plan.reuse), ([], {}))
+            self.assertEqual(plan.reuse, {})
+            self.assertEqual(len(plan.problems), 1, plan.problems)
+            self.assertRegex(plan.problems[0], r"^code version lock: segment 0 \(the first\) of "
+                                               r"this run ran git_commit a{40}, this segment would "
+                                               r"run b{40}")
+            self.assertEqual(plan.code_lock["decision"], "refused")
             engine, api = self.resume()
-            engine.run(resume=True)
-        summary = self.summary_now()
-        self.assertEqual(summary["units"]["n_remaining"], 0)
-        self.assertEqual(summary["segments"][-1]["code_change"]["differs_from_segments"], [0])
+            with self.assertRaisesRegex(ValueError, "not resumed, no call made: code version lock"):
+                engine.run(resume=True)
+            self.assertEqual(api.calls, [])
+        self.assertEqual(_tree(self.run_dir), before)           # nothing written, no lock left
 
     def test_cli_reports_the_refusal(self):
+        # task #95: stage 0a, so that --allow-code-change may go on with commit B
         with _with_commit(self.A):
             self.interrupted_run(at=14, models=dict(GEMINI), budget_usd=None,
-                                 invalid_rate_cap=None)
+                                 invalid_rate_cap=None, stage="0a")
         cards = self.tmp / "cards.json"
         cards.write_text(json.dumps([{"card_id": c.card_id, "style": c.style, "text": c.text}
                                      for c in (CARD_A, CARD_B)]))
-        argv = ["--resume", "--run", "r1", "--cards", str(cards), "--models", "gemini",
-                "--runs-dir", str(self.tmp / "runs"), "--rounds", "2", "--groups-per-cell", "1",
-                "--isolated-reps", "1"]
+        config = self.tmp / "s0a.json"
+        config.write_text(json.dumps({"stage": "0a"}))
+        argv = ["--resume", "--config", str(config), "--run", "r1", "--cards", str(cards),
+                "--models", "gemini", "--runs-dir", str(self.tmp / "runs"), "--rounds", "2",
+                "--groups-per-cell", "1", "--isolated-reps", "1", "--allow-code-change"]
         self.use(CostAPI())
         self.create.reset_mock()
         with _with_commit(self.B), contextlib.redirect_stderr(io.StringIO()) as err, \
