@@ -35,6 +35,8 @@ already published by others, the candidate design, open to-dos), then
 - `llm_client.py` — OpenRouter calls, logging, decision-model calls, seeds.
   API key is read from `../.env`; do not copy it here.
 - `notes/` — background and literature scan.
+- `prereg/` — the written plans (authoritative copies since 2026-10-12;
+  amendments are committed, additions only; see `prereg/README.md`).
 - `logs/raw_calls.jsonl` — every API call (git-ignored; contains an account id).
 - `results/` — one `.jsonl` per run, one `_analysis.json` per analysis.
 
