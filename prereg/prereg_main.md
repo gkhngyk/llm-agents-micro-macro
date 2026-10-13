@@ -921,3 +921,60 @@ Dosyalar worktree dışında, `workspace/runs/main_s0a_example_20261011/` altın
 - **0b hazırlığı (API yok):** commit `d585830` kopyasından 0b dry-run'ı: 1800 çağrı, ortalama 4,8518 / p95 üst sınır 8,9394 USD (tahmin), kapı 5,5 → GEÇER; kod "temiz", çerçeve ve kart kilitleri "beklenenle aynı", `answer_format=example_object` [T102 §4]. Böylece §12.3 Not'undaki "commit sonrası yeniden üretim" önerisi A biçimi için karşılandı: 0b ve Aşama 1 değerleri (Aşama 1: 23 040 çağrı, 46,8940 / 90,6270 USD, kapı 52 → GEÇER) temiz koddan #96'nın A değerleriyle aynı çıktı [T101; T102 §4–§5].
 - **0b başlatılmadı;** kullanıcı 0b için "BAŞLA" diyene kadar başlamaz (§10.4).
 - **Önceki metinde eskiyen ifadeler (metin değiştirilmedi, burada not edilir):** başlıktaki onay dayanağı notu, §0 madde 6 ve §10.1 config'lerde `prereg_approved` için "false" diyor; #99'dan beri `true` [T99 başlık ve §1; T102 §4: "Ön kayıt: onaylı (prereg_approved=true)"]. §4.1 ve §10.1 `answer_format`'ı yer tutucu diye anıyor; artık `example_object` [T101]. §12.2 tablosunun config satırlarının güncel değerleri oradaki tarihli notta.
+
+---
+
+## Ek — Aşama 0b sonucu (2026-10-13)
+
+- **Tarih ve yapan:** 2026-10-13; Claude (orc yöneticisi artık kullanılmıyor), kullanıcı onayıyla. Kaynak: `workspace/runs/main_s0b_20261012/` (sonuç dosyası sha256 `fa6a9cf1…9c30`, özet `640764ba…0d6b`, ham log `7bd3fab5…d8bc`).
+- **0b verisi hiçbir analize girmez** (§4.3). Aşağıdaki sayılar yalnız tesisat ve okuma içindir; kartlar arası karşılaştırma yapılmadı.
+
+### F.1 Koşu
+
+- Kullanıcı "BAŞLA 0b" dedi (2026-10-12); koşu `_kod_d585830…` kopyasından, `runctl` ile başladı (22:49) ve 2026-10-13 00:58'de bitti (7 772 s).
+- 72/72 birim, 1 800 satır (model başına grup 480, izole 60, kural anlama 60). `stop_reason` yok, model durması yok. Kod `d585830`, `git_dirty` false; `answer_format` example_object.
+- Maliyet 4,3656 USD (DeepSeek 0,4893 / Mistral 3,7973 / GPT 0,0790); dry-run oranı 0,90 (Mistral 0,88, DeepSeek 1,03, GPT 0,97).
+
+### F.2 Tesisat sayıları (§4.2)
+
+| model | geçersiz + parse_fail (karar) | kural anlama tam doğru | reasoning_capped | n_length | n_reuse_invalid | süre medyan / p95 / maks (s) |
+|---|---|---|---|---|---|---|
+| deepseek | 1 / 541 (%0,18) | 60/60 | 8 | 0 | 0 | 15,1 / 181,0 / 507,9 |
+| mistral | 0 / 540 | 60/60 | 0 | 0 | 0 | 45,7 / 113,6 / 236,7 |
+| gpt | 0 / 540 | 60/60 | 0 | 0 | 0 | 3,0 / 5,5 / 11,8 |
+
+- Hiçbir model %5 tavanına yaklaşmadı (§4.3). DeepSeek'in tek geçersiz yanıtı: muhakeme metni JSON anahtarı olarak yazılmış; yeniden istendi ve sayıldı.
+- DeepSeek'te 9 kez HTTP 429 (sağlayıcı hız sınırı); ücretsiz, yeniden denendi; özetteki `n_transport` bunları saymıyor. Mistral'da 2 ücretsiz bağlantı hatası.
+- GPT'nin 6 gerekçesinin sonunda artık karakter (`}` ya da `】【。}`); karar alanını etkilemiyor.
+
+### F.3 Okuma (§4.2)
+
+**Yöntem:** 1 800 gerekçenin hepsi; DeepSeek ve Mistral'da §4.2 örneklemi (kart başına grup 1/5/10. tur ajan 1, izole X = 10, ajan 1 kural anlama: model başına 60) ve DeepSeek'in 8 `reasoning_capped` kaydı; GPT'de muhakeme dönen 472 kaydın hepsi. Okuma, Claude alt ajanlarıyla yapıldı; aktarılan 12 alıntı ham dosyada birebir doğrulandı. Ayrıca 1 800 kaydın tamamında anahtar kelime sayımı yapıldı.
+
+**Mekanik kusur bulunmadı:** kural anlama 180/180; şema geri yazma yok (Mistral dahil); oyuncu numarası karışıklığı yok; gerekçe ile sayı arasında çelişki yok; geçmiş doğru okunuyor (tek tük tur sayımı kaymaları).
+
+**Gözlemler (kusur değil; sınırlılık ve ortak değişken olarak kayıt):**
+1. **Mistral'a sağlayıcı tarafından eklenen sistem metni.** Mistral muhakemelerinde istemde olmayan "Always respond with valid JSON. Ensure the output is strictly formatted as JSON, with no additional text, explanations, or markdown formatting." cümlesi 68/600 kayıtta, "You are Mistral Large 4" 10/600 kayıtta alıntılanıyor (0a'da 19/120, mini-pilotta 59/380). Kodumuzda yok (`_kod_d585830…` tarandı). Büyük olasılıkla sağlayıcı ekliyor (JSON modu). Bütün Mistral hücrelerinde aynı; kartlar arası karşılaştırmayı bozmaz. Mistral için "sistem mesajı yalnız giriş satırı + kart" varsayımı geçerli değildir; yöntem bölümüne yazılır.
+2. **İzole kol büyük ölçüde eşleme:** katkı = X olan cevaplar GPT 60/60, DeepSeek 58/60, Mistral 45/60. H4 okunurken bu dikkate alınır; soru değiştirilmez.
+3. **Olgusal kart:** DeepSeek muhakemesinde sık sık "tuhaf / alakasız" bulunuyor; "prompt injection" olgusal kartta 10/200 (mini-pilotta, farklı bir kartla — nüfus sayımı cümlesi — 34/200; karşılaştırma kaba). Mistral süreyi her şehirde "yavaş yargı / zayıf yaptırım" diye okuyor (444 gün dahil); GPT gerekçelerinde kart hiç geçmiyor. "In your country" ile şehir adı arasında 1–2 kayıtta sürtünme ("Boston is not a country").
+4. **Değer kartlarının oyuna bağlanma kolaylığı eşit değil:** Kopenhag "equal standing" doğrudan "eşit katkı" olarak okunuyor; Boston "against authority" ancak zorlamayla oyuna bağlanıyor; Atina'da "elders" düşüyor, kartta olmayan "polis / civic duty" ekleniyor; Riyad'da onur/utanç ekleniyor. Minimal kartlar da yalnız şehir adından kültür klişesi üretiyor. Değer stilinin şehir karşılaştırmaları yorumlanırken sınırlılık.
+5. **Literatür tanıma:** Herrmann / Gächter / Thöni adı DeepSeek'te 13, Mistral'da 7 muhakemede (DeepSeek bir kayıtta şehir setini Herrmann, Thöni & Gächter 2008'e bağlıyor). Bu adlar E2a sözlüğünde zaten var; Aşama 1'de sayılır.
+6. **Talep / değerlendirme farkındalığı:** "kullanıcı test ediyor" Mistral 131/600, DeepSeek 32/600; "benchmark / evaluat" DeepSeek 150/600, GPT özetlerinde 118/472. Amaç cümlesi (kazancını en çoğa çıkar) istemde yok; modeller bunu sık soruyor (bilinçli tasarım, değiştirilmedi).
+7. "Group project" ifadesi Mistral'da 23/600 muhakemede ders ödevi / not çağrışımı yapıyor; bütün kartlarda aynı.
+
+### F.4 Karar: değişiklik yok
+
+- Okuyucuların 6'sı "değişiklik gerektiren kusur yok" dedi; ikisi ifade düzeyinde öneri getirdi ("In your country" yerine ülke adı, amaç cümlesi, izole soruda kendi önceki katkı). Bunlar uygulanmadı: kilitli manipülasyonu değiştirir, 0b'nin yeniden koşulmasını gerektirir ve yeni talep etkisi getirir; bulunan sürtünmeler seyrek ve bütün hücrelerde ortak.
+- Çerçeve ve kart dosyaları değişmedi (sha256 `c00db315…`, `bb2be483…`).
+
+### F.5 Model seçimi: Mistral Large 4 kalır
+
+- Kullanıcı Aşama 1'in Mistral maliyetini (0b fiyatlarıyla ~35 USD, toplamın ~%80'i) sordu. OpenRouter'da Avrupalı üretici yalnız Mistral.
+- **Mistral Small 4 (`mistralai/mistral-small-2603`) denemesi (2026-10-13, analiz verisi değil):** 0b'de Mistral Large 4'e giden 16 istemin aynısı, aynı ayarlarla (temperature ve reasoning_effort gönderilmedi, max_tokens 16000, sağlayıcı Mistral'a sabit, example_object). Sonuç: 12/16 yanıt; 4 çağrı dört denemede de HTTP 429; dönen yanıtların hiçbirinde muhakeme yok (reasoning_tokens 0); kural anlamanın 3/3'ü yanlış (q1 22 / 23 / 23, q2 −2 / 2 / −2), oysa aynı yanıtların gerekçesi 28 ve −6'yı doğru hesaplıyor. Maliyet 0,0014 USD. Log Claude'un geçici dizininde; depoya girmedi.
+- Karar (kullanıcı, 2026-10-13): **Mistral Large 4 ile devam.** G 16 / 16 / 10 değişmez.
+
+### F.6 Aşama 1 öncesi
+
+- `configs/main.json` `_notes` alanında üç eskimiş cümle güncellendi (yalnız açıklama; davranış değişmez): answer_format seçimi, prereg onayı, bütçe gerekçesindeki "henüz seçilmedi". Yeni sha256 `ab402a4c2e878b6b41c184d731e84ac8192946b2a6319b603603ac75a2089700`. 528 test OK.
+- Tahmin (0b oranlarıyla): Aşama 1 ~43 USD (dry-run 46,89; sert tavan 91); süre ~24–25 saat (0b birim süreleri × Aşama 1 birim sayısı / 3 paralel birim).
+- Aşama 1, kullanıcı "BAŞLA 1" diyene kadar başlamaz (§10.4).
