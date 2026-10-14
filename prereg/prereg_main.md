@@ -978,3 +978,10 @@ Dosyalar worktree dışında, `workspace/runs/main_s0a_example_20261011/` altın
 - `configs/main.json` `_notes` alanında üç eskimiş cümle güncellendi (yalnız açıklama; davranış değişmez): answer_format seçimi, prereg onayı, bütçe gerekçesindeki "henüz seçilmedi". Yeni sha256 `ab402a4c2e878b6b41c184d731e84ac8192946b2a6319b603603ac75a2089700`. 528 test OK.
 - Tahmin (0b oranlarıyla): Aşama 1 ~43 USD (dry-run 46,89; sert tavan 91); süre ~24–25 saat (0b birim süreleri × Aşama 1 birim sayısı / 3 paralel birim).
 - Aşama 1, kullanıcı "BAŞLA 1" diyene kadar başlamaz (§10.4).
+
+### F.7 Aşama 1 başlatma kararı (2026-10-14, kullanıcı)
+
+- Kullanıcı "BAŞLA 1, 6 paralel, ilk parça 3 saat" dedi.
+- **İşletme ayarı (tasarım değişikliği değil):** `parallel_units` config'te 3; Aşama 1, komut satırından `--parallel-units 6` ile koşar (segment kaydına girer; `--resume`'de segmentler arasında farklı olabilir). Gerekçe: süre ~24 saatten ~12 saate iner. İstemler, seed'ler ve birim sırası paralellikten bağımsızdır; risk yalnız sağlayıcı hız sınırı (HTTP 429 dört denemede de dönerse koşu durur ve `--resume` ile sürer).
+- **Parçalı koşu:** ilk parça ~3 saat sonra `runctl stop` ile güvenli durdurulur; kalan parçalar aynı kod kopyası (`_kod_d68be55…`) ve aynı run adıyla `--resume` ile sürer. Parçalar arası ara 1–2 günü geçmez (Mistral sürüm kilidi).
+- OpenRouter API anahtarı 2026-10-14'te kullanıcı tarafından yenilendi (yeni anahtar, kullanım 0).
