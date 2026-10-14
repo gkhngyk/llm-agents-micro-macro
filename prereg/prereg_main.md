@@ -985,3 +985,11 @@ Dosyalar worktree dışında, `workspace/runs/main_s0a_example_20261011/` altın
 - **İşletme ayarı (tasarım değişikliği değil):** `parallel_units` config'te 3; Aşama 1, komut satırından `--parallel-units 6` ile koşar (segment kaydına girer; `--resume`'de segmentler arasında farklı olabilir). Gerekçe: süre ~24 saatten ~12 saate iner. İstemler, seed'ler ve birim sırası paralellikten bağımsızdır; risk yalnız sağlayıcı hız sınırı (HTTP 429 dört denemede de dönerse koşu durur ve `--resume` ile sürer).
 - **Parçalı koşu:** ilk parça ~3 saat sonra `runctl stop` ile güvenli durdurulur; kalan parçalar aynı kod kopyası (`_kod_d68be55…`) ve aynı run adıyla `--resume` ile sürer. Parçalar arası ara 1–2 günü geçmez (Mistral sürüm kilidi).
 - OpenRouter API anahtarı 2026-10-14'te kullanıcı tarafından yenilendi (yeni anahtar, kullanım 0).
+
+### F.8 `finish_reason = length` sonrası sürdürme kuralı (2026-10-14, kullanıcı onayı)
+
+- **Olay:** `main_s1_20261014` segment 0, 11:59'da başladı; 12:06'da DeepSeek'in bir çağrısı (copenhagen_factual grubu, tur 4, ajan 3) 14 673 muhakeme token'ıyla `max_tokens` 16 000'e ulaştı (`finish_reason = length`, cevap yok) ve koşu §10.2 madde 4 gereği durdu. O ana kadar 7/648 birim, 444 satır, 0,8755 USD.
+- **Sıklık:** DeepSeek'in bugüne kadarki ~2 000 yanıtında (mini-pilot 1 275, 0b 601, bu segment 152) tek `length` bu; Aşama 1'de (~8 700 DeepSeek çağrısı) birkaç tekrar beklenir. Mistral ve GPT'de görülmedi.
+- **§10.2 madde 4'e eklenen kural (önceki metin değişmez):** `finish_reason_length` ile duran Aşama 1 koşusu, aynı `_kod_<sha>` kopyası ve aynı run adıyla `--resume` ile sürdürülür; cevapsız kalan çağrı yeniden sorulur (geçersiz yanıtın yeniden istenmesiyle aynı mantık). Config ve `max_tokens` değişmez. Sürdürme izleyici betikle otomatik yapılır; başka bir durma nedeni kullanıcıya bildirilir.
+- **§7.5 madde 2'ye eklenen:** en az bir `length` olayı yaşanan grup birimleri (izole kolda yalnız o nokta) "reasoning_capped hariç" duyarlılık analizinde de çıkarılır; model başına `n_length` raporlanır.
+- Bu kural, Aşama 1'in 7 birimi dışında hiçbir veri görülmeden yazıldı; o 7 birimin satırları okunmadı ve analiz edilmedi.
