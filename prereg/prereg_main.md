@@ -1033,3 +1033,16 @@ Dosyalar worktree dışında, `workspace/runs/main_s0a_example_20261011/` altın
 - **Rapor:** model başına etiket sayıları ve ortalama Δ4, pencere 2–10 (ana) ile 2–8 yan yana; ayrıca 2–9 ve 2–5. Okuma kuralı yalnız betimsel: 2–8'de de düşüş sürüyorsa fazla çöküş son turlarla sınırlı değildir; 2–8'de kaybolursa ana H4 sonucu büyük ölçüde son tur etkisidir. Eşik konmadı.
 - **Uygulama:** ayrı betik `pgg_analysis_explore.py` (ana betik `pgg_analysis.py` değiştirilmez); pencere 2–10 ile ana H4 nokta tahminini birebir yeniden üretmesi test edilir. Yalnız ana analiz birimleri (duyarlılık türevi yok). API çağrısı yok.
 - **Sonuç (2026-10-17, keşifsel):** `results/main_s1_20261014_explore_h4.json`, sha256 `29990a814852fdfd560f9dec12ae3c63359e826b64f224283c5daaaacec0ab80`. Pencere 2–10 ana H4 tahminlerini birebir verdi (en büyük fark 0,0). Bir hücre (GPT boston_factual, 2–8: −2,05) bağımsız kodla yeniden hesaplandı ve tuttu. Holm'lu pencerelerde "aşağı" sayısı (2–10 → 2–8): DeepSeek 3 → 3, Mistral 7 → 5, GPT 3 → 0; "yukarı" hiçbir pencerede yok; negatif nokta tahmini 32 → 30 / 36. Ortalama Δ4 (2–10 → 2–8): DeepSeek −1,64 → −1,53, Mistral −1,53 → −0,80, GPT −2,17 → −1,43. 2–9 ve 2–5 pencereleri düzeltmesizdir; etiket sayıları Holm'lu pencerelerle karşılaştırılmaz.
+
+### F.13 Aşama 1 muhakeme okuması: plan (2026-10-17, okumadan önce yazıldı)
+
+- **Durum:** keşifsel ve nitel; hiçbir etiketi değiştirmez. Sonuçlar (F.11, F.12) görüldükten sonra, yorum için yapılır. Sayım değil okuma; nedensel iddia yok.
+- **Sorular:**
+  1. **Boston değer** (DeepSeek 0,15, Mistral 0,20; GPT 8,91): "personal liberty / speaking up against authority" katkı kararına nasıl bağlanıyor? GPT neden etkilenmiyor?
+  2. **Riyad değer** (DeepSeek 13,06, Mistral 14,65): "respect family elders and tribal leaders" katkıya nasıl bağlanıyor?
+  3. **Kopenhag değer** (DeepSeek 9,26 / minimal 1,62): "equal standing" nasıl okunuyor?
+  4. **Mistral Atina olgusal** (1,59; diğer olgusal hücreler 5,5–7,8): 1 711 gün nasıl okunuyor?
+  5. **GPT'de grup içinde doğan farklar** (değer: Kopenhag − Atina D(1) 1,09 → D(10) 6,88; Kopenhag − Boston 2,19 → 7,73): sonraki turlarda kart mı anılıyor, yoksa farkı geçmiş (gruptaki ilk katkılar) mi büyütüyor?
+  6. **DeepSeek'in erken çöküşü** (H4 "aşağı": copenhagen_minimal, copenhagen_factual, athens_factual; 2–8'de de): gruplar izole tepkinin öngördüğünden neden hızlı düşüyor?
+- **Örneklem:** her soru için ilgili hücrelerden önceden seçilen grup ve turlar (kural: hücrenin ilk 4 grubu, grup_id sırasıyla; turlar 1, 2, 5, 10; ajan 1; soru 5'te 5. ve 10. tur, soru 6'da tur 2–4), gerekçe + muhakeme. Ek olarak bütün satırlarda kart sözcüklerinin anılma sayımı (betimsel): liberty / authority, elder / tribal, equal standing, ancient, lawsuit / court / days.
+- **Okuma yardımı:** alt ajanlar (Claude); aktarılan alıntılar ham dosyada doğrulanır.
