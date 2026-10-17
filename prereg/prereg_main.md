@@ -1015,3 +1015,9 @@ Dosyalar worktree dışında, `workspace/runs/main_s0a_example_20261011/` altın
 - **Model başına:** geçersiz + parse_fail (karar) DeepSeek 13 + 19 (%0,37), Mistral 0, GPT 0; `n_length` DeepSeek 16; `reasoning_capped` DeepSeek 236, Mistral 1; kural anlama tam doğru DeepSeek 816/816, Mistral 528/528, GPT 811/816.
 - **İşletme notu:** iki kez (16 Ekim 17:07–17:59 ve 23:10–23:54) koşu durmuşken Mac boşta uykuya geçti ve sürdürme gecikti; izleyici bundan sonra `caffeinate -i` altında çalıştırıldı. Veriye etkisi yok.
 - Analiz, koşu tamamlandıktan sonra `pgg_analysis.py` (commit `5276e46`) ile, değiştirilmeden çalıştırıldı.
+
+### F.11 Analiz çalıştırıldı (2026-10-17)
+
+- `pgg_analysis.py` (commit `5276e46`, değiştirilmeden) koşu tamamlandıktan sonra bir kez çalıştırıldı: `results/main_s1_20261014_analysis.json`, sha256 `c44002b97984af181cf19ddbebbddec82051d298c614a0f0ac6b39fec8ae4a24` (results/ git dışında). 504 grup, 144 izole çizelge, eksik birim ve eksik hücre yok; 10 000 bootstrap.
+- Üç hücre farkı betikten bağımsız olarak ham satırlardan yeniden hesaplandı ve tuttu (DeepSeek değer Boston − Riyad −12,92; Mistral olgusal Kopenhag − Atina 5,74; GPT değer Kopenhag − Boston 2,38).
+- **Duyarlılık notu:** "reasoning_capped / length hariç" analizinde DeepSeek'in 192 grup biriminden 88'i çıkıyor; `athens_value` hücresi 16 → 0 grup (o hücreyi kullanan testler "belirlenemedi"). Bu duyarlılık analizi DeepSeek için bilgi vermez; sınırlılık olarak raporlanır. Kural anlama duyarlılığında 0, yeniden kullanılan cevap duyarlılığında 1 etiket değişti.
