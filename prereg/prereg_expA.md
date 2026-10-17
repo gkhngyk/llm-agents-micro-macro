@@ -208,3 +208,11 @@ Kesin değerler A0 dry-run'ından gelir; tavanlar onlara göre konur.
 - Bütçe tavanları (A0 dry-run, §6 kuralı; tahmin pgg_cost mini-pilot kalibrasyonu):
   - **A1 duman** (`configs/expA_smoke.json`, 1 056 çağrı, ortalama 2,79 / p95 5,19 USD): sert tavan 6; alt tavanlar DeepSeek 1 / Mistral 5 / GPT 0,1 (model p95: 0,83 / 4,27 / 0,08); kapı 4.
   - **A2 ana** (`configs/expA_main.json`, 11 264 çağrı, ortalama 23,37 / p95 45,16 USD): sert tavan 46; alt tavanlar DeepSeek 11 / Mistral 35 / GPT 1 (model p95: 10,00 / 34,19 / 0,97); kapı 26.
+
+### F-A.3 A1 duman testi sonucu (2026-10-17) — değişiklik yok
+
+- **Koşu:** `expA_smoke_20261017`, kod `6ba63c3` (temiz), 19:48–~21:00; 24/24 grup, 1 056 satır (sonuç dosyası sha256 `909f82e21ec1554ba82105b2a955537dc13cb1a681f3412c89239dabe36b726c`), 2 segment (1 `length` sürdürmesi, F.8), `stop_reason` yok. Maliyet 2,8263 USD (DeepSeek 0,39 / Mistral 2,39 / GPT 0,05; tahmin 2,79). Superseded / truncated / discarded 0. Model sürümleri Aşama 1 ile aynı.
+- **Tesisat:** geçersiz + parse_fail DeepSeek 2 + 2, Mistral 0, GPT 0; `length` DeepSeek 1; kural anlama iki kolda ve üç modelde 16/16.
+- **Okuma (T kolu):** geri bildirim doğru anlaşılıyor; ortalamayı toplam sanan kayıt yok (sözcük taramasında çıkan 2 aday, DeepSeek'in ötekilerin kuralını çözmeye çalıştığı hesaplar). Modeller tek tek katkıları bilmediklerini açıkça yazıyor (T kolunda tur 2–10 kararlarında DeepSeek 46/144, Mistral 33/144; B kolunda 4 ve 2) ve ötekilerin de yalnız ortalama gördüğünü hesaba katıyor. GPT ortalamayı izliyor (11,67 → 12; 8,33 → 8).
+- **Öngörülen sınırlılık 3 gerçekleşti:** 0 / 10 / 20 dışı katkı B kolunda 0 / 480, T kolunda DeepSeek 7 / 160, Mistral 2 / 160, GPT 36 / 160. Manipülasyonun parçası sayılır; tasarım değişmez, A2'de betimsel olarak raporlanır.
+- **Karar:** tasarım kusuru yok; A2 aynı kod (`_kod_6ba63c3…`) ve `configs/expA_main.json` ile, kullanıcı "BAŞLA A2" deyince. A1 verisi analize girmez.
