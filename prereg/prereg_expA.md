@@ -1,4 +1,4 @@
-TASLAK — KULLANICI ONAYI BEKLİYOR
+ONAYLANDI — 2026-10-17 (kullanıcı)
 
 > Bu belge onaylanmadan hiçbir ücretli çağrı yapılmaz. Her aşama (A1 duman testi, A2 ana koşu) kullanıcı o aşama için "BAŞLA" deyince başlar.
 
@@ -180,3 +180,12 @@ Kesin değerler A0 dry-run'ından gelir; tavanlar onlara göre konur.
 3. **Paralellik:** öneri 3 (ana deneyde 6 paralelde DeepSeek sağlayıcısı sık 429 verdi).
 4. **Eşikler:** A-H1 için 2 puan (ana deneyle aynı), A-H2 için 10 yüzde puanı. Onay ya da değişiklik.
 5. **Onay:** bu taslak, yukarıdaki varsayılanlarla.
+
+## Onay ve kullanıcı kararları (2026-10-17)
+
+- Kullanıcı: "onaylıyorum, mistral dahil, A0'a geç". Belge §11'deki varsayılanlarla onaylandı (ilk satırdaki durum TASLAK → ONAYLANDI olarak değiştirildi; metnin geri kalanı aynen).
+  1. **Mistral dahil.**
+  2. **G:** DeepSeek 12, GPT 12, Mistral 8 (hücre = model × kart × kol).
+  3. **Paralellik:** 3.
+  4. **Eşikler:** A-H1 2 puan; A-H2 10 yüzde puanı.
+- Bütçe tavanları A0 dry-run'ından sonra §6 kuralıyla konur ve buraya yazılır. A1 ve A2, kullanıcı o aşama için "BAŞLA" deyince başlar.
