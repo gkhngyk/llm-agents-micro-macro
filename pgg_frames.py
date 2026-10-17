@@ -91,6 +91,12 @@ def fmt_num(x: float) -> str:
     return f"{round(x, 4):.4f}".rstrip("0").rstrip(".")
 
 
+def fmt_mean(x: float) -> str:
+    """Others' average in an aggregate-feedback history (prereg_expA §1.3): two decimals,
+    trailing zeros dropped. 16.666.. -> "16.67", 10.0 -> "10", 6.5 -> "6.5"."""
+    return f"{round(x, 2):.2f}".rstrip("0").rstrip(".")
+
+
 def _project_share(params, contributions) -> float:
     """mpcr * sum(c); the same as pgg_game.project_share (a test checks it)."""
     return round(params.mpcr * sum(contributions), 9)
@@ -310,8 +316,11 @@ def _check_history(c: _Checker, history) -> None:
     if "punish_given_none" in h:
         c.template(h["punish_given_none"], "history.punish_given_none")
     if "contributions" in h:
+        # prereg_expA: an aggregate-feedback frame shows own_contribution and others_mean
+        # instead of the per-player list
         c.template(h["contributions"], "history.contributions",
-                   {"contributions_list", "group_total"}, [{"contributions_list"}])
+                   {"contributions_list", "group_total", "own_contribution", "others_mean"},
+                   [{"contributions_list", "others_mean"}])
     if "round" in h:
         c.template_lines(h["round"], "history.round",
                          {"round", "contributions", "project_share", "round_earnings"},
@@ -517,8 +526,10 @@ class Frame:
         h = self.data["history"]
         listing = self._listing(params, enumerate(contributions), me,
                                 self._fill(h["list_separator"], params))
+        others = (sum(contributions) - contributions[me]) / (len(contributions) - 1)
         return self._fill(h["contributions"], params, contributions_list=listing,
-                          group_total=f"{sum(contributions)}")
+                          group_total=f"{sum(contributions)}",
+                          own_contribution=f"{contributions[me]}", others_mean=fmt_mean(others))
 
     def history_text(self, params, condition: str, history, me: int) -> str:
         h = self.data["history"]

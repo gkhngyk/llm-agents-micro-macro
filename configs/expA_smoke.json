@@ -1,0 +1,101 @@
+{
+  "_notes": "Stage A1 smoke test: 1 group per cell (model x card x arm). Experiment A (prereg/prereg_expA.md, approved 2026-10-17, before any data): does seeing every player's contribution (frame abstract_v4, arm B, the main experiment's prompt) instead of only the others' average (frame abstract_v4_agg, arm T) speed up the collapse of cooperation? 4 minimal cards (cards/expA_cards_v1.json = the 4 minimal cards of main_cards_v1, byte-identical texts), group arm only, condition N; models, providers and request settings as configs/main.json. Budget caps set from the A0 dry run (prereg_expA §6).",
+  "prereg_approved": true,
+  "stage": "0b",
+  "run": "expA_smoke_{run_date}",
+  "cards": "cards/expA_cards_v1.json",
+  "cards_sha256": "0ed7a45d370242856ff7ce3eea2a2d34277ca2e39952a23b6ad0ad1c45d95c2a",
+  "cities": [
+    "Boston",
+    "Copenhagen",
+    "Athens",
+    "Riyadh"
+  ],
+  "models": [
+    "deepseek/deepseek-v4.1-flash",
+    "mistralai/mistral-large-4-0",
+    "openai/gpt-6-luna"
+  ],
+  "conditions": [
+    "N"
+  ],
+  "arms": [
+    "group"
+  ],
+  "groups_per_cell": 1,
+  "groups_per_cell_by_model": {
+    "deepseek": 1,
+    "mistral": 1,
+    "gpt": 1
+  },
+  "frames": {
+    "abstract_v4": [
+      "deepseek",
+      "mistral",
+      "gpt"
+    ],
+    "abstract_v4_agg": [
+      "deepseek",
+      "mistral",
+      "gpt"
+    ]
+  },
+  "frame_files": {
+    "abstract_v4": {
+      "path": "frames/abstract_v4.json",
+      "sha256": "c00db315d9c3141b78b04de5ece650e4b922db907cb90ae124666c439633a9f4"
+    },
+    "abstract_v4_agg": {
+      "path": "frames/abstract_v4_agg.json",
+      "sha256": "f7ae414e8be3ba6dc2e8340439f19a143c600b9a394e83b9ddf8ffa4fc6bc4f4"
+    }
+  },
+  "comprehension": true,
+  "rationale": true,
+  "answer_format": "example_object",
+  "max_tokens": 16000,
+  "request_deadline_s": 900,
+  "stall_timeout_s": 1800,
+  "providers": {
+    "deepseek": {
+      "slug": "deepinfra/fp8",
+      "name": "DeepInfra",
+      "quantizations": [
+        "fp8"
+      ]
+    },
+    "mistral": {
+      "slug": "mistral",
+      "name": "Mistral"
+    },
+    "gpt": {
+      "slug": "openai",
+      "name": "OpenAI"
+    }
+  },
+  "runs_dir": "/Users/karbon/Desktop/Veri Bilimi/complexity-prj/orc/data/projects/PublicGoods/workspace/runs",
+  "seed_namespace": "pgg-expA-smoke",
+  "max_invalid": 3,
+  "budget_usd": 6,
+  "model_budget_usd": {
+    "deepseek": 1,
+    "mistral": 5,
+    "gpt": 0.1
+  },
+  "expected_cost_gate_usd": 4,
+  "cost_calibration": {
+    "path": "configs/cost_calibration_minipilot.json",
+    "sha256": "d26eb4107aa7ae0ec828bffb912dc5e59d23933347cdf3a8f737858b5ec040c8"
+  },
+  "invalid_rate_cap": 0.05,
+  "stop_on_length": true,
+  "check_snapshot": true,
+  "snapshot_version_models": [
+    "mistral"
+  ],
+  "reasoning_cap_rule": {
+    "mistral": "max_reasoning_completion"
+  },
+  "workers": 4,
+  "parallel_units": 3
+}

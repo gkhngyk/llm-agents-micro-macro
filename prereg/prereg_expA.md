@@ -189,3 +189,22 @@ Kesin değerler A0 dry-run'ından gelir; tavanlar onlara göre konur.
   3. **Paralellik:** 3.
   4. **Eşikler:** A-H1 2 puan; A-H2 10 yüzde puanı.
 - Bütçe tavanları A0 dry-run'ından sonra §6 kuralıyla konur ve buraya yazılır. A1 ve A2, kullanıcı o aşama için "BAŞLA" deyince başlar.
+
+## Tarihli düzeltmeler
+
+### F-A.1 (2026-10-17, A0 sırasında, veriden önce)
+
+- §8 madde 4 "Kural anlama istemleri iki kolda aynı" yanlıştı: kural anlama istemi kural metnini tekrarlar, bu yüzden iki kol **yalnız §1.3 (a) maddesinde** ayrışır (soru metinleri ve cevap anahtarı aynı). Test buna göre yazıldı (`tests/test_expA_prompts.py`). Tasarım değişmedi.
+
+### F-A.2 (2026-10-17, A0 sırasında, veriden önce) — analiz betiği ve uygulama ayrıntıları
+
+- Betik `pgg_analysis_expA.py`, testleri `tests/test_pgg_analysis_expA.py` (9 test, sentetik veri: iki yön ve fark yok; 1. ve 10. turun A-H1'e girmemesi; denge bayrağı; görünen bedavacı senaryosunda A-H2 "mekanizma destekleniyor"; olay tanımı; olay yoksa "belirlenemedi"; duyarlılık dışlaması; seed). İstem testleri `tests/test_expA_prompts.py` (8 test; B kolu Aşama 1'de gönderilen 60 istemle bayt bayt aynı).
+- **Sabitlenen ayrıntılar:**
+  1. "CI 0'ı dışlıyor" koşulu, ana deneyle tutarlı olarak bootstrap p < 0,05 ile uygulanır (model ve hipotez başına tek test, düzeltme yok).
+  2. **A-H2:** kart başına olay sayısı az olacağı için en az bir olay kararı olan gruplar kol içinde 4 kart üzerinden **havuzlanır**; bootstrap bu grupları kol içinde iadeli yeniden örnekler (kart tabakası yok). Bir kolda olaylı grup yoksa etiket "belirlenemedi".
+  3. Denge kontrolü (1. tur T − B) A-H1 ile aynı tabakalı bootstrap'le hesaplanır; |fark| > 2 ise bayrak.
+  4. Duyarlılık analizlerinde A-H1 ve A-H2 etiketleri yeniden hesaplanır; değişen etiketler listelenir.
+  5. Ana deneyle tekrar karşılaştırması (`--stage1-run`): B kolunun kart başına r2–9 ortalaması ile Aşama 1 minimal hücreleri; |fark| > 2 bayrak.
+- Bütçe tavanları (A0 dry-run, §6 kuralı; tahmin pgg_cost mini-pilot kalibrasyonu):
+  - **A1 duman** (`configs/expA_smoke.json`, 1 056 çağrı, ortalama 2,79 / p95 5,19 USD): sert tavan 6; alt tavanlar DeepSeek 1 / Mistral 5 / GPT 0,1 (model p95: 0,83 / 4,27 / 0,08); kapı 4.
+  - **A2 ana** (`configs/expA_main.json`, 11 264 çağrı, ortalama 23,37 / p95 45,16 USD): sert tavan 46; alt tavanlar DeepSeek 11 / Mistral 35 / GPT 1 (model p95: 10,00 / 34,19 / 0,97); kapı 26.
