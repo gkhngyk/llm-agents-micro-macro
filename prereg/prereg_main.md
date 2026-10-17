@@ -1021,3 +1021,14 @@ Dosyalar worktree dışında, `workspace/runs/main_s0a_example_20261011/` altın
 - `pgg_analysis.py` (commit `5276e46`, değiştirilmeden) koşu tamamlandıktan sonra bir kez çalıştırıldı: `results/main_s1_20261014_analysis.json`, sha256 `c44002b97984af181cf19ddbebbddec82051d298c614a0f0ac6b39fec8ae4a24` (results/ git dışında). 504 grup, 144 izole çizelge, eksik birim ve eksik hücre yok; 10 000 bootstrap.
 - Üç hücre farkı betikten bağımsız olarak ham satırlardan yeniden hesaplandı ve tuttu (DeepSeek değer Boston − Riyad −12,92; Mistral olgusal Kopenhag − Atina 5,74; GPT değer Kopenhag − Boston 2,38).
 - **Duyarlılık notu:** "reasoning_capped / length hariç" analizinde DeepSeek'in 192 grup biriminden 88'i çıkıyor; `athens_value` hücresi 16 → 0 grup (o hücreyi kullanan testler "belirlenemedi"). Bu duyarlılık analizi DeepSeek için bilgi vermez; sınırlılık olarak raporlanır. Kural anlama duyarlılığında 0, yeniden kullanılan cevap duyarlılığında 1 etiket değişti.
+
+### F.12 Keşifsel analiz: H4'te son tur etkisini ayırmak (2026-10-17, hesaplanmadan önce yazıldı)
+
+- **Durum:** **keşifsel (exploratory), önceden kayıtlı değil.** H4'ün ana sonuçları (F.11) görüldükten sonra yazıldı. H4'ün ana etiketlerini değiştirmez; raporda "keşifsel" diye ayrı verilir.
+- **Gerekçe:** izole tepki fonksiyonu f "round 5 of 10" bağlamında ölçüldü, simülasyon tur 2–10'a uygulanıyor ve son tur etkisini içermiyor (§6.4 "Bilinen sınır"). Ana analizde Δ4 36 hücrenin 32'sinde negatif (13 "aşağı", 0 "yukarı"). Bu düşüşün ne kadarının son turlardan geldiği bilinmiyor.
+- **Ölçü:** simülasyon §6.4 ile aynı (doğrusal enterpolasyon, gözlenen 1. tur başlangıcı, belirlenimci güncelleme, tur 2–10 simüle edilir); yalnız karşılaştırma penceresi değişir: Δ4[a–b] = hücre içinde (O_g[a–b] − S_g[a–b])'nin grup ortalaması; O ve S, a…b turlarının 4 ajan ortalaması.
+  - **Birincil keşifsel pencere: tur 2–8.**
+  - İkincil (betimsel): tur 2–9 ve tur 2–5 (f'nin ölçüldüğü tura kadar).
+- **İstatistik:** §7.1–§7.3 ile aynı: iki düzeyli bootstrap (gruplar ve her izole noktadaki cevaplar), 10 000 tekrar, yüzdelik %95 CI, §7.3 p tanımı, birincil pencerede model başına 12 kartlık Holm ailesi, etiketler yukarı / aşağı / uyumlu (+ eşdeğerlik alt notu). Seed: `stable_seed("pgg-main-s1-analysis", "H4x", model, kart, pencere)`. İkincil pencerelerde düzeltme yok.
+- **Rapor:** model başına etiket sayıları ve ortalama Δ4, pencere 2–10 (ana) ile 2–8 yan yana; ayrıca 2–9 ve 2–5. Okuma kuralı yalnız betimsel: 2–8'de de düşüş sürüyorsa fazla çöküş son turlarla sınırlı değildir; 2–8'de kaybolursa ana H4 sonucu büyük ölçüde son tur etkisidir. Eşik konmadı.
+- **Uygulama:** ayrı betik `pgg_analysis_explore.py` (ana betik `pgg_analysis.py` değiştirilmez); pencere 2–10 ile ana H4 nokta tahminini birebir yeniden üretmesi test edilir. Yalnız ana analiz birimleri (duyarlılık türevi yok). API çağrısı yok.
