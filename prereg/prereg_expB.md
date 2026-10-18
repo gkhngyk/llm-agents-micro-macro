@@ -156,3 +156,10 @@ Kod yazılmadı, API çağrısı yapılmadı; kurallar henüz dondurulmadı, tah
 - Okuma: R3-kalan oyun ortasını 13. tura kadar sürdürür, düşüşü 14–15. turlara koyar; R3-mutlak düşüşü 9–10. turlara koyar. B-H2 (tur 9–13) bu iki öngörüyü ayırır.
 - **Bütçe tavanları** (B0 dry-run, §6 kuralı): **B1 duman** (`configs/expB_smoke.json`, 768 çağrı, ortalama 2,08 / p95 3,87 USD): sert 4; alt tavanlar DeepSeek 1 / Mistral 4 / GPT 0,1; kapı 3. **B2 ana** (`configs/expB_main.json`, 11 264 çağrı, ortalama 25,74 / p95 49,24 USD): sert 50; alt tavanlar DeepSeek 11 / Mistral 39 / GPT 2 (model p95: 10,02 / 38,20 / 1,02); kapı 29.
 - **Kartlar:** B2 `cards/expB_cards_v1.json` (main_cards_v1'in 4 minimal + 4 değer kartı, aynı metinler); B1 `cards/expA_cards_v1.json` (4 minimal).
+
+### F-B.2 B1 duman testi sonucu (2026-10-18) — değişiklik yok
+
+- **Koşu:** `expB_smoke_20261018`, kod `dc70579` (temiz), 14:05–~15:05; 12/12 grup, 768 satır (sha256 `f5f2b76874fa1dd9c9be1811abb88fa0d81d2e91a9f5fb63bbf69a48e375f21b`), tek segment, `stop_reason` yok. Maliyet 1,9965 USD (DeepSeek 0,26 / Mistral 1,69 / GPT 0,04; tahmin 2,08). Superseded / truncated / discarded 0. Model sürümleri Aşama 1 ile aynı.
+- **Tesisat:** geçersiz + parse_fail 0 (üç model), `length` 0; kural anlama 16/16 (üç model). DeepSeek `reasoning_capped` tur 1–10'da 16/160, tur 11–15'te 0/80: uzun geçmiş muhakemenin sınıra çarpmasını artırmıyor.
+- **Okuma (yalnız istemin doğru okunması):** oyunu 10 turluk sanan kayıt yok. Sıkı bir kalıpla çıkan adaylar (DeepSeek 8, Mistral 18, GPT 9 / 240) okununca doğru ifadeler: 5. turda "10 tur kaldı" (15 turda doğru), literatürdeki "10 turluk oyun", GPT özetlerinde "10'luk geçmiş". Turlara göre katkı değerleri bu okumada **incelenmedi** (B-H2'nin sonucuna bakmamak için).
+- **Karar:** tasarım kusuru yok; B2 aynı kod (`_kod_dc70579…`) ve `configs/expB_main.json` ile, kullanıcı "BAŞLA B2" deyince. B1 verisi analize girmez.
