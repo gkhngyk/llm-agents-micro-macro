@@ -138,3 +138,21 @@ Kod yazılmadı, API çağrısı yapılmadı; kurallar henüz dondurulmadı, tah
   3. **B1 duman testi:** evet; 4 minimal kart × 3 model × 1 grup.
   4. **Eşikler:** ±2 puan (birincil), ±1 ek not.
 - Bütçe tavanları, dondurulan kural tablosunun sha256'sı ve koşulsuz tahmin tablosu B0'da, ücretli çağrıdan önce buraya yazılır.
+
+### F-B.1 Dondurulan kurallar ve koşudan önce yazılan tahmin (2026-10-18, ücretli çağrıdan önce)
+
+- **Dondurulan kural tablosu:** `data/expB/frozen_rules_v1.json`, sha256 `62b2bae7bcf6560f022181ff5b0813fec4747f2b8e3e13e5dd1301931fbd93d1`. Kaynak: `main_s1_20261014` sonuç dosyası (sha256 `3a8d22e9…f930`, F.10 ile aynı); karar sayıları DeepSeek 6 912, Mistral 4 320, GPT 6 912 (grup × 36); izole tepkiler (R0) ve Aşama 1'in 1. tur vektörleri dosyada.
+- **Koşulsuz tahmin:** `data/expB/forecast_v1.json`, sha256 `ef76791f0c6e6051fa0a02807c8df0367957d5e2f700f027f9130afc884904de` (S = 2 000; 1. tur Aşama 1'in aynı hücresinden örneklendi). Hücre başına yörüngeler dosyada; aşağıda 8 kartın ortalaması (tur 1–15):
+
+| model | varyant | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| deepseek | R3-kalan | 6,4 | 4,1 | 3,8 | 3,6 | 3,5 | 3,5 | 3,4 | 3,4 | 3,4 | 3,3 | 3,3 | 3,3 | 3,3 | 3,1 | 2,1 |
+| deepseek | R3-mutlak | 6,4 | 4,1 | 3,8 | 3,6 | 3,5 | 3,4 | 3,4 | 3,4 | 3,1 | 2,1 | 1,2 | 0,8 | 0,5 | 0,4 | 0,3 |
+| mistral | R3-kalan | 9,6 | 9,0 | 8,7 | 8,4 | 8,1 | 7,9 | 7,7 | 7,5 | 7,3 | 7,1 | 7,0 | 6,8 | 6,7 | 5,9 | 4,0 |
+| mistral | R3-mutlak | 9,6 | 9,0 | 8,7 | 8,4 | 8,1 | 7,9 | 7,7 | 7,5 | 6,4 | 4,1 | 2,8 | 2,3 | 2,1 | 2,0 | 1,9 |
+| gpt | R3-kalan | 9,8 | 9,1 | 9,1 | 9,0 | 9,0 | 9,0 | 9,0 | 9,0 | 8,9 | 8,9 | 8,9 | 8,9 | 8,9 | 8,8 | 3,8 |
+| gpt | R3-mutlak | 9,8 | 9,1 | 9,1 | 9,0 | 9,0 | 9,0 | 9,0 | 9,0 | 8,9 | 3,8 | 2,0 | 1,2 | 0,9 | 0,6 | 0,5 |
+
+- Okuma: R3-kalan oyun ortasını 13. tura kadar sürdürür, düşüşü 14–15. turlara koyar; R3-mutlak düşüşü 9–10. turlara koyar. B-H2 (tur 9–13) bu iki öngörüyü ayırır.
+- **Bütçe tavanları** (B0 dry-run, §6 kuralı): **B1 duman** (`configs/expB_smoke.json`, 768 çağrı, ortalama 2,08 / p95 3,87 USD): sert 4; alt tavanlar DeepSeek 1 / Mistral 4 / GPT 0,1; kapı 3. **B2 ana** (`configs/expB_main.json`, 11 264 çağrı, ortalama 25,74 / p95 49,24 USD): sert 50; alt tavanlar DeepSeek 11 / Mistral 39 / GPT 2 (model p95: 10,02 / 38,20 / 1,02); kapı 29.
+- **Kartlar:** B2 `cards/expB_cards_v1.json` (main_cards_v1'in 4 minimal + 4 değer kartı, aynı metinler); B1 `cards/expA_cards_v1.json` (4 minimal).

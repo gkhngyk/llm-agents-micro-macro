@@ -1,0 +1,95 @@
+{
+  "_notes": "Stage B1 smoke test: 4 minimal cards x 3 models x 1 group. Experiment B (prereg/prereg_expB.md, approved 2026-10-18, before any data): a rule learned in stage 1 and frozen (data/expB/frozen_rules_v1.json) predicts a 15-round game. Prompt as stage 1 (frame abstract_v4) except the number of rounds (params.rounds 15); group arm only; models, providers and request settings as configs/main.json. Budget caps from the B0 dry run (prereg_expB §6).",
+  "prereg_approved": true,
+  "stage": "0b",
+  "run": "expB_smoke_{run_date}",
+  "cards": "cards/expA_cards_v1.json",
+  "cards_sha256": "0ed7a45d370242856ff7ce3eea2a2d34277ca2e39952a23b6ad0ad1c45d95c2a",
+  "cities": [
+    "Boston",
+    "Copenhagen",
+    "Athens",
+    "Riyadh"
+  ],
+  "models": [
+    "deepseek/deepseek-v4.1-flash",
+    "mistralai/mistral-large-4-0",
+    "openai/gpt-6-luna"
+  ],
+  "conditions": [
+    "N"
+  ],
+  "arms": [
+    "group"
+  ],
+  "groups_per_cell": 1,
+  "groups_per_cell_by_model": {
+    "deepseek": 1,
+    "mistral": 1,
+    "gpt": 1
+  },
+  "frames": {
+    "abstract_v4": [
+      "deepseek",
+      "mistral",
+      "gpt"
+    ]
+  },
+  "frame_files": {
+    "abstract_v4": {
+      "path": "frames/abstract_v4.json",
+      "sha256": "c00db315d9c3141b78b04de5ece650e4b922db907cb90ae124666c439633a9f4"
+    }
+  },
+  "comprehension": true,
+  "rationale": true,
+  "answer_format": "example_object",
+  "max_tokens": 16000,
+  "request_deadline_s": 900,
+  "stall_timeout_s": 1800,
+  "providers": {
+    "deepseek": {
+      "slug": "deepinfra/fp8",
+      "name": "DeepInfra",
+      "quantizations": [
+        "fp8"
+      ]
+    },
+    "mistral": {
+      "slug": "mistral",
+      "name": "Mistral"
+    },
+    "gpt": {
+      "slug": "openai",
+      "name": "OpenAI"
+    }
+  },
+  "runs_dir": "/Users/karbon/Desktop/Veri Bilimi/complexity-prj/orc/data/projects/PublicGoods/workspace/runs",
+  "seed_namespace": "pgg-expB-smoke",
+  "max_invalid": 3,
+  "budget_usd": 4,
+  "model_budget_usd": {
+    "deepseek": 1,
+    "mistral": 4,
+    "gpt": 0.1
+  },
+  "expected_cost_gate_usd": 3,
+  "cost_calibration": {
+    "path": "configs/cost_calibration_minipilot.json",
+    "sha256": "d26eb4107aa7ae0ec828bffb912dc5e59d23933347cdf3a8f737858b5ec040c8"
+  },
+  "invalid_rate_cap": 0.05,
+  "stop_on_length": true,
+  "check_snapshot": true,
+  "snapshot_version_models": [
+    "mistral"
+  ],
+  "reasoning_cap_rule": {
+    "mistral": "max_reasoning_completion"
+  },
+  "workers": 4,
+  "parallel_units": 3,
+  "params": {
+    "rounds": 15
+  }
+}
