@@ -1,4 +1,4 @@
-TASLAK — KULLANICI ONAYI BEKLİYOR
+ONAYLANDI — 2026-10-18 (kullanıcı)
 
 > Bu belge onaylanmadan hiçbir ücretli çağrı yapılmaz. Her aşama (B1 duman, B2 ana koşu) kullanıcı o aşama için "BAŞLA" deyince başlar.
 
@@ -129,3 +129,12 @@ Kod yazılmadı, API çağrısı yapılmadı; kurallar henüz dondurulmadı, tah
 3. **B1 duman testi** yapılsın mı (öneri: evet, yalnız minimal kartlarla, ~2 USD)?
 4. **Eşikler:** B-H1 ve B-H2 için ±2 puan (çalışmanın eşiği) + ±1 ek not.
 5. **Onay.**
+
+## Onay ve kullanıcı kararları (2026-10-18)
+
+- Kullanıcı: "onaylıyorum, önerilerinle devam et, B0'a geç". İlk satırdaki durum TASLAK → ONAYLANDI olarak değiştirildi; metnin geri kalanı aynen.
+  1. **Kartlar:** 4 minimal + 4 değer.
+  2. **G:** DeepSeek 8, GPT 8, Mistral 6 (Mistral dahil).
+  3. **B1 duman testi:** evet; 4 minimal kart × 3 model × 1 grup.
+  4. **Eşikler:** ±2 puan (birincil), ±1 ek not.
+- Bütçe tavanları, dondurulan kural tablosunun sha256'sı ve koşulsuz tahmin tablosu B0'da, ücretli çağrıdan önce buraya yazılır.
