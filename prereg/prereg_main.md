@@ -1053,3 +1053,24 @@ Dosyalar worktree dışında, `workspace/runs/main_s0a_example_20261011/` altın
   4. **Mistral Atina olgusal:** 1 711 gün "kurumlar işlemiyor / güven yok" ve kartta olmayan Yunan klişeleri (12/16); 444 gün Boston'da 4/4 "süs metni". Fark çöküşün zamanında: tur ortalaması Atina 6,1 → tur 6'da 0; Boston 9. tura kadar ~9.
   5. **DeepSeek ve Mistral erken çöküşü (H4 "aşağı"):** misilleme değil; "bir bedavacı varken işbirliği kazandırmaz" ve işbirlikçileri sömürme hesabı. Betimsel kontrol (tur 2–9, ötekilerin önceki ortalaması ≥ 5): ötekilerde 0 veren varken ajan 0 veriyor DeepSeek %75, Mistral %64, GPT %25; 0 veren yokken %4 / %4 / %1. İzole soru yalnız ortalama gösterdiği için bu kanal simülasyonda yok.
   6. **Ortak:** talep / test farkındalığı yaygın (kart "araştırmacının ipucu"); bütün katkıların %96'sı tam 0, 10 ya da 20 (0: %46,5, 10: %45,0, 20: %4,4), yani simülasyonun sürekli değerleriyle karşılaştırmada kesiklilik bir sınırlılık.
+
+### F.14 Keşifsel analiz: mikro kuralı grup verisinden öğrenmek (2026-10-18, hesaplanmadan önce yazıldı)
+
+- **Durum:** keşifsel, önceden kayıtlı değil; H4 (F.11), F.12, F.13 ve Deney A (prereg_expA F-A.4) sonuçları görüldükten sonra yazıldı. Hiçbir ana etiketi değiştirmez.
+- **Soru:** H4'teki boşluk (gruplar izole kuraldan simüle edilen yörüngeden daha düşük) (a) etkileşimin kendisinden mi, yoksa (b) kuralın yanlış bağlamda (izole, "round 5 of 10") ölçülmesinden mi geliyor? Kural **grup verisinden** öğrenilip simülasyon tekrarlanırsa boşluk kapanıyor mu?
+- **Kural modelleri** (hepsi model × kart hücresi içinde, ampirik koşullu dağılım; simülasyon olasılıklı: her ajan, her turda, eğitim verisinde aynı durumdaki gerçek kararlardan birini çeker; böylece 0 / 10 / 20 kesikliliği korunur):
+  - **R0:** H4'ün kendisi (izole f, doğrusal enterpolasyon, belirlenimci). Karşılaştırma tabanı.
+  - **R1:** durum = (kendi önceki katkı dilimi, ötekilerin önceki ortalaması dilimi).
+  - **R2:** R1 + "ötekilerden biri önceki turda 0 verdi mi".
+  - **R3:** R2 + tur dilimi (2–8, 9, 10; son tur etkisi).
+  - Dilimler: kendi önceki katkı {0, 1–9, 10, 11–19, 20}; ötekilerin ortalaması {0, (0, 5), [5, 10), 10, (10, 15), [15, 20]}.
+  - **Seyrek durum için geri çekilme sırası:** hücre içi tam durum → aynı modelin bütün kartları, tam durum → hücre içi, en ince özellik düşürülmüş (R3'te tur, R2'de sıfır göstergesi, R1'de kendi dilimi) → … → hücre içi bütün kararlar. Geri çekilme oranları raporlanır.
+- **Değerlendirme 1 — Aşama 1, bir-grup-dışarıda çapraz doğrulama:** her hücrede her grup sırayla dışarıda bırakılır; kural kalan gruplardan öğrenilir; dışarıdaki grup gözlenen 1. turundan başlatılıp S = 200 kez simüle edilir; S_g = simülasyonların ortalaması. Ölçü Δ_R = hücre içinde (O_g − S_g) ortalaması (H4 ile aynı tanım), pencere tur 2–10 (birincil, H4 ile karşılaştırılabilir) ve tur 2–8. Ayrıca tur başına grup ortalaması yörüngelerinin RMSE'si.
+- **Değerlendirme 2 — bağımsız veri:** kurallar Aşama 1'in minimal hücrelerinin bütün gruplarından öğrenilir; Deney A'nın **B kolu** (aynı istem, yeni koşu; DeepSeek 48, Mistral 32, GPT 48 grup) gözlenen 1. turdan simüle edilir. R0 için Aşama 1'in minimal hücrelerinin izole f'i kullanılır.
+- **İstatistik:** hücre etiketleri H4 kuralıyla (|Δ| > 2 ve bootstrap p < 0,05, model içinde 12 kartlık Holm; "aşağı / yukarı / uyumlu" + eşdeğerlik notu); bootstrap gruplar üzerinden (10 000), simülasyon belirsizliği S = 200 ile ortalanır. Seed `stable_seed("pgg-main-s1-rules", model, kart, kural, grup)`. Değerlendirme 2'de hücre başına aynı etiket kuralı (4 kart, Holm 4'lü), düzeltmesiz CI de verilir.
+- **Okuma kuralı (yalnız betimsel, önceden yazıldı):**
+  - R2 ya da R3 ile "aşağı" hücre sayısı belirgin azalır ve ortalama |Δ_R| R0'ın yarısının altına inerse: **"boşluk büyük ölçüde kuralın ölçüldüğü bağlamdan"** (yöntem dersi: LLM ajanları tek soruyla ayarlamak toplu dinamiği yanlış tahmin ettirir).
+  - R3 ile de "aşağı" hücreler ve |Δ_R| R0 düzeyinde kalırsa: **"tek turluk durumla açıklanamayan bir grup etkisi"** (daha uzun geçmişe bağlılık ya da başka bir etkileşim; indirgenemezlik iddiası için gerekli ama yeterli değil).
+  - Arada kalırsa: "kısmen".
+- **Bilinen sınırlar:** kurallar yalnız bir önceki tura bakar (daha uzun bellek yok); homojen gruplar; durum dilimleri sonradan seçilmedi ama veriden önce de denenmedi; Değerlendirme 1 aynı koşunun gruplarıyla yapılır (bağımsızlık Değerlendirme 2'de).
+- **Uygulama:** `pgg_analysis_rules.py` ve sentetik testleri; API çağrısı yok.
