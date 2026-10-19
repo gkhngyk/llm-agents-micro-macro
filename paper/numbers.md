@@ -84,3 +84,80 @@
 - main_s0b_20261012: summary cost 4.37, raw billed 4.37, segments 1, comprehension {'gpt': [(60, 60)], 'mistral': [(60, 60)], 'deepseek': [(60, 60)]}
 - expA_smoke_20261017: summary cost 2.83, raw billed 2.83, segments 2, comprehension {'deepseek': [(16, 16), (16, 16)], 'mistral': [(16, 16), (16, 16)], 'gpt': [(16, 16), (16, 16)]}
 - expB_smoke_20261018: summary cost 2.00, raw billed 2.00, segments 1, comprehension {'deepseek': [(16, 16)], 'gpt': [(16, 16)], 'mistral': [(16, 16)]}
+
+## Dynamics: model rule (D1a persistence, D1b lifetime, D2 tipping at round 13)
+- deepseek: p_Z 0.95, p_C10 0.96, p_C20 0.66; life C10 median 25 (censored 0.04); P(collapse r13) k=0..4 [0.28, 0.96, 0.98, 0.98, 0.99]; k* 1
+- mistral: p_Z 0.92, p_C10 0.95, p_C20 0.78; life C10 median 15 (censored 0.01); P(collapse r13) k=0..4 [0.42, 0.98, 0.98, 0.98, 0.99]; k* 1
+- gpt: p_Z 1.00, p_C10 1.00, p_C20 0.94; life C10 median 100 (censored 0.99); P(collapse r13) k=0..4 [0.0, 0.04, 0.3, 0.81, 1.0]; k* 3
+- human: p_Z 0.32, p_C10 0.00, p_C20 0.39; life C10 median 13 (censored 0.00); P(collapse r13) k=0..4 [0.19, 0.23, 0.22, 0.25, 0.27]; k* None
+
+## Dynamics: R0 (model-level f)
+- deepseek: f [0.0, 3.75, 8.96, 15.0, 19.17]; fixed points [(0.0, True), (15.0, False)]; continua []; k*_R0 0; m13 from k=0..4 [0.579, 0.294, 0.169, 0.079, 0.0]
+- mistral: f [0.52, 4.27, 8.85, 12.5, 17.29]; fixed points [(2.08, True)]; continua []; k*_R0 0; m13 from k=0..4 [2.497, 2.296, 2.182, 2.097, 2.017]
+- gpt: f [0.0, 5.31, 10.21, 15.0, 20.0]; fixed points [(0.0, False)]; continua [[15.0, 20.0]]; k*_R0 4; m13 from k=0..4 [12.0, 10.289, 8.283, 5.175, 0.0]
+
+## Dynamics: cell rules, k* counts and ranges
+- deepseek: k* {'None': 1, '0': 3, '1': 8, '2': 0, '3': 0, '4': 0}; p_Z 0.32-1.00; p_C10 0.59-1.00
+- mistral: k* {'None': 0, '0': 5, '1': 6, '2': 1, '3': 0, '4': 0}; p_Z 0.48-0.98; p_C10 0.67-1.00
+- gpt: k* {'None': 0, '0': 0, '1': 0, '2': 4, '3': 7, '4': 1}; p_Z 1.00-1.00; p_C10 0.97-1.00
+
+## Dynamics: labels (reading rules 1-5)
+- deepseek: 1_trap çöküş emici (tuzak); 2_coop yarı kararlı işbirliği (kilitlenme); 3_bistable iki çekici değil; 4_tipping tek bedavacı grubu deviriyor; 5_R0 izole kural makro yapıyı nitel olarak yanlış öngörüyor
+- mistral: 1_trap çöküş emici (tuzak); 2_coop yarı kararlı işbirliği (kilitlenme); 3_bistable iki çekici; 4_tipping tek bedavacı grubu deviriyor; 5_R0 izole kural makro yapıyı nitel olarak yanlış öngörüyor
+- gpt: 1_trap çöküş emici (tuzak); 2_coop yarı kararlı işbirliği (kilitlenme); 3_bistable iki çekici değil; 4_tipping üç bedavacı; 5_R0 izole kural makro yapıyı nitel olarak yanlış öngörüyor
+
+## Dynamics per data set (E = end of mid game)
+- deepseek S1 (n 192, E 8): Z stay 0.96 (n 825), C10 stay 0.96 (n 148); S(E) obs 0.17 rule 0.17 R0 0.38, obs-rule -0.00 [-0.03,0.02] yeniden üretiyor; recovery to coop 0.08 (n 159), leave collapse 0.18
+  end shares obs/rule/R0: collapse 0.81 [0.78,0.84]/0.80/0.61 yeniden üretiyor; middle 0.01 [0.00,0.03]/0.02/0.16 yeniden üretiyor; coop 0.18 [0.15,0.21]/0.17/0.22 yeniden üretiyor
+  by k1 (collapse at E): k1=0 n 35: obs 0.11 [0.03,0.23] rule 0.12 R0 0.06 yeniden üretiyor; k1=1 n 28: obs 0.82 [0.68,0.96] rule 0.83 R0 0.36 yeniden üretiyor; k1=2 n 57: obs 1.00 [1.00,1.00] rule 0.97 R0 0.65 yeniden üretiyor; k1=3 n 41: obs 1.00 [1.00,1.00] rule 0.99 R0 0.93 yeniden üretiyor; k1=4 n 31: obs 1.00 [1.00,1.00] rule 0.99 R0 1.00 yeniden üretiyor
+  two-ended cells 3/12; undecided share (rule) 0.03; clusters (0,0,0,0) n 31 collapse 1.00 coop 0.00; (0,0,0,10) n 35 collapse 1.00 coop 0.00; (0,0,10,10) n 48 collapse 1.00 coop 0.00; (0,10,10,10) n 18 collapse 0.83 coop 0.17; (10,10,10,10) n 16 collapse 0.00 coop 1.00
+- deepseek AB (n 48, E 8): Z stay 0.95 (n 240), C10 stay 0.92 (n 12); S(E) obs 0.02 rule 0.04 R0 0.17, obs-rule -0.02 [-0.05,-0.00] yeniden üretiyor; recovery to coop 0.02 (n 47), leave collapse 0.19
+  end shares obs/rule/R0: collapse 0.96 [0.90,1.00]/0.94/0.79 yeniden üretiyor; middle 0.02 [0.00,0.06]/0.02/0.15 yeniden üretiyor; coop 0.02 [0.00,0.06]/0.05/0.06 yeniden üretiyor
+  by k1 (collapse at E): k1=1 n 8: obs 1.00 [1.00,1.00] rule 0.93 R0 0.88 yeniden üretiyor; k1=2 n 18: obs 1.00 [1.00,1.00] rule 0.98 R0 0.72 yeniden üretiyor; k1=3 n 15: obs 1.00 [1.00,1.00] rule 0.98 R0 0.87 yeniden üretiyor
+  two-ended cells 0/4; undecided share (rule) 0.02; clusters (0,0,0,10) n 13 collapse 1.00 coop 0.00; (0,0,10,10) n 16 collapse 1.00 coop 0.00; (0,10,10,10) n 8 collapse 1.00 coop 0.00
+- deepseek EB (n 64, E 13): Z stay 0.97 (n 451), C10 stay 0.96 (n 105); S(E) obs 0.22 rule 0.23 R0 0.44, obs-rule -0.01 [-0.06,0.03] yeniden üretiyor; recovery to coop 0.06 (n 50), leave collapse 0.22
+  end shares obs/rule/R0: collapse 0.77 [0.70,0.83]/0.72/0.56 yeniden üretiyor; middle 0.02 [0.00,0.05]/0.03/0.11 yeniden üretiyor; coop 0.22 [0.16,0.28]/0.25/0.33 yeniden üretiyor
+  by k1 (collapse at E): k1=0 n 17: obs 0.18 [0.00,0.35] rule 0.15 R0 0.00 belirsiz; k1=1 n 17: obs 0.94 [0.82,1.00] rule 0.84 R0 0.47 belirsiz; k1=2 n 12: obs 1.00 [1.00,1.00] rule 0.98 R0 0.83 yeniden üretiyor; k1=3 n 13: obs 1.00 [1.00,1.00] rule 0.98 R0 1.00 yeniden üretiyor; k1=4 n 5: obs 1.00 [1.00,1.00] rule 1.00 R0 1.00 yeniden üretiyor
+  two-ended cells 1/8; undecided share (rule) 0.09; clusters (0,0,0,10) n 13 collapse 1.00 coop 0.00; (0,0,10,10) n 8 collapse 1.00 coop 0.00; (0,10,10,10) n 10 collapse 0.90 coop 0.10
+- mistral S1 (n 120, E 8): Z stay 0.93 (n 164), C10 stay 0.95 (n 475); S(E) obs 0.61 rule 0.61 R0 0.68, obs-rule -0.00 [-0.06,0.05] yeniden üretiyor; recovery to coop 0.00 (n 45), leave collapse 0.09
+  end shares obs/rule/R0: collapse 0.39 [0.33,0.46]/0.38/0.33 yeniden üretiyor; middle 0.01 [0.00,0.03]/0.02/0.02 yeniden üretiyor; coop 0.60 [0.53,0.66]/0.60/0.66 yeniden üretiyor
+  by k1 (collapse at E): k1=0 n 95: obs 0.23 [0.15,0.32] rule 0.23 R0 0.19 yeniden üretiyor; k1=1 n 9: obs 1.00 [1.00,1.00] rule 0.94 R0 0.56 yeniden üretiyor; k1=4 n 8: obs 1.00 [1.00,1.00] rule 0.97 R0 1.00 yeniden üretiyor
+  two-ended cells 7/12; undecided share (rule) 0.35; clusters (0,0,0,0) n 8 collapse 1.00 coop 0.00; (10,10,10,10) n 65 collapse 0.22 coop 0.77; (10,10,10,20) n 13 collapse 0.31 coop 0.69
+- mistral AB (n 32, E 8): Z stay 0.93 (n 27), C10 stay 0.96 (n 164); S(E) obs 0.66 rule 0.58 R0 0.69, obs-rule 0.08 [-0.06,0.20] belirsiz; recovery to coop 0.00 (n 10), leave collapse 0.00
+  end shares obs/rule/R0: collapse 0.34 [0.19,0.50]/0.42/0.31 belirsiz; middle 0.00 [0.00,0.00]/0.02/0.03 yeniden üretiyor; coop 0.66 [0.50,0.81]/0.56/0.66 belirsiz
+  by k1 (collapse at E): k1=0 n 27: obs 0.22 [0.07,0.37] rule 0.31 R0 0.30 belirsiz; k1=1 n 5: obs 1.00 [1.00,1.00] rule 1.00 R0 0.40 yeniden üretiyor
+  two-ended cells 3/4; undecided share (rule) 0.59; clusters (10,10,10,10) n 25 collapse 0.16 coop 0.84
+- mistral EB (n 48, E 13): Z stay 0.98 (n 126), C10 stay 0.98 (n 331); S(E) obs 0.69 rule 0.56 R0 0.71, obs-rule 0.12 [0.04,0.21] belirsiz; recovery to coop 0.00 (n 15), leave collapse 0.07
+  end shares obs/rule/R0: collapse 0.29 [0.19,0.38]/0.43/0.29 belirsiz; middle 0.02 [0.00,0.06]/0.01/0.00 yeniden üretiyor; coop 0.69 [0.60,0.77]/0.56/0.71 belirsiz
+  by k1 (collapse at E): k1=0 n 38: obs 0.16 [0.05,0.29] rule 0.28 R0 0.16 belirsiz
+  two-ended cells 3/8; undecided share (rule) 0.44; clusters (10,10,10,10) n 23 collapse 0.22 coop 0.78
+- gpt S1 (n 192, E 8): Z stay 1.00 (n 132), C10 stay 1.00 (n 753); S(E) obs 0.79 rule 0.81 R0 0.95, obs-rule -0.02 [-0.06,0.02] yeniden üretiyor; recovery to coop 0.05 (n 38), leave collapse 0.18
+  end shares obs/rule/R0: collapse 0.18 [0.13,0.23]/0.15/0.04 yeniden üretiyor; middle 0.04 [0.01,0.06]/0.05/0.19 yeniden üretiyor; coop 0.79 [0.73,0.84]/0.80/0.77 yeniden üretiyor
+  by k1 (collapse at E): k1=0 n 54: obs 0.06 [0.00,0.13] rule 0.01 R0 0.00 yeniden üretiyor; k1=1 n 84: obs 0.06 [0.01,0.12] rule 0.08 R0 0.00 yeniden üretiyor; k1=2 n 39: obs 0.44 [0.28,0.59] rule 0.29 R0 0.00 belirsiz; k1=3 n 14: obs 0.57 [0.29,0.86] rule 0.69 R0 0.50 belirsiz
+  two-ended cells 8/12; undecided share (rule) 0.22; clusters (0,0,0,10) n 9 collapse 0.44 coop 0.22; (0,0,10,10) n 16 collapse 0.06 coop 0.88; (0,0,10,20) n 16 collapse 0.56 coop 0.31; (0,10,10,10) n 25 collapse 0.00 coop 1.00; (0,10,10,20) n 30 collapse 0.00 coop 1.00; (0,10,20,20) n 26 collapse 0.12 coop 0.88; (10,10,10,10) n 10 collapse 0.00 coop 1.00; (10,10,10,20) n 23 collapse 0.00 coop 1.00; (10,10,20,20) n 13 collapse 0.08 coop 0.92; (10,20,20,20) n 8 collapse 0.25 coop 0.75
+- gpt AB (n 48, E 8): Z stay 1.00 (n 47), C10 stay 0.99 (n 175); S(E) obs 0.73 rule 0.75 R0 0.88, obs-rule -0.02 [-0.13,0.08] yeniden üretiyor; recovery to coop 0.08 (n 13), leave collapse 0.23
+  end shares obs/rule/R0: collapse 0.23 [0.12,0.35]/0.22/0.10 yeniden üretiyor; middle 0.02 [0.00,0.06]/0.04/0.23 yeniden üretiyor; coop 0.75 [0.62,0.85]/0.74/0.67 yeniden üretiyor
+  by k1 (collapse at E): k1=0 n 14: obs 0.14 [0.00,0.36] rule 0.02 R0 0.00 belirsiz; k1=1 n 19: obs 0.05 [0.00,0.16] rule 0.06 R0 0.00 yeniden üretiyor; k1=2 n 9: obs 0.33 [0.00,0.67] rule 0.40 R0 0.00 belirsiz; k1=3 n 5: obs 0.80 [0.40,1.00] rule 0.94 R0 0.80 belirsiz
+  two-ended cells 3/4; undecided share (rule) 0.15; clusters (0,10,10,10) n 8 collapse 0.00 coop 1.00
+- gpt EB (n 64, E 13): Z stay 1.00 (n 46), C10 stay 1.00 (n 419); S(E) obs 0.92 rule 0.86 R0 0.98, obs-rule 0.06 [-0.01,0.12] yeniden üretiyor; recovery to coop 0.00 (n 5), leave collapse 0.00
+  end shares obs/rule/R0: collapse 0.08 [0.02,0.14]/0.11/0.00 yeniden üretiyor; middle 0.03 [0.00,0.08]/0.02/0.17 yeniden üretiyor; coop 0.89 [0.81,0.95]/0.86/0.83 yeniden üretiyor
+  by k1 (collapse at E): k1=0 n 28: obs 0.00 [0.00,0.00] rule 0.01 R0 0.00 yeniden üretiyor; k1=1 n 23: obs 0.09 [0.00,0.22] rule 0.05 R0 0.00 belirsiz; k1=2 n 11: obs 0.09 [0.00,0.27] rule 0.38 R0 0.00 belirsiz
+  two-ended cells 1/8; undecided share (rule) 0.14; clusters (10,10,20,20) n 12 collapse 0.00 coop 1.00
+- human H (n 230, E 8): Z stay 0.41 (n 22), C10 stay 0.00 (n 1); S(E) obs 0.67 rule 0.62, obs-rule 0.06 [0.00,0.11] yeniden üretiyor; recovery to coop 0.19 (n 59), leave collapse 0.61
+  end shares obs/rule/R0: collapse 0.23 [0.18,0.27]/0.18/— yeniden üretiyor; middle 0.30 [0.24,0.36]/0.33/— yeniden üretiyor; coop 0.48 [0.42,0.53]/0.49/— yeniden üretiyor
+  by k1 (collapse at E): k1=0 n 151: obs 0.11 [0.07,0.17] rule 0.16 R0 — yeniden üretiyor; k1=1 n 63: obs 0.40 [0.29,0.52] rule 0.23 R0 — belirsiz; k1=2 n 16: obs 0.62 [0.38,0.88] rule 0.25 R0 — belirsiz
+  two-ended cells 10/16; undecided share (rule) 0.40; clusters 
+
+## Human N-experiment mean contribution, periods 1-10, by city and order (secseq 0 = N played first)
+{'Athens|0': 6.36, 'Boston|0': 9.33, 'Copenhagen|0': 11.53, 'Riyadh|0': 7.63}
+
+## Dynamics: cell-level structure, rule vs R0
+- deepseek: cells with Z and C10 both sticky (p >= 0.8) 9/12; R0 cells with >= 2 stable fixed points 0/12; R0 cells with a neutral segment f(x) = x 12/12; k* equal rule vs R0 4/12
+- mistral: cells with Z and C10 both sticky (p >= 0.8) 9/12; R0 cells with >= 2 stable fixed points 0/12; R0 cells with a neutral segment f(x) = x 5/12; k* equal rule vs R0 1/12
+- gpt: cells with Z and C10 both sticky (p >= 0.8) 12/12; R0 cells with >= 2 stable fixed points 0/12; R0 cells with a neutral segment f(x) = x 12/12; k* equal rule vs R0 6/12
+
+## Dynamics: end shares with the 1/9 thresholds (sensitivity, D3a only): obs/rule label
+- deepseek: S1 collapse 0.81/0.75 yeniden üretiyor, middle 0.04/0.09 yeniden üretiyor, coop 0.16/0.16 yeniden üretiyor; AB collapse 0.96/0.88 yeniden üretiyor, middle 0.02/0.08 yeniden üretiyor, coop 0.02/0.04 yeniden üretiyor; EB collapse 0.75/0.66 yeniden üretiyor, middle 0.03/0.10 yeniden üretiyor, coop 0.22/0.23 yeniden üretiyor
+- mistral: S1 collapse 0.38/0.33 yeniden üretiyor, middle 0.05/0.09 yeniden üretiyor, coop 0.57/0.58 yeniden üretiyor; AB collapse 0.31/0.35 belirsiz, middle 0.09/0.13 yeniden üretiyor, coop 0.59/0.53 belirsiz; EB collapse 0.29/0.37 belirsiz, middle 0.04/0.08 yeniden üretiyor, coop 0.67/0.55 belirsiz
+- gpt: S1 collapse 0.18/0.13 yeniden üretiyor, middle 0.04/0.09 yeniden üretiyor, coop 0.78/0.78 yeniden üretiyor; AB collapse 0.23/0.20 yeniden üretiyor, middle 0.04/0.09 yeniden üretiyor, coop 0.73/0.71 yeniden üretiyor; EB collapse 0.08/0.11 yeniden üretiyor, middle 0.06/0.04 yeniden üretiyor, coop 0.86/0.85 yeniden üretiyor
+- human: H collapse 0.11/0.07 yeniden üretiyor, middle 0.53/0.54 yeniden üretiyor, coop 0.36/0.38 yeniden üretiyor

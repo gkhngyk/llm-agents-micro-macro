@@ -93,3 +93,61 @@ for run in ("main_s1_20261014", "expA_main_20261017", "expB_main_20261018", "mai
     raw_cost = sum((json.loads(l).get("usage") or {}).get("cost") or 0 for l in open(RUNS / run / "raw_calls.jsonl") if '"usage"' in l)
     comp = {m: [(x.get("n_all_correct"), x.get("n")) for x in d.values()] for m, d in sm["comprehension"]["per_model_frame"].items()}
     print(f"- {run}: summary cost {sm['total_cost_usd']:.2f}, raw billed {raw_cost:.2f}, segments {len(sm['segments'])}, comprehension {comp}")
+
+# ---- dynamics (prereg_dyn, exploratory) and the human reference data
+dy = json.load(open(R / "dynamics_analysis.json"))
+g2 = lambda x: "—" if x is None else f"{x:.2f}"
+cis = lambda t: f"{g2(t['est'])} [{t['ci'][0]:.2f},{t['ci'][1]:.2f}]" if t.get("est") is not None else "—"
+print("\n## Dynamics: model rule (D1a persistence, D1b lifetime, D2 tipping at round 13)")
+for m in M + ("human",):
+    mr = dy["rules"][m]["model_rule"]
+    print(f"- {m}: p_Z {mr['D1a']['Z']['p']:.2f}, p_C10 {mr['D1a']['C10']['p']:.2f}, p_C20 {mr['D1a']['C20']['p']:.2f}; "
+          f"life C10 median {mr['D1b']['C10']['median']:.0f} (censored {mr['D1b']['C10']['censored_share']:.2f}); "
+          f"P(collapse r13) k=0..4 {[round(mr['D2']['by_k'][str(k)]['r13']['collapse'], 2) for k in range(5)]}; k* {mr['D2']['k_star']}")
+print("\n## Dynamics: R0 (model-level f)")
+for m in M:
+    r0 = dy["R0"][m]["model"]
+    print(f"- {m}: f {[round(x, 2) for x in r0['f']]}; fixed points {[(round(p['x'], 2), p['stable']) for p in r0['fixed_points']['points']]}; "
+          f"continua {r0['fixed_points']['continua']}; k*_R0 {r0['D2']['k_star']}; m13 from k=0..4 {[round(r0['D2']['by_k'][str(k)]['r13']['mean'], 3) for k in range(5)]}")
+print("\n## Dynamics: cell rules, k* counts and ranges")
+for m in M:
+    s_ = dy["rules"][m]["cells_summary"]["all"]
+    print(f"- {m}: k* {s_['k_star_counts']}; p_Z {s_['p_Z']['min']:.2f}-{s_['p_Z']['max']:.2f}; p_C10 {s_['p_C10']['min']:.2f}-{s_['p_C10']['max']:.2f}")
+print("\n## Dynamics: labels (reading rules 1-5)")
+for m in M:
+    print(f"- {m}: " + "; ".join(f"{k} {v}" for k, v in dy["labels"][m].items() if k != "inputs"))
+print("\n## Dynamics per data set (E = end of mid game)")
+for m, dd in dy["datasets"].items():
+    for d, v in dd.items():
+        c = v["D1c"]; d3 = v["D3a"]["main"]
+        print(f"- {m} {d} (n {v['n_groups']}, E {v['E']}): Z stay {g2(v['D1a_observed']['Z']['stay_share'])} (n {v['D1a_observed']['Z']['n_from']}), "
+              f"C10 stay {g2(v['D1a_observed']['C10']['stay_share'])} (n {v['D1a_observed']['C10']['n_from']}); "
+              f"S(E) obs {c['observed'][-1]:.2f} rule {c['rule'][-1]:.2f}" + (f" R0 {c['R0'][-1]:.2f}" if 'R0' in c else "") +
+              f", obs-rule {cis(c['S_E_obs_minus_rule'])} {c['S_E_label']}; recovery to coop {g2(c['recovery_observed']['to_coop'])} "
+              f"(n {c['recovery_observed']['n']}), leave collapse {g2(c['recovery_observed']['leave_collapse'])}")
+        print("  end shares obs/rule/R0: " + "; ".join(f"{lab} {cis(x['observed'])}/{x['rule']:.2f}/{g2(x.get('R0'))} {x['label']}" for lab, x in d3.items()))
+        print("  by k1 (collapse at E): " + "; ".join(f"k1={k} n {x['n']}: obs {cis(x['observed'])} rule {x['rule']:.2f} R0 {g2(x.get('R0'))} {x['label']}"
+                                                     for k, x in v["D2_by_k1"].items() if "observed" in x))
+        print(f"  two-ended cells {v['D3a']['cells_two_ended']['n']}/{v['D3a']['cells_two_ended']['of']}; undecided share (rule) {v['D3b']['undecided_share_rule']:.2f}; "
+              "clusters " + "; ".join(f"({k}) n {x['n']} collapse {x['collapse']:.2f} coop {x['coop']:.2f}" for k, x in v["D3b"]["clusters"].items()))
+import csv, io
+txt = (R.parent / "data/herrmann2008/raw/HerrmannThoeniGaechterDATA.csv").read_bytes().decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+hrows = list(csv.DictReader(io.StringIO("\n".join(txt[next(i for i, l in enumerate(txt) if l.startswith("sessionid,")):]))))
+seen, hm = set(), collections.defaultdict(list)
+for r in hrows:
+    k = (r["sessionid"], r["subjectid"], r["p"], r["period"])
+    if r["p"] == "N-experiment" and k not in seen:
+        seen.add(k); hm[(r["city"], r["secseq"])].append(float(r["senderscontribution"]))
+print("\n## Human N-experiment mean contribution, periods 1-10, by city and order (secseq 0 = N played first)")
+print({f"{c}|{s}": round(st.mean(v), 2) for (c, s), v in sorted(hm.items()) if c in ("Boston", "Copenhagen", "Athens", "Riyadh")})
+print("\n## Dynamics: cell-level structure, rule vs R0")
+for m in M:
+    cr, c0 = dy["rules"][m]["cells"], dy["R0"][m]["cells"]
+    both = sum(cr[c]["D1a"]["Z"]["p"] >= 0.8 and cr[c]["D1a"]["C10"]["p"] >= 0.8 for c in cr)
+    print(f"- {m}: cells with Z and C10 both sticky (p >= 0.8) {both}/12; R0 cells with >= 2 stable fixed points "
+          f"{sum(c0[c]['fixed_points']['n_stable'] >= 2 for c in c0)}/12; R0 cells with a neutral segment f(x) = x "
+          f"{sum(bool(c0[c]['fixed_points']['continua']) for c in c0)}/12; k* equal rule vs R0 {sum(cr[c]['D2']['k_star'] == c0[c]['D2']['k_star'] for c in cr)}/12")
+print("\n## Dynamics: end shares with the 1/9 thresholds (sensitivity, D3a only): obs/rule label")
+for m, dd in dy["datasets"].items():
+    print(f"- {m}: " + "; ".join(f"{d} " + ", ".join(f"{lab} {x['observed']['est']:.2f}/{x['rule']:.2f} {x['label']}"
+                                                   for lab, x in v["D3a"]["sens_1_9"].items()) for d, v in dd.items()))
