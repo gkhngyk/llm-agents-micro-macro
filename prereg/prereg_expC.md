@@ -303,3 +303,57 @@ Başka bir durmada kullanıcıya bildirir. Büyük gruplarda bir turdaki n çağ
   Paketi açıp tek başına sınadım: bütün sha256'lar tuttu ve tahmin paketteki koddan birebir yeniden üretildi.
 - **Yükleme anındaki durum:** C1 duman koşuları 19:51 UTC'de başlamıştı ve sürüyordu. Hiçbir C2 (ana koşu) verisi yoktu, C2 başlatılmamıştı. README'deki "A smoke test … ran on 2026-10-19" ifadesi yükleme anında "sürüyordu" anlamındadır. C1 verisi plana göre analize girmez.
 - **Değişiklik kuralı:** C1 okuması bir tasarım değişikliği gerektirirse değişiklik bu dosyaya tarihli ek olarak yazılır ve Zenodo'ya C2'den önce yeni bir sürüm olarak yüklenir. Dondurulmuş tahmin değişmez.
+
+## Ek F-C.3 — C1 duman testi sonucu (2026-10-19): tasarım değişikliği yok, GPT bütçe tavanları yükseltildi
+
+- **Koşular:** `expC_n{4,8,16,32}_smoke_20261019`, kod `53a27d7` (temiz kopya `_kod_53a27d7…`); 19:51 UTC'de birlikte başladı. Grup sayıları ve kartlar:
+  - n = 4: 2 grup, Boston;
+  - n = 8: 2 grup, Kopenhag;
+  - n = 16: 2 grup, Atina;
+  - n = 32: 1 grup, Riyad (yalnız GPT).
+
+  Hepsi tamam, tek segment, `stop_reason` yok, otomatik sürdürme gerekmedi. Satırlar 88 / 176 / 352 / 352. Sonuç dosyalarının sha256'ları:
+
+  | n | sha256 |
+  |---|---|
+  | 4 | `c3fba5d41461ffd9fcbb9fa846db499496085e2116611e671fba13bfe4c09caa` |
+  | 8 | `cd0f11368a28acc1c35db6549603029f427853a7e183cadd653c18dbb9004b1b` |
+  | 16 | `c1b3e82a4d5970af31ee4d1c6f32851332b2c5c2b728fe58bb9406cc3f8499c8` |
+  | 32 | `a871277a8e2553a85c966d3af661cce89f4bc4c317a15b1b391bb68a0fa2692e` |
+
+- **Tesisat:**
+  - geçersiz ve parse_fail 0; `length` 0; `reasoning_capped` 0;
+  - superseded / truncated / discarded 0;
+  - model sürümleri önceki deneylerle aynı (GPT `-20260922`, Mistral `-20261006`);
+  - n = 32'de sağlayıcı adı olmayan 3 yanıt kuralına göre yeniden istendi.
+- **Kural anlama** (doğru / toplam):
+  - Mistral: 4/4, 8/8, 16/16;
+  - GPT: 4/4, 8/8, 16/16, 31/32. Tek hata n = 32'de q2'de bir aritmetik kayma: "−10 + 0,4 × 10 = 3".
+- **Okuma** (yalnız istemin okunması):
+  - n ≥ 8'de grubu 4 kişilik sanan kayıt yok. Mistral'ın muhakemelerinde grup büyüklüğü 8 kişide 206, 16 kişide 453 kez doğru anılıyor.
+  - Diğer sayılar ("5 players", "13 players" vb.) alt kümeler ("5 kişi 0 verdi") ya da GPT özetlerinin gevşek ifadeleri.
+  - Mistral'ın uzun geçmişte saydığı "0 veren sayısı" 16 kişide örneklenen 8 iddianın 8'inde doğru.
+  - Bir kayıtta önce 1 eksik sayıp ("4 kişi 0 verdi"; doğrusu 5) aynı muhakemede listeyi yeniden okuyarak düzeltiyor.
+  - GPT 32 kişide grup toplamını doğru okuyor (96). Bir özette katkı veren sayısı 1 fazla (9; doğrusu 8).
+  - Sonuç: büyük gruplarda ara sıra sayım kayması var, ama geçmiş okunuyor ve kendi kendine düzeltiliyor. Bu bir tasarım kusuru değil; büyük grubun bilişsel yükünün parçası. Sınırlılık olarak raporlanır.
+- **Dürüstlük notu:** okuma sırasında iki duman grubunun bazı katkıları görüldü:
+  - n = 32 GPT grubunda 4–5. turlardan itibaren herkes 0 veriyor;
+  - n = 16 Mistral grubunun 9. turunda 5 kişi 0, 11 kişi 10 veriyor.
+
+  Duman verisi plana göre analize girmez ve tasarımda hiçbir şey değiştirilmedi; bu bilgi hiçbir karara girmedi.
+- **Maliyet:** toplam 2,25 USD (tahmin 2,35). Gerçek / dry-run oranı:
+
+  | model | n = 4 | n = 8 | n = 16 | n = 32 |
+  |---|---|---|---|---|
+  | Mistral | 0,95 | 0,89 | 0,94 | — |
+  | GPT | 0,94 | 1,27 | 1,39 | 1,78 (sayılan; faturalanan 1,42) |
+
+  GPT'nin istem başına maliyeti büyüklükle dry-run'ın varsaydığından hızlı artıyor.
+- **Karar:**
+  1. **Tasarım değişikliği yok;** dondurulmuş tahmin, hipotezler ve istemler aynen kalır. Zenodo'ya yeni sürüm gerekmez.
+  2. **GPT bütçe tavanları yükseltildi.** Yalnız koşunun erken durmasını önlemek için; analizi etkilemez.
+     - `expC_n16_main`: GPT alt tavanı 3 → 4 (p95 × 1,39 = 3,03);
+     - `expC_n32_main`: sert tavan ve GPT alt tavanı 6 → 9 (p95 × 1,78 = 8,95).
+
+     Diğer tavanlar ve kapılar aynı. C2'nin beklenen toplamı ≈ 58 USD (Mistral ≈ 49,7, GPT ≈ 8,7); sert tavanların toplamı 105 USD.
+- **Sıradaki adım:** C2 bu değişiklikten sonraki commit'in kod kopyasıyla, kullanıcı "BAŞLA C2" deyince. Dört koşu (n = 4, 8, 16, 32) aynı anda başlar; izleyici F.8 / 429 / parse / 5xx kurallarıyla sürdürür.
