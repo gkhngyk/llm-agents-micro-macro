@@ -131,3 +131,107 @@ H aynı oyundur: 4 kişilik sabit gruplar, 20 jeton, MPCR 0,4, 10 dönem, ceza y
 - **Neden:** §6'daki kart (şehir) içinde tabakalı bootstrap, k1 sınıfı içinde tabakaların çoğunu 1–3 gruba indiriyor. Tek gruplu bir tabaka yeniden örneklemede hep aynı değeri verir. Böyle bir CI belirsizliği yok sayar; bu bir yöntem hatasıdır.
 - **Değişiklik:** yalnız D2 k1 sınıflarında bootstrap tabakasız yapılır (sınıf içindeki gruplar üzerinden). Bütün veri kümesi düzeyindeki paylarda (D1c S(E), D3a) tabakalama aynen kalır; orada her kartta 6–16, her şehirde 8–24 grup var. Bu değişiklik CI'leri genişletir; yani tutucu yöndedir. Sonuçlar bu düzeltmeyle yeniden hesaplanır ve ilk dosyanın etiketleri ayrıca raporlanır.
 - **İlk çalıştırmadan görülen ama değiştirilmeyen bir sınır durumu:** Mistral'ın model düzeyindeki R0'ı, k = 0 başlangıcından 13. turda m = 2,497'ye iniyor. Bu, çöküş eşiğinin (2,5) 0,003 altında kalıyor; bu yüzden k*_R0 = 0. Eşik değiştirilmedi. Raporda bu sınır durumu açıkça yazılır: R0'ın tek kararlı sabit noktası x ≈ 2,08'dir, okuma kuralı 5'in ilk koşulu bu k* sınır durumundan bağımsızdır.
+
+## Ek D.2 — Sonuç (2026-10-19, keşifsel)
+
+- **Dosya:** `results/dynamics_analysis.json`, sha256 `d51730d1acafce9cc962c682ab9f063a69fea3531e2e70f667ccf8e1ac46a715` (kod `4494b87`, D.1 düzeltmesiyle).
+  - D.1, ilk dosyaya göre yalnız k1 sınıflarının CI'lerini ve 4 k1 etiketini değiştirdi (DeepSeek EB k1 = 0, GPT AB k1 = 3, GPT EB k1 = 1: "yeniden üretiyor" → "belirsiz"; insan k1 = 2: "sapıyor" → "belirsiz"). Geri kalan her şey birebir aynı.
+- **Bağımsız kontroller:** ayrı kodla yeniden hesaplananlar:
+  - π_Z, π_C10, p_Z, p_C10 (dondurulmuş sayımlardan);
+  - insan son durum payları, Z kalıcılığı ve k1 sınıfları (ham CSV'den);
+  - model kuralıyla D2, 6 başlangıç (kendi simülatörüyle, S = 4 000).
+
+  Hepsi tuttu (simülasyon farkları ≤ 0,014).
+
+### Okuma kuralları (§7), model başına
+
+| | DeepSeek | Mistral | GPT |
+|---|---|---|---|
+| 1 Tuzak | çöküş emici | çöküş emici | çöküş emici |
+| 2 İşbirliği | kilitlenme | kilitlenme | kilitlenme |
+| 3 İki çekici | değil (AB'de işbirliği payı 0,02) | **iki çekici** | değil (EB'de çöküş payı 0,08) |
+| 4 Devrilme k* | **1** | **1** | 3 |
+| 5 R0 ile nitel uyum | yanlış öngörüyor | yanlış öngörüyor | yanlış öngörüyor |
+
+### D1 Tuzaklar ve yaşam süreleri (model kuralı; parantezde gözlenen)
+
+- **p_Z:** DeepSeek 0,95, Mistral 0,92, GPT 1,00. Gözlenen Z kalma payı S1 / AB / EB'de 0,93–1,00. İnsanlarda gözlenen 0,41 (22 geçiş); H-R3'te 0,32.
+- **p_C10:** 0,96 / 0,95 / 1,00. Gözlenen 0,92–1,00. İnsanlarda C10 neredeyse hiç yok (1 geçiş); H-R3'te 0,00.
+- **İşbirliği yaşam süresi** (C10'dan ilk çöküşe kadar, medyan): DeepSeek 25 tur, Mistral 15 tur, GPT > 100 tur (%99'u kesik). İnsan kuralında 13 tur.
+- **Çöküşten işbirliğine geri dönüş** (gözlenen): AB / EB'de DeepSeek 0,02 / 0,06, Mistral 0 / 0, GPT 0,08 / 0. Çöküş grubu sayıları 47 / 50, 10 / 15, 13 / 5. İnsanlarda 0,19 (59 grup); insan gruplarının 0,61'i çöküş bölgesinden çıkıyor.
+- **Hayatta kalma S(E):**
+  - kural örneklem dışında DeepSeek ve GPT'de "yeniden üretiyor";
+  - Mistral AB "belirsiz" (+0,08);
+  - Mistral EB'de gözlenen kuraldan yüksek (+0,12 [0,04, 0,21], "belirsiz"): 15 turluk oyunda Mistral'ın işbirliği kuralın öngördüğünden daha uzun sürdü.
+
+### D2 Devrilme noktası
+
+**Model kuralı, 13. turda P(çöküş), k = 0 / 1 / 2 / 3 / 4:**
+
+| | k = 0 | k = 1 | k = 2 | k = 3 | k = 4 |
+|---|---|---|---|---|---|
+| DeepSeek | 0,28 | 0,96 | 0,98 | 0,98 | 0,99 |
+| Mistral | 0,42 | 0,98 | 0,98 | 0,98 | 0,99 |
+| GPT | 0,00 | 0,04 | 0,30 | 0,81 | 1,00 |
+| İnsan kuralı | 0,19 | 0,23 | 0,22 | 0,25 | 0,27 |
+
+İnsan kuralında devrilme yok.
+
+**Hücre kurallarında k\*:**
+- DeepSeek: 8 hücrede 1, 3 hücrede 0, 1 hücrede yok;
+- Mistral: 6 hücrede 1, 5 hücrede 0, 1 hücrede 2;
+- GPT: 4 hücrede 2, 7 hücrede 3, 1 hücrede 4.
+
+**R0 (model düzeyi f):**
+- DeepSeek: kararlı sabit nokta 0, kararsız 15. k*_R0 = 0; tümü 10'dan başlayan grup 13. turda m = 0,58.
+- Mistral: tek kararlı sabit nokta ≈ 2,08. k*_R0 = 0, sınır durumu (m₁₃ = 2,497; D.1).
+- GPT: kararlı sabit nokta yok. 0 zayıf kararsız (eğim 1,06); 15–20 arası nötr süreklilik. k*_R0 = 4: grup yalnız dördü de 0'la başlarsa çöküyor.
+
+R0'ın kararlı sabit nokta sayısı (1 / 1 / 0), kuralın yapışkan simetrik durum sayısından (2 / 2 / 3) farklı.
+
+**Gözlenen kontrol** (E'de çöküş payı; gözlenen / kural / R0):
+- DeepSeek k1 = 1: S1 0,82 / 0,83 / 0,36; AB 1,00 / 0,93 / 0,88; EB 0,94 / 0,84 / 0,47.
+- Mistral k1 = 1: S1 1,00 / 0,94 / 0,56; AB 1,00 / 1,00 / 0,40. EB'de bu sınıfta 4 grup var, raporlanmadı.
+- GPT k1 = 2: S1 0,44 / 0,29 / 0,00; AB 0,33 / 0,40 / 0,00; EB 0,09 / 0,38 / 0,00.
+- GPT k1 = 3: S1 0,57 / 0,69 / 0,50; AB 0,80 / 0,94 / 0,80.
+- **İnsan** k1 = 0 / 1 / 2 (151 / 63 / 16 grup): gözlenen 0,11 / 0,40 / 0,62; H-R3 0,16 / 0,23 / 0,25.
+
+  İnsanlarda ilk turdaki 0'lar sonu kademeli olarak kötüleştiriyor, ama tek turluk havuz kural bunu yeniden üretmiyor (k1 = 1: +0,17 [0,06, 0,29]; k1 = 2: +0,38 [0,12, 0,63]; ikisi de "belirsiz").
+
+### D3 İki uçlu sonlar ve yol bağımlılığı
+
+**Ara bölge payı (E'de; gözlenen / kural / R0):**
+
+| | S1 | AB | EB |
+|---|---|---|---|
+| DeepSeek | 0,01 / 0,02 / 0,16 | 0,02 / 0,02 / 0,15 | 0,02 / 0,03 / 0,11 |
+| Mistral | 0,01 / 0,02 / 0,02 | 0,00 / 0,02 / 0,03 | 0,02 / 0,01 / 0,00 |
+| GPT | 0,04 / 0,05 / 0,19 | 0,02 / 0,04 / 0,23 | 0,03 / 0,02 / 0,17 |
+
+İnsanlarda gözlenen 0,30, H-R3 0,33.
+
+- **Örneklem dışında (AB, EB) çöküş / ara / işbirliği payları:**
+  - DeepSeek ve GPT'de 12 karşılaştırmanın 12'si "yeniden üretiyor";
+  - Mistral'da ara bölge "yeniden üretiyor"; çöküş ve işbirliği "belirsiz": kural çöküşü fazla öngörüyor (AB 0,42 vs 0,34; EB 0,43 vs 0,29).
+- **Aynı başlangıç, farklı son** (gözlenen; E'de çöküş / işbirliği):
+  - Mistral S1'de tümü 10'la başlayan 65 grup: 0,22 / 0,77 (kural çöküş 0,28); AB'de 25 grup: 0,16 / 0,84; EB'de 23 grup: 0,22 / 0,78.
+  - GPT S1'de (0, 0, 10, 20) ile başlayan 16 grup: 0,56 / 0,31.
+- **"Başlangıçta karar verilmemiş" pay** (kural, 0,2 < P(çöküş) < 0,8):
+  - DeepSeek 0,02–0,09; Mistral 0,35–0,59; GPT 0,14–0,22; insan (H-R3) 0,40.
+- **Hücre içi iki uçlu hücreler:**
+  - S1: DeepSeek 3 / 12, Mistral 7 / 12, GPT 8 / 12;
+  - insan şehirleri 10 / 16.
+
+### Okuma (betimsel, keşifsel)
+
+1. Bağlam içinde öğrenilen tek turluk kural, ortalama yörüngelerin ötesinde makro yapıyı da üretiyor: emici bir çöküş durumu, yapışkan bir işbirliği durumu ve iki uçlu son durum dağılımı. DeepSeek ve Mistral'da ayrıca tek bedavacıda keskin bir devrilme eşiği var. Örneklem dışı verilerde bu yapı büyük ölçüde tutuyor; istisna Mistral'ın 15 turluk oyunu: işbirliği öngörülenden uzun sürdü.
+2. İzole cevaplardan kurulan kural (R0) üç modelde de nitel olarak farklı bir sistem öngörüyor:
+   - DeepSeek ve Mistral'da tek çekici ve kademeli düşüş;
+   - GPT'de çöküşsüz bir yükseliş;
+   - bedavacılara zayıf duyarlılık ve fazla sayıda ara son.
+3. İnsan grupları aynı oyunda başka bir rejimde:
+   - çöküş emici değil, geri dönüş var;
+   - sonlar iki uçlu değil, %30'u arada;
+   - ilk turdaki bedavacıların etkisi kademeli.
+
+   İnsan dinamiği tek turluk havuz kuralla yalnız kısmen yakalanıyor. Bir olası açıklama kişiler arası kalıcı farklar (heterojenlik) ama bu sınanmadı. LLM grupları homojen ajanlardan oluşuyor ve tek turluk kural onlar için yetiyor.
