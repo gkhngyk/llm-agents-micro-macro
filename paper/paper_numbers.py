@@ -151,3 +151,21 @@ print("\n## Dynamics: end shares with the 1/9 thresholds (sensitivity, D3a only)
 for m, dd in dy["datasets"].items():
     print(f"- {m}: " + "; ".join(f"{d} " + ", ".join(f"{lab} {x['observed']['est']:.2f}/{x['rule']:.2f} {x['label']}"
                                                    for lab, x in v["D3a"]["sens_1_9"].items()) for d, v in dd.items()))
+print("\n## Supplement S3: cell-level rule properties and R0 fixed points (Study 1 cells)")
+print("| model | card | p all-0 | p all-10 | median life all-10 | k* rule | R0 stable fixed points | R0 neutral segments | k* R0 |")
+print("|---|---|---:|---:|---:|---:|---|---|---:|")
+for m in M:
+    cr, c0 = dy["rules"][m]["cells"], dy["R0"][m]["cells"]
+    for c in cr:
+        fp = c0[c]["fixed_points"]
+        st_ = ", ".join(f"{p['x']:.1f}" for p in fp["points"] if p["stable"]) or "none"
+        merged = []
+        for a, b in fp["continua"]:
+            if merged and merged[-1][1] == a:
+                merged[-1][1] = b
+            else:
+                merged.append([a, b])
+        seg = ", ".join(f"{a:.0f}–{b:.0f}" for a, b in merged) or "none"
+        ks = lambda k: "none" if k is None else str(k)
+        print(f"| {m} | {c} | {cr[c]['D1a']['Z']['p']:.2f} | {cr[c]['D1a']['C10']['p']:.2f} | {cr[c]['D1b']['C10']['median']:.0f} | "
+              f"{ks(cr[c]['D2']['k_star'])} | {st_} | {seg} | {ks(c0[c]['D2']['k_star'])} |")

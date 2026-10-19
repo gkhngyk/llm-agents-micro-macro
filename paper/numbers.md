@@ -161,3 +161,43 @@
 - mistral: S1 collapse 0.38/0.33 yeniden üretiyor, middle 0.05/0.09 yeniden üretiyor, coop 0.57/0.58 yeniden üretiyor; AB collapse 0.31/0.35 belirsiz, middle 0.09/0.13 yeniden üretiyor, coop 0.59/0.53 belirsiz; EB collapse 0.29/0.37 belirsiz, middle 0.04/0.08 yeniden üretiyor, coop 0.67/0.55 belirsiz
 - gpt: S1 collapse 0.18/0.13 yeniden üretiyor, middle 0.04/0.09 yeniden üretiyor, coop 0.78/0.78 yeniden üretiyor; AB collapse 0.23/0.20 yeniden üretiyor, middle 0.04/0.09 yeniden üretiyor, coop 0.73/0.71 yeniden üretiyor; EB collapse 0.08/0.11 yeniden üretiyor, middle 0.06/0.04 yeniden üretiyor, coop 0.86/0.85 yeniden üretiyor
 - human: H collapse 0.11/0.07 yeniden üretiyor, middle 0.53/0.54 yeniden üretiyor, coop 0.36/0.38 yeniden üretiyor
+
+## Supplement S3: cell-level rule properties and R0 fixed points (Study 1 cells)
+| model | card | p all-0 | p all-10 | median life all-10 | k* rule | R0 stable fixed points | R0 neutral segments | k* R0 |
+|---|---|---:|---:|---:|---:|---|---|---:|
+| deepseek | athens_factual | 0.99 | 0.96 | 22 | 1 | none | 0–5 | 3 |
+| deepseek | athens_minimal | 0.97 | 0.86 | 9 | 0 | 0.0 | 10–15 | 1 |
+| deepseek | athens_value | 0.80 | 0.59 | 5 | 0 | 0.0 | 10–20 | 1 |
+| deepseek | boston_factual | 1.00 | 0.96 | 22 | 1 | 0.0 | 10–20 | 1 |
+| deepseek | boston_minimal | 0.96 | 0.96 | 21 | 1 | 0.0 | 10–20 | 1 |
+| deepseek | boston_value | 0.99 | 0.96 | 23 | 1 | 0.0 | 15–20 | 0 |
+| deepseek | copenhagen_factual | 0.89 | 1.00 | 100 | 1 | none | 0–20 | 3 |
+| deepseek | copenhagen_minimal | 0.91 | 1.00 | 100 | 1 | none | 0–20 | 3 |
+| deepseek | copenhagen_value | 0.32 | 0.99 | 100 | none | none | 0–20 | 3 |
+| deepseek | riyadh_factual | 0.99 | 0.96 | 21 | 1 | 0.0 | 10–20 | 1 |
+| deepseek | riyadh_minimal | 0.96 | 0.92 | 9 | 0 | 0.0 | 15–20 | 0 |
+| deepseek | riyadh_value | 0.44 | 0.90 | 11 | 1 | none | 0–20 | 3 |
+| mistral | athens_factual | 0.98 | 0.67 | 3 | 0 | 0.0 | none | 1 |
+| mistral | athens_minimal | 0.88 | 0.93 | 11 | 0 | 0.0 | none | 1 |
+| mistral | athens_value | 0.92 | 1.00 | 100 | 1 | 20.0 | none | none |
+| mistral | boston_factual | 0.48 | 0.97 | 24 | 1 | 0.0 | none | 0 |
+| mistral | boston_minimal | 0.92 | 0.89 | 8 | 0 | 0.0 | 10–20 | 1 |
+| mistral | boston_value | 0.94 | 0.95 | 15 | 1 | 0.0 | none | 0 |
+| mistral | copenhagen_factual | 0.86 | 0.96 | 17 | 1 | 0.0 | 10–15 | 1 |
+| mistral | copenhagen_minimal | 0.66 | 0.97 | 21 | 1 | 0.0 | none | 0 |
+| mistral | copenhagen_value | 0.92 | 1.00 | 100 | 2 | none | 10–20 | 4 |
+| mistral | riyadh_factual | 0.92 | 0.91 | 11 | 0 | none | 0–20 | 3 |
+| mistral | riyadh_minimal | 0.89 | 0.93 | 11 | 0 | none | 0–10 | 3 |
+| mistral | riyadh_value | 0.92 | 1.00 | 100 | 1 | 20.0 | none | none |
+| gpt | athens_factual | 1.00 | 0.97 | 100 | 3 | none | 0–20 | 3 |
+| gpt | athens_minimal | 1.00 | 1.00 | 100 | 3 | none | 0–20 | 3 |
+| gpt | athens_value | 1.00 | 1.00 | 100 | 2 | none | 0–20 | 3 |
+| gpt | boston_factual | 1.00 | 1.00 | 100 | 2 | none | 0–20 | 3 |
+| gpt | boston_minimal | 1.00 | 1.00 | 100 | 2 | none | 0–20 | 3 |
+| gpt | boston_value | 1.00 | 0.99 | 100 | 3 | none | 0–20 | 3 |
+| gpt | copenhagen_factual | 1.00 | 1.00 | 100 | 4 | none | 0–20 | 3 |
+| gpt | copenhagen_minimal | 1.00 | 1.00 | 100 | 3 | none | 0–20 | 3 |
+| gpt | copenhagen_value | 1.00 | 1.00 | 100 | 3 | none | 0–5, 15–20 | 3 |
+| gpt | riyadh_factual | 1.00 | 1.00 | 100 | 3 | none | 10–20 | 4 |
+| gpt | riyadh_minimal | 1.00 | 1.00 | 100 | 2 | none | 0–20 | 3 |
+| gpt | riyadh_value | 1.00 | 1.00 | 100 | 3 | none | 0–20 | 3 |
