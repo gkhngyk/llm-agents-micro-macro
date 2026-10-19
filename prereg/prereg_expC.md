@@ -1,4 +1,4 @@
-TASLAK — kullanıcı onayı bekliyor (2026-10-19, ikinci taslak)
+ONAYLANDI — 2026-10-19 (kullanıcı; §10 seçenek (a), tam seri)
 
 > Bu belge onaylanmadan hiçbir ücretli çağrı yapılmaz. Her aşama (C1 duman, C2 ana koşu) kullanıcı o aşama için "BAŞLA" deyince başlar.
 
@@ -224,7 +224,10 @@ Başka bir durmada kullanıcıya bildirir. Büyük gruplarda bir turdaki n çağ
 2. **Duman (C1):** her model × n için 1 grup, ≈ 3 USD (önerilen).
 3. **Onay:** onaylanırsa C0'a geçilir (ücretsiz). C1 ve C2 için ayrıca "BAŞLA".
 
+**Kayıt (2026-10-19, kullanıcı):** "onaylıyorum, a seçeneği, C0'a geç". Kapsam (a): GPT n = 4 / 8 / 16 / 32 (kart başına 12 grup), Mistral n = 4 / 8 / 16 (kart başına 6 grup); C1 duman önerildiği gibi. C1 ve C2 yine ayrı "BAŞLA" ister.
+
 ## Değişiklik günlüğü
 
 - 2026-10-19: ilk taslak (yalnız n = 8; commit `5f64f3d`).
+- 2026-10-19: onay (kullanıcı, seçenek (a)); metin değişmedi, yalnız üst satır ve §10 kaydı.
 - 2026-10-19: ikinci taslak. Büyüklük serisine çevrildi (GPT 4 / 8 / 16 / 32, Mistral 4 / 8 / 16; eşzamanlı 4 kişilik kontrol). Hipotezler ölçek yönü (C-H1), aktarım (C-H2), makro aktarım (C-H3) ve eğri (C-H4) olarak yeniden yazıldı. Onaydan ve veriden önce.
