@@ -289,3 +289,17 @@ Başka bir durmada kullanıcıya bildirir. Büyük gruplarda bir turdaki n çağ
 - **Sıradaki adım:** C1 duman testi, kullanıcı "BAŞLA C1" deyince. C1 verisi analize girmez; muhakemeler okunur (bkz. §7).
 
 - **Düzeltme (2026-10-19):** F-C.1 tablosunda C1 toplam p95 3,96 USD olmalı (0,5438 + 1,0948 + 2,2212 + 0,1047); 3,97 yazıldı (yuvarlama). Tavanlar etkilenmez.
+
+## Ek F-C.2 — Plan ve tahmin Zenodo'da herkese açık (2026-10-19)
+
+- **Kayıt:** https://doi.org/10.5281/zenodo.23483296 ("Pre-registered forecast: how cooperation among LLM agents changes with group size (Experiment C)"). Kullanıcı yükledi, CC BY 4.0. Oluşturulma zamanı 2026-10-19 20:04:55 UTC (23:04 Türkiye saati).
+- **Dosya:** `expC_prereg_f258798.zip`, md5 `b77109baf7940a5ecef15056b97b399c`. Yereldeki paketle aynı. Paket commit `f2587985ed2dd8cc6c8288a88cd34b22a525e020`'den `scripts/build_zenodo_expC.py` ile kuruldu.
+- **İçerik:**
+  - bu planın F-C.1 dahil hali;
+  - dondurulmuş kural tabloları (sha256 `62b2bae7…d93d1`);
+  - dondurulmuş tahmin (sha256 `00d88e05…be9df`);
+  - kod, çerçeveler, config'ler ve İngilizce README.
+
+  Paketi açıp tek başına sınadım: bütün sha256'lar tuttu ve tahmin paketteki koddan birebir yeniden üretildi.
+- **Yükleme anındaki durum:** C1 duman koşuları 19:51 UTC'de başlamıştı ve sürüyordu. Hiçbir C2 (ana koşu) verisi yoktu, C2 başlatılmamıştı. README'deki "A smoke test … ran on 2026-10-19" ifadesi yükleme anında "sürüyordu" anlamındadır. C1 verisi plana göre analize girmez.
+- **Değişiklik kuralı:** C1 okuması bir tasarım değişikliği gerektirirse değişiklik bu dosyaya tarihli ek olarak yazılır ve Zenodo'ya C2'den önce yeni bir sürüm olarak yüklenir. Dondurulmuş tahmin değişmez.

@@ -317,7 +317,7 @@ Every result so far concerns groups of four. A complexity reader's first objecti
 - The prompt is that of Study 1 except the number of players. The rule-check example lists the other players, so it grows with n.
 - DeepSeek was not included: with minimal cards its groups collapse almost always even at n = 4, so a size effect could not show.
 
-**Frozen forecast** (`data/expC/forecast_v1.json`, sha256 `00d88e05…be9df`; Table 5). The in-play rule predicts opposite scaling in the two models:
+**Frozen forecast** (`data/expC/forecast_v1.json`, sha256 `00d88e05…be9df`; Table 5). The plan and the forecast were deposited publicly before the main run (https://doi.org/10.5281/zenodo.23483296). The in-play rule predicts opposite scaling in the two models:
 - Mistral groups end in the collapse region more often as they grow (0.37 → 0.57 → 0.77 at round 8);
 - GPT groups do not (0.23 → 0.19 → 0.16 → 0.15).
 
@@ -377,7 +377,7 @@ In the terms of agent-based social science, these macro properties are generated
 The repository contains:
 - plans and amendments (`prereg/`);
 - code and configurations;
-- frozen rule tables and forecasts (`data/expB/`, `data/expC/`); the Study 4 plan and forecast were also deposited on Zenodo before its main run [DOI to be added];
+- frozen rule tables and forecasts (`data/expB/`, `data/expC/`); the Study 4 plan and forecast were also deposited on Zenodo before its main run (https://doi.org/10.5281/zenodo.23483296);
 - analysis outputs and the figure scripts;
 - all decisions with reasoning texts;
 - the supplement (`paper/supplement_v1.md`): identity and interaction details (S1–S2), cell-level macro structure (S3).
@@ -409,5 +409,5 @@ Raw API logs are released in redacted form (they contain an account identifier).
 1. ~~Check the human city means against the published data file.~~ Done: recomputed from the Dryad file (N experiment, N played first), equal to Table 1.
 2. ~~AgentSociety2 example.~~ Dropped: not cited in the text, and not found in a primary source.
 3. Release as an open preprint with data and code (Zenodo), as for the first study; no journal submission planned. Before release: redact raw logs, add the repository link and DOI.
-4. Study 4 (Experiment C): plan approved, forecast frozen (F-C.1), smoke test C1 running 2026-10-19. Before C2: deposit the plan and forecast on Zenodo (`release/zenodo_expC/`); after C2: fill in Section 8, update the Abstract, Introduction (contributions) and Discussion.
+4. Study 4 (Experiment C): plan approved, forecast frozen (F-C.1), smoke test C1 running 2026-10-19. Plan and forecast deposited on Zenodo (https://doi.org/10.5281/zenodo.23483296, 2026-10-19 20:04 UTC, before any C2 data). After C2: fill in Section 8, update the Abstract, Introduction (contributions) and Discussion.
 5. ~~World Bank Doing Business 2020 reference.~~ Done (DOI and the four values checked).
