@@ -306,10 +306,11 @@ def analyse_dataset(name: str, cells: dict, E: int, rules: dict, r0: dict | None
         if sel.sum() < MIN_K1:
             d2[k] = {"n": int(sel.sum())}
             continue
+        one = np.zeros(int(sel.sum()))        # prereg_dyn D.1: unstratified inside k1 classes
         d2[k] = {"n": int(sel.sum()),
-                 "observed": boot_mean(co[sel], strata[sel], (name, "k1-obs", k), n_boot),
+                 "observed": boot_mean(co[sel], one, (name, "k1-obs", k), n_boot),
                  "rule": float(cp[sel].mean()),
-                 "obs_minus_rule": boot_mean(co[sel] - cp[sel], strata[sel], (name, "k1-diff", k), n_boot)}
+                 "obs_minus_rule": boot_mean(co[sel] - cp[sel], one, (name, "k1-diff", k), n_boot)}
         d2[k]["label"] = band_label(d2[k]["obs_minus_rule"])
         if c0 is not None:
             d2[k]["R0"] = float(c0[sel].mean())

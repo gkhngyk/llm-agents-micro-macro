@@ -124,3 +124,10 @@ H aynı oyundur: 4 kişilik sabit gruplar, 20 jeton, MPCR 0,4, 10 dönem, ceza y
 ## Değişiklik günlüğü
 
 - 2026-10-19: ilk sürüm, hesaplamadan önce.
+
+## Ek D.1 — Bootstrap düzeltmesi, D2 k1 sınıfları (2026-10-19, ilk çalıştırmadan sonra)
+
+- **Ne görüldü:** ilk çalıştırma (`results/dynamics_analysis_v0_stratified_k1.json`, sha256 `9b28e672be4e9f3e44640f2e4dd9afc02eb1a35a7faac77f23e2c029d5082852`, kod `2fd471c`), k1 sınıflarında sıfır genişlikte CI'ler verdi. Örnekler: insan k1 = 2, 16 grup, gözlenen 0,62 [0,62, 0,62]; GPT AB k1 = 3, 5 grup, fark −0,14 [−0,15, −0,14].
+- **Neden:** §6'daki kart (şehir) içinde tabakalı bootstrap, k1 sınıfı içinde tabakaların çoğunu 1–3 gruba indiriyor. Tek gruplu bir tabaka yeniden örneklemede hep aynı değeri verir. Böyle bir CI belirsizliği yok sayar; bu bir yöntem hatasıdır.
+- **Değişiklik:** yalnız D2 k1 sınıflarında bootstrap tabakasız yapılır (sınıf içindeki gruplar üzerinden). Bütün veri kümesi düzeyindeki paylarda (D1c S(E), D3a) tabakalama aynen kalır; orada her kartta 6–16, her şehirde 8–24 grup var. Bu değişiklik CI'leri genişletir; yani tutucu yöndedir. Sonuçlar bu düzeltmeyle yeniden hesaplanır ve ilk dosyanın etiketleri ayrıca raporlanır.
+- **İlk çalıştırmadan görülen ama değiştirilmeyen bir sınır durumu:** Mistral'ın model düzeyindeki R0'ı, k = 0 başlangıcından 13. turda m = 2,497'ye iniyor. Bu, çöküş eşiğinin (2,5) 0,003 altında kalıyor; bu yüzden k*_R0 = 0. Eşik değiştirilmedi. Raporda bu sınır durumu açıkça yazılır: R0'ın tek kararlı sabit noktası x ≈ 2,08'dir, okuma kuralı 5'in ilk koşulu bu k* sınır durumundan bağımsızdır.

@@ -151,5 +151,23 @@ class Labels(unittest.TestCase):
         self.assertEqual(lab["5_R0"], "izole kural makro yapıyı nitel olarak yanlış öngörüyor")   # matcher: a continuum
 
 
+class KClassBootstrap(unittest.TestCase):
+    def test_k1_classes_not_stratified(self):
+        """One group per card inside a k1 class: the CI must not collapse to a point (D.1)."""
+        cells, rules, r0 = {}, {}, {}
+        fz = frozen(bistable_world())
+        for j in range(8):
+            g = np.full((1, 10, 4), 10.0)
+            g[0, 0, 0] = 0
+            g[0, 1:, :] = 0 if j % 2 else 10           # half collapse, half stay
+            cells[f"c{j}"] = g
+            rules[f"c{j}"] = pb.rules_for(fz, "gpt", "a_minimal", "R3")
+            r0[f"c{j}"] = fz["models"]["gpt"]["cells"]["a_minimal"]["iso_f"]
+        out = pd.analyse_dataset("t", cells, 8, rules, r0, s=20, n_boot=500)
+        lo, hi = out["D2_by_k1"][1]["observed"]["ci"]
+        self.assertLess(lo, 0.5)
+        self.assertGreater(hi, 0.5)
+
+
 if __name__ == "__main__":
     unittest.main()
