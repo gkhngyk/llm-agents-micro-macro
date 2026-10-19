@@ -357,3 +357,29 @@ Başka bir durmada kullanıcıya bildirir. Büyük gruplarda bir turdaki n çağ
 
      Diğer tavanlar ve kapılar aynı. C2'nin beklenen toplamı ≈ 58 USD (Mistral ≈ 49,7, GPT ≈ 8,7); sert tavanların toplamı 105 USD.
 - **Sıradaki adım:** C2 bu değişiklikten sonraki commit'in kod kopyasıyla, kullanıcı "BAŞLA C2" deyince. Dört koşu (n = 4, 8, 16, 32) aynı anda başlar; izleyici F.8 / 429 / parse / 5xx kurallarıyla sürdürür.
+
+## Ek F-C.4 — C2 öncesi tasarım (güç) analizi ve veri yolu kontrolü (2026-10-19, yalnız sentetik veri)
+
+- **Amaç:** ücretli C2'den önce, önerilen grup sayılarıyla (Mistral kart başına 6, GPT 12) testlerin ne sıklıkla doğru etiketi vereceğini görmek. Hiçbir C2 verisi yok; duman verisi kullanılmadı.
+- **Yöntem** (`scripts/power_expC.py`; seed 20261019):
+  - **"Kural doğru" dünyası:** gruplar dondurulmuş R3 ile, 1. tur hücrenin Aşama 1 havuzundan çekilerek üretildi.
+  - **"R0 doğru" dünyası:** aynı başlangıçlardan izole kural.
+  - C-H1 için 300 tekrar, analiz kodunun kendi bootstrap ve etiket fonksiyonlarıyla (bootstrap 2 000).
+  - C-H2 ve C-H3 için (Mistral, n = 16) 40 tekrar; koşullu tahmin S = 100, bootstrap 1 000.
+- **Sonuç:**
+
+  | test | dünya | etiket dağılımı |
+  |---|---|---|
+  | C-H1 Mistral (4 → 16) | kural doğru | "artış" 0,87, "belirsiz" 0,13 (ortalama Δ +0,40) |
+  | C-H1 Mistral | R0 doğru | "artış" 0,03 (yanlış alarm), "belirsiz" 0,87, "değişim yok" 0,08, "azalış" 0,02 |
+  | C-H1 GPT (4 → 32) | kural doğru | "artış" 0,00, "belirsiz" 0,80, "azalış" 0,20 |
+  | C-H1 GPT | R0 doğru | "artış" 0,00, "azalış" 0,38, "değişim yok" 0,16, "belirsiz" 0,46 |
+  | C-H2 Mistral n = 16 | kural doğru | 40/40 "tahmin tuttu" (28'i sıkı eşdeğerlik) |
+  | C-H3 Mistral n = 16 | kural doğru | 7/40 "yeniden üretiyor", 33/40 "belirsiz" |
+
+  - "Ters yönlü ölçek doğrulandı" etiketi kural doğruysa ≈ 0,87 olasılıkla çıkar, R0 doğruysa ≈ 0,03 olasılıkla.
+  - C-H3, Mistral'da beklendiği gibi güçsüz (§5 güç notu). İkincil olduğu için tasarım değiştirilmedi.
+  - GPT'de "artış yok" kuralla da R0 ile de neredeyse kesin. Bu kol yalnız (c) seçeneğini, yani genel bir ölçek düşüşünü sınar (§2).
+- **Karar:** grup sayıları yeterli; tasarım değişmez.
+- **Veri yolu kontrolü:** analiz kodunun okuyucusu (`pa.load_run` + `UnitsN`) dört duman koşusunun gerçek dosyalarında denendi. Yalnız biçime bakıldı: grup dizileri (1, 10, n), tamamlanmamış grup 0, kural anlama bayrakları okunuyor. Katkılar hesaplanmadı.
+- **Not (yorum için):** `comp_full` duyarlılığı, bir grubu ajanlarından biri bile kural anlama sorusunda hata yaparsa dışarıda bırakır. Ajan başına küçük bir hata oranı bile büyük gruplarda çok sayıda grubu düşürür; ör. ajan başına %3 hatada 32 kişilik bir grubun hepsinin doğru olma olasılığı ≈ 0,38. Bu yüzden bu duyarlılık n ile karışır ve büyük n'de bilgi değeri düşüktür. Plan değişmez; raporda bu not verilir.
