@@ -383,3 +383,13 @@ Başka bir durmada kullanıcıya bildirir. Büyük gruplarda bir turdaki n çağ
 - **Karar:** grup sayıları yeterli; tasarım değişmez.
 - **Veri yolu kontrolü:** analiz kodunun okuyucusu (`pa.load_run` + `UnitsN`) dört duman koşusunun gerçek dosyalarında denendi. Yalnız biçime bakıldı: grup dizileri (1, 10, n), tamamlanmamış grup 0, kural anlama bayrakları okunuyor. Katkılar hesaplanmadı.
 - **Not (yorum için):** `comp_full` duyarlılığı, bir grubu ajanlarından biri bile kural anlama sorusunda hata yaparsa dışarıda bırakır. Ajan başına küçük bir hata oranı bile büyük gruplarda çok sayıda grubu düşürür; ör. ajan başına %3 hatada 32 kişilik bir grubun hepsinin doğru olma olasılığı ≈ 0,38. Bu yüzden bu duyarlılık n ile karışır ve büyük n'de bilgi değeri düşüktür. Plan değişmez; raporda bu not verilir.
+
+## Ek F-C.5 — C2 başlatıldı (2026-10-20)
+
+- **Onay:** kullanıcı "BAŞLA C2" dedi. C2 bundan sonra başlatıldı.
+- **Koşular:** dört koşu 2026-10-20 00:06–00:07 Türkiye saatinde (2026-10-19 21:06 UTC) aynı anda başlatıldı; Zenodo kaydından (20:04 UTC) yaklaşık bir saat sonra:
+  - `expC_n4_main_20261020`, `expC_n8_main_20261020`, `expC_n16_main_20261020`, `expC_n32_main_20261020`;
+  - kod `a1f5a87` (temiz kopya `_kod_a1f5a87…`; config tavanları F-C.3'teki gibi).
+- **Kapılar:** dördü de geçti.
+- **İzleyici:** her koşuya ayrı bir izleyici bağlı. F.8 / 429 / parse / 5xx kurallarıyla otomatik sürdürür; süre sınırı 60 saat, en çok 30 otomatik sürdürme.
+- **Analiz:** dört koşu da tamamlanmadan analiz çalıştırılmaz; betik eksik koşuyu reddeder.
