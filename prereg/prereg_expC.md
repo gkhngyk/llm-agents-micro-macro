@@ -287,3 +287,5 @@ Başka bir durmada kullanıcıya bildirir. Büyük gruplarda bir turdaki n çağ
   - Planın kaba hesabı ≈ 64 USD idi; dry-run ortalaması 59 USD.
 - **Koşular:** her büyüklük ayrı bir koşudur. Koşu adları `expC_n{n}_{smoke|main}_<tarih>`, seed ad alanları `pgg-expC-n{n}` ve `pgg-expC-n{n}-smoke`. Aşama: C2 için `stage` "1" (kod sürümü kilidi), C1 için "0b".
 - **Sıradaki adım:** C1 duman testi, kullanıcı "BAŞLA C1" deyince. C1 verisi analize girmez; muhakemeler okunur (bkz. §7).
+
+- **Düzeltme (2026-10-19):** F-C.1 tablosunda C1 toplam p95 3,96 USD olmalı (0,5438 + 1,0948 + 2,2212 + 0,1047); 3,97 yazıldı (yuvarlama). Tavanlar etkilenmez.
