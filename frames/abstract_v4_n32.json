@@ -1,0 +1,147 @@
+{
+  "_notes": "Experiment C (prereg/prereg_expC.md, approved 2026-10-19, before any data). Equal to abstract_v4 except the rule-check question q1, whose example must list the n - 1 = 31 other players for groups of 32 (the engine checks this). The list repeats the abstract_v4 example pattern (4, 12, 16, then 0, 8, 20, 2) and raises the last value until the answer is a whole number. Every decision prompt is byte for byte that of abstract_v4 at the same group size (test). Groups of 4 use abstract_v4 itself.",
+  "schema": 1,
+  "name": "abstract_v4_n32",
+  "description": "Abstract public goods frame of the main experiment: 'The following describes you:' and the card as system message, isolated question at a fixed round, two rule-comprehension questions. Groups of 32: the rule-check question q1 lists 31 other players.",
+  "kind": "abstract",
+  "system": "The following describes you:\n{card}",
+  "player_label": "Player {player_no}",
+  "you_suffix": " (you)",
+  "rules": [
+    {
+      "text": "RULES"
+    },
+    {
+      "text": "- A group has {n} players: you and {n_others} others. Players cannot communicate."
+    },
+    {
+      "text": "- The game is played in rounds; this question is about one round.",
+      "when": [
+        "single_round"
+      ]
+    },
+    {
+      "text": "- The same {n} players stay together for all {rounds} rounds.",
+      "when": [
+        "multi_round"
+      ]
+    },
+    {
+      "text": "- In every round each player receives {endowment} points."
+    },
+    {
+      "text": "- Each player then decides how many of these points (a whole number from 0 to {endowment}) to contribute to a group project. Points that are not contributed stay with the player."
+    },
+    {
+      "text": "- Every point contributed to the project yields {mpcr} points for each of the {n} players. Your earnings from the project in a round are therefore:"
+    },
+    {
+      "text": "  {mpcr} x (sum of all {n} players' contributions)"
+    },
+    {
+      "text": "- Your total earnings in a round are the points you kept plus your earnings from the project:"
+    },
+    {
+      "text": "  {endowment} - (your contribution) + {mpcr} x (sum of all {n} players' contributions)"
+    },
+    {
+      "text": "- After the contributions of a round are revealed, each player may assign punishment points (0 to {max_punish}) to each other player. Each point assigned costs the assigning player {punish_cost} point(s) and reduces the earnings of the receiving player by {punish_impact} points. A player is told only the total number of punishment points received, not who assigned them.",
+      "when": [
+        "P"
+      ]
+    },
+    {
+      "text": "- After each round you are told every player's contribution and your own earnings.",
+      "when": [
+        "multi_round"
+      ]
+    }
+  ],
+  "history": {
+    "empty": "HISTORY\nThis is the first round; there is no history yet.",
+    "header": "HISTORY OF PREVIOUS ROUNDS",
+    "list_item": "{label}: {value}",
+    "list_separator": "; ",
+    "contributions": "Contributions: {contributions_list}. Group total: {group_total}.",
+    "round": [
+      "Round {round}",
+      "  {contributions}",
+      "  Your earnings from the project: {project_share}. Your total earnings this round: {round_earnings}."
+    ],
+    "round_P": [
+      "  Punishment points you assigned: {punish_given} (cost to you: {cost_paid}).",
+      "  Punishment points you received: {received} (points lost: {points_lost}).",
+      "  Your earnings after punishment: {final_earnings}."
+    ],
+    "punish_given_separator": ", ",
+    "punish_given_none": "none"
+  },
+  "contribute": "ROUND {round_no} of {rounds}. You are {me}. All players decide at the same time, without seeing each other's choice for this round.\nHow many of your {endowment} points do you contribute to the group project? (a whole number from 0 to {endowment})",
+  "punish": "ROUND {round_no} of {rounds}, punishment step. You are {me}.\nThis round: {contributions} Your earnings from the project this round: {project_share}. Your total earnings this round (before punishment): {earnings}.\nYou may now assign punishment points (0 to {max_punish}) to each other player. A point costs you {punish_cost} and reduces the receiving player's earnings by {punish_impact}. Your total cost may not exceed your total earnings this round, so you can assign at most {max_points} points in total. All players decide at the same time.",
+  "isolated": {
+    "fixed_round": {
+      "rules": "multi_round",
+      "question": "QUESTION\nThis is round {round_no} of {rounds}. In the previous round the other {n_others} players of your group contributed, on average, {others_mean} points each.\nHow many of your {endowment} points do you contribute to the group project in this round? (a whole number from 0 to {endowment})"
+    }
+  },
+  "comprehension": {
+    "prompt": "RULE CHECK\nBefore you make any decision, answer two questions about the rules above. Your answers do not change anyone's earnings.\n1. {q1}\n2. {q2}\nAnswer each question with a whole number.",
+    "questions": [
+      {
+        "id": "q1",
+        "text": "Suppose that in a round you contribute {own} points and the other {n_others} players contribute {other_1}, {other_2}, {other_3}, {other_4}, {other_5}, {other_6}, {other_7}, {other_8}, {other_9}, {other_10}, {other_11}, {other_12}, {other_13}, {other_14}, {other_15}, {other_16}, {other_17}, {other_18}, {other_19}, {other_20}, {other_21}, {other_22}, {other_23}, {other_24}, {other_25}, {other_26}, {other_27}, {other_28}, {other_29}, {other_30} and {other_31} points. What are your total earnings in that round?",
+        "answer": {
+          "kind": "round_earnings",
+          "own": 8,
+          "others": [
+            4,
+            12,
+            16,
+            0,
+            8,
+            20,
+            2,
+            4,
+            12,
+            16,
+            0,
+            8,
+            20,
+            2,
+            4,
+            12,
+            16,
+            0,
+            8,
+            20,
+            2,
+            4,
+            12,
+            16,
+            0,
+            8,
+            20,
+            2,
+            4,
+            12,
+            18
+          ]
+        }
+      },
+      {
+        "id": "q2",
+        "text": "Suppose that the contributions of the other players stay the same. If you contribute {delta} more points to the group project, by how much do your own total earnings in that round change? Give the change as a whole number (it can be positive, zero or negative).",
+        "answer": {
+          "kind": "own_change",
+          "delta": 10
+        }
+      }
+    ]
+  },
+  "response": {
+    "decision_key": "contribution",
+    "rationale_description": "One or two sentences on why you chose this.",
+    "punishment_key": "punishments",
+    "punishment_description": "Punishment points per other player, keyed by player number."
+  }
+}

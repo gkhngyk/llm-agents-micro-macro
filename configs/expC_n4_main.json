@@ -1,0 +1,84 @@
+{
+  "_notes": "Stage C2 main run, groups of 4: G per card gpt 12, mistral 6 (user decision 2026-10-19, option a). Experiment C (prereg/prereg_expC.md, approved 2026-10-19, before any data): does the rule learned in groups of 4 and frozen (data/expB/frozen_rules_v1.json) predict how collective outcomes change with group size? This config: groups of 4 (params.group_size 4), frame abstract_v4 (the main experiment's prompt, byte for byte); 4 minimal cards (cards/expA_cards_v1.json); 10 rounds; group arm only, condition N; models mistral and gpt, providers and request settings as configs/main.json. Budget caps from the C0 dry run (prereg_expC §7).",
+  "prereg_approved": true,
+  "stage": "1",
+  "run": "expC_n4_main_{run_date}",
+  "cards": "cards/expA_cards_v1.json",
+  "cards_sha256": "0ed7a45d370242856ff7ce3eea2a2d34277ca2e39952a23b6ad0ad1c45d95c2a",
+  "cities": [
+    "Boston",
+    "Copenhagen",
+    "Athens",
+    "Riyadh"
+  ],
+  "models": [
+    "mistralai/mistral-large-4-0",
+    "openai/gpt-6-luna"
+  ],
+  "conditions": [
+    "N"
+  ],
+  "arms": [
+    "group"
+  ],
+  "groups_per_cell": 12,
+  "groups_per_cell_by_model": {
+    "mistral": 6,
+    "gpt": 12
+  },
+  "frames": {
+    "abstract_v4": [
+      "mistral",
+      "gpt"
+    ]
+  },
+  "frame_files": {
+    "abstract_v4": {
+      "path": "frames/abstract_v4.json",
+      "sha256": "c00db315d9c3141b78b04de5ece650e4b922db907cb90ae124666c439633a9f4"
+    }
+  },
+  "comprehension": true,
+  "rationale": true,
+  "answer_format": "example_object",
+  "max_tokens": 16000,
+  "request_deadline_s": 900,
+  "stall_timeout_s": 1800,
+  "providers": {
+    "mistral": {
+      "slug": "mistral",
+      "name": "Mistral"
+    },
+    "gpt": {
+      "slug": "openai",
+      "name": "OpenAI"
+    }
+  },
+  "runs_dir": "/Users/karbon/Desktop/Veri Bilimi/complexity-prj/orc/data/projects/PublicGoods/workspace/runs",
+  "seed_namespace": "pgg-expC-n4",
+  "max_invalid": 3,
+  "budget_usd": 14,
+  "model_budget_usd": {
+    "mistral": 13,
+    "gpt": 0.5
+  },
+  "expected_cost_gate_usd": 9,
+  "cost_calibration": {
+    "path": "configs/cost_calibration_minipilot.json",
+    "sha256": "d26eb4107aa7ae0ec828bffb912dc5e59d23933347cdf3a8f737858b5ec040c8"
+  },
+  "invalid_rate_cap": 0.05,
+  "stop_on_length": true,
+  "check_snapshot": true,
+  "snapshot_version_models": [
+    "mistral"
+  ],
+  "reasoning_cap_rule": {
+    "mistral": "max_reasoning_completion"
+  },
+  "workers": 4,
+  "parallel_units": 3,
+  "params": {
+    "group_size": 4
+  }
+}
