@@ -231,3 +231,59 @@ Başka bir durmada kullanıcıya bildirir. Büyük gruplarda bir turdaki n çağ
 - 2026-10-19: ilk taslak (yalnız n = 8; commit `5f64f3d`).
 - 2026-10-19: onay (kullanıcı, seçenek (a)); metin değişmedi, yalnız üst satır ve §10 kaydı.
 - 2026-10-19: ikinci taslak. Büyüklük serisine çevrildi (GPT 4 / 8 / 16 / 32, Mistral 4 / 8 / 16; eşzamanlı 4 kişilik kontrol). Hipotezler ölçek yönü (C-H1), aktarım (C-H2), makro aktarım (C-H3) ve eğri (C-H4) olarak yeniden yazıldı. Onaydan ve veriden önce.
+
+## Ek F-C.1 — C0: dondurulan tahmin, çerçeveler, config'ler ve bütçe tavanları (2026-10-19, ücretli çağrıdan önce)
+
+- **Kod:** commit `cf8850c`: `pgg_analysis_expC.py`, çerçeveler, config'ler ve 13 test; tam paket 617 test geçti. Testlerin kapsadığı yerler:
+  - n = 4'te durum hesabı Aşama 1 koduyla aynı;
+  - R0, Deney B koduyla aynı;
+  - sentetik dünyalar: "tek 0 tetikler", "büyük grupta hoşgörü", "değişim yok";
+  - her n'de karar istemleri `abstract_v4` ile bayt bayt aynı;
+  - 8 kişilik bir grubun motorda sahte API ile uçtan uca oynanması.
+- **Çerçeveler** (yalnız q1 farklı; q1 örneği n − 1 öteki listeler; desen 4, 12, 16, 0, 8, 20, 2 tekrarlanır):
+
+  | çerçeve | sha256 | öteki sayısı | anahtar (q1 / q2) | not |
+  |---|---|---|---|---|
+  | `abstract_v4_n8` | `9de2ef2c5439d99e70314c65ef675f2e1950ee7650e973d1c0f06bd3af7b8968` | 7 | 40 / −6 | |
+  | `abstract_v4_n16` | `4af2135903a53c94e03fd31136a07637b57b38053b70fa9b9a4ce84fcc4a4c6b` | 15 | 68 / −6 | son değer 4 → 8 |
+  | `abstract_v4_n32` | `c6ac2b296044d2bf494631bad70e322121bf856a9ece203c5274ab6e70a48aa3` | 31 | 128 / −6 | son değer 16 → 18 |
+
+  - Son değer, cevabın tam sayı olması için yükseltildi (0,4 × toplam tam sayı olmalı; motor bunu şart koşuyor). Bu, §3.2'deki "desen tekrarı" kuralının uygulama ayrıntısıdır.
+  - 4 kişilik kontrol `abstract_v4`'ü (sha256 `c00db315…a9f4`) aynen kullanır.
+- **Koşulsuz tahmin (dondurulan):** `data/expC/forecast_v1.json`, sha256 `00d88e05fed5dcede000a5d2a9e56287383e752787ba2554562f2e21099be9df`. Hesap: S = 4 000, seed `stable_seed("pgg-expC-forecast", model, kart, n)`, dondurulmuş R3 (sha256 `62b2bae7…d93d1`).
+
+  **Minimal kartların ortalaması, 8. turda çöküş bölgesindeki grup payı (ortalama katkı, tur 2–10):**
+
+  | model | kural | n = 4 | n = 8 | n = 16 | n = 32 |
+  |---|---|---|---|---|---|
+  | Mistral | R3 | 0,373 (6,54) | 0,570 (5,25) | 0,772 (3,83) | — |
+  | Mistral | R0 | 0,297 (7,97) | 0,298 (7,82) | 0,311 (7,70) | — |
+  | GPT | R3 | 0,228 (7,25) | 0,188 (6,84) | 0,158 (6,50) | 0,146 (6,46) |
+  | GPT | R0 | 0,063 (8,82) | 0,013 (8,84) | 0,000 (8,84) | 0,000 (8,82) |
+
+  - **C-H1 karşılaştırma noktaları (koşulsuz, n büyük − n = 4):** Mistral R3 +0,399, R0 +0,014; GPT R3 −0,083, R0 −0,063.
+  - **Kartlar, R3, n = 4 → en büyük n:**
+    - Mistral: Boston 0,51 → 0,91, Kopenhag 0,23 → 0,54, Atina 0,41 → 0,86, Riyad 0,34 → 0,78;
+    - GPT: Boston 0,17 → 0,00, Kopenhag 0,14 → 0,00, Atina 0,21 → 0,00, Riyad 0,40 → 0,58.
+- **Config'ler ve bütçe tavanları** (C0 dry-run, önceki deneylerin kuralıyla):
+  - sert tavan = toplam p95 üst sınırın yukarı yuvarlanması;
+  - model alt tavanı ≥ model p95 (1 USD altı 0,1'e yuvarlanır);
+  - kapı = ortalama × 1,1, yukarı yuvarlanır.
+
+  | config | çağrı | ortalama / p95 (USD) | sert tavan | alt tavanlar | kapı |
+  |---|---|---|---|---|---|
+  | `expC_n4_main` | 3 168 | 7,82 / 13,29 | 14 | Mistral 13, GPT 0,5 | 9 |
+  | `expC_n8_main` | 6 336 | 15,79 / 26,78 | 27 | Mistral 26, GPT 2 | 18 |
+  | `expC_n16_main` | 12 672 | 32,20 / 54,40 | 55 | Mistral 53, GPT 3 | 36 |
+  | `expC_n32_main` | 16 896 | 3,21 / 5,03 | 6 | GPT 6 | 4 |
+  | **C2 toplam** | 39 072 | **59,02 / 99,50** | 102 | | |
+  | `expC_n4_smoke` (Boston) | 88 | 0,32 / 0,54 | 1 | Mistral 0,6, GPT 0,1 | 1 |
+  | `expC_n8_smoke` (Kopenhag) | 176 | 0,65 / 1,09 | 2 | Mistral 2, GPT 0,1 | 1 |
+  | `expC_n16_smoke` (Atina) | 352 | 1,31 / 2,22 | 3 | Mistral 3, GPT 0,1 | 2 |
+  | `expC_n32_smoke` (Riyad) | 352 | 0,07 / 0,10 | 1 | GPT 0,2 | 1 |
+  | **C1 toplam** | 968 | **2,35 / 3,97** | 7 | | |
+
+  - Dry-run'ın istem ölçeği tahmini (karakter oranı): n = 4 / 8 / 16 / 32 için × 0,95 / 1,06 / 1,31 / 1,79.
+  - Planın kaba hesabı ≈ 64 USD idi; dry-run ortalaması 59 USD.
+- **Koşular:** her büyüklük ayrı bir koşudur. Koşu adları `expC_n{n}_{smoke|main}_<tarih>`, seed ad alanları `pgg-expC-n{n}` ve `pgg-expC-n{n}-smoke`. Aşama: C2 için `stage` "1" (kod sürümü kilidi), C1 için "0b".
+- **Sıradaki adım:** C1 duman testi, kullanıcı "BAŞLA C1" deyince. C1 verisi analize girmez; muhakemeler okunur (bkz. §7).
