@@ -177,7 +177,7 @@ def fig5_scaling():
     axes[0].set_ylabel("share of groups collapsed at round 8")
     h, lab = axes[0].get_legend_handles_labels()
     fig.legend(h, lab, frameon=False, fontsize=8, loc="lower center", ncol=2, bbox_to_anchor=(0.5, -0.2))
-    fig.suptitle("Study 4: LLM groups become more fragile as they grow", y=1.03, fontsize=10)
+    fig.suptitle("Study 4: larger LLM groups collapsed more often", y=1.03, fontsize=10)
     fig.savefig(OUT / "fig5_scaling.png")
     plt.close(fig)
 

@@ -343,7 +343,7 @@ The stated responses (R0) predict no size effect for Mistral in the frozen forec
 
 **Results** (`results/expC_main_20261020_analysis.json`; 264 groups, 56.67 USD; Figure 5). Every run completed; no invalid answers (4 GPT answers that could not be parsed were re-requested); model versions as before.
 
-- **Both models collapsed more often as groups grew (C-H1 "increase" in both).**
+- **Both models collapsed more often in larger groups (C-H1 "increase" in both; not monotonic in between).**
   - Mistral: 0.29 of groups at n = 4, 0.21 at 8 and 0.79 at 16 were in the collapse region at round 8; 16 − 4 = +0.50 [+0.29, +0.71].
   - GPT: 0.23, 0.56, 0.48 and 0.69 at n = 4, 8, 16 and 32; 32 − 4 = +0.46 [+0.29, +0.63].
   - The labels were the same against the historical four-agent groups of Studies 1–2.
