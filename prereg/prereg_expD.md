@@ -122,3 +122,28 @@ ONAYLANDI — 2026-10-20 (kullanıcı; 64 kişi, Mistral yok)
 
 - **Yanlış olan:** §5'teki "R4 durumunun n = 4'te R3'e indirgenmesi" testi yanlış tanımlanmış. 4 kişide de 0 sayısı 0–3 değerini alır; R4-sayı, 2 ya da 3 kişinin 0 verdiği durumları R3'ten ayırır. Yani R4, 4 kişide de R3'e indirgenmez.
 - **Doğru test:** R4'ün yeni öğesi "biri 0 verdi" göstergesiyle tutarlıdır: 0 sayısı (ya da payı) > 0 ⇔ gösterge 1. Geri çekilmede yeni öğe düşünce durum R3 durumunun aynısı olur.
+
+## Ek F-D.2 — D0 sonucu: karar kapısı geçilmedi, D2 koşulmaz (2026-10-20)
+
+- **Kod ve dosya:** kod `f429709`; 628 test geçti. Sentetik "sayıya tepki veren dünya"da R4-sayı, R3'ü yeniyor. `results/expD_select.json`, sha256 `053d1566487d66d861465554deee82c1ea9233535497824215bd9a9118028318` (S = 500).
+- **Dışarıda bırakılan büyüklük:** 8. turda çöküş payı hatası |gözlenen − tahmin|; parantez içinde yörünge RMSE.
+
+  | model, dışarıdaki n | gözlenen | R3-donmuş | R3-tümü | R4-sayı | R4-pay |
+  |---|---|---|---|---|---|
+  | GPT 8 | 0,562 | 0,346 (2,14) | 0,179 (1,47) | 0,140 (1,26) | 0,179 (1,26) |
+  | GPT 16 | 0,479 | 0,345 (1,56) | **0,095** (0,33) | 0,216 (1,80) | 0,137 (1,23) |
+  | GPT 32 | 0,688 | 0,524 (2,19) | 0,390 (0,96) | **0,112** (1,12) | 0,142 (0,85) |
+  | Mistral 8 | 0,208 | 0,401 (2,52) | 0,314 (1,96) | 0,275 (1,70) | 0,295 (1,76) |
+  | Mistral 16 | 0,792 | 0,057 (1,68) | 0,031 (1,32) | 0,039 (1,42) | 0,023 (0,89) |
+
+- **Seçim (§2):** ortalama |hata| R4-sayı 0,156, R4-pay 0,155; fark < 0,01. Bu yüzden RMSE'ye bakıldı (1,46 ve 1,20) ve **R4-pay** seçildi.
+- **Karar kapısı:**
+  - R4-pay'in ortalama |hatası| 0,155, R3-tümü'nünki 0,202. İyileşme **0,047**; gereken **0,05**. İlk koşul **sağlanmadı** (0,003 farkla).
+  - GPT'de üç büyüklüğün ikisinde R3-tümü'nden iyi; ikinci koşul sağlandı.
+  - Kapı iki koşulu birlikte istiyor; **kapı geçilmedi.** Plan gereği dondurma ve D2 yok. 64 kişilik çerçeve ve config depoda kalır, kullanılmaz.
+- **Dürüstlük notu:** fark eşiğin çok yakınında. Eşik veriden önce yazıldı ve değiştirilmez. "Neredeyse geçti" gerekçesiyle D koşulmaz.
+- **Okuma (keşifsel, betimsel):**
+  1. **Asıl iyileşme yeni bilgiden değil, karışık büyüklükteki veriden.** Kuralı yalnız 4 kişilik verilerden değil, farklı büyüklüklerden öğrenmek, saklanan büyüklüğün hatasını GPT'de yaklaşık yarıya indiriyor: ortalama 0,405 → 0,221.
+  2. **"0 veren sayısı / payı" bilgisi** en büyük grubun (32) dışdeğerlemesinde belirgin yardım ediyor (0,390 → 0,112 / 0,142). Ara büyüklüklerde ediyor ya da etmiyor; 16 kişide kötüleştiriyor. F-C.9 açıklaması yalnız kısmen destekleniyor.
+  3. **Mistral 8 kişilik gruplar** hiçbir kuralla iyi tahmin edilmiyor (en iyi hata 0,275). F-C.7'deki aykırılık sürüyor.
+- **Sonuç:** Deney D burada biter. Bitiş planına (§8) göre sıradaki adım makale.
