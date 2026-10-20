@@ -427,3 +427,80 @@ Başka bir durmada kullanıcıya bildirir. Büyük gruplarda bir turdaki n çağ
 
   GPT'de 4 / 8 / 16 / 32 kişide `comp_full` dışında kalacak grup sayısı en çok 2 / 0 / 2 / 1.
 - **Sıradaki adım:** `pgg_analysis_expC.py analyse`, dondurulmuş tahminle (sha256 `00d88e05…be9df`) ve commit `cf8850c`'deki analiz koduyla. Analiz kodu o tarihten beri değişmedi.
+
+## Ek F-C.7 — C2 analizi: sonuçlar (2026-10-20)
+
+- **Dosya:** `results/expC_main_20261020_analysis.json`, sha256 `1dcb920962b308fcd30abce443ac1cd746f81cd839f93fd84943d430c1724601`. Kod `cf8850c` (değişmedi), dondurulmuş tahmin sha256 `00d88e05…be9df`. Grup sayıları: Mistral 24 / 24 / 24, GPT 48 / 48 / 48 / 48.
+- **Bağımsız kontrol:** ham sonuç satırlarından ayrı kodla yeniden hesaplandı: 8. turda çöküş payları, ortalama katkı (tur 2–10) ve mekanizma oranları, 7 hücrenin 7'si birebir.
+
+### C-H1 — ölçek yönü (birincil)
+
+8. turda çöküş bölgesindeki grup payı (gözlenen):
+
+| model | n = 4 | n = 8 | n = 16 | n = 32 | Δ (en büyük n − 4) [%95 CI] | etiket | kuralın koşullu Δ'sı | R0'ın koşullu Δ'sı |
+|---|---|---|---|---|---|---|---|---|
+| Mistral | 0,292 | 0,208 | 0,792 | — | **+0,500 [+0,292, +0,708]** | **artış** | +0,468 (CI içinde) | +0,167 |
+| GPT | 0,229 | 0,563 | 0,479 | 0,688 | **+0,458 [+0,292, +0,625]** | **artış** | −0,123 (CI dışında) | −0,083 |
+
+- Tarihsel 4 kişilik kontrolle (duyarlılık) iki etiket de aynı: Mistral +0,444 [+0,264, +0,625], GPT +0,446 [+0,301, +0,583], ikisi de "artış".
+- **Okuma (§5 kuralı):**
+  - **Mistral:** "artış" → kural lehine. Kuralın öngördüğü büyüklük (+0,47) güven aralığının içinde; R0'ın +0,17'si altında kalıyor.
+  - **GPT:** "artış" → **kural aleyhine.** Kural azalış öngörmüştü (−0,12). (c) seçeneği, yani büyüklükle genel bir bozulma, GPT'de gerçekleşti.
+  - **Birleşik:** "**ters yönlü ölçek doğrulanmadı**". İki model de büyüdükçe daha sık çöküyor.
+
+### C-H2 — aktarım: ortalama katkı, tur 2–10 (gözlenen − kuralın koşullu tahmini)
+
+| model | n | fark [%95 CI] | Holm p | etiket | R0 farkı |
+|---|---|---|---|---|---|
+| Mistral | 4 (kontrol) | +0,57 [−0,29, +1,33] | | tahmin tuttu | −0,79 |
+| Mistral | 8 | +2,31 [+1,71, +2,93] | < 0,001 | **sapıyor: gerçek daha yüksek** | −0,47 |
+| Mistral | 16 | +1,08 [+0,39, +1,72] | 0,002 | tahmin tuttu | −2,94 |
+| GPT | 4 (kontrol) | +0,42 [−0,66, +1,42] | | tahmin tuttu | −0,95 |
+| GPT | 8 | −2,10 [−3,09, −1,08] | < 0,001 | **sapıyor: gerçek daha düşük** | −4,36 |
+| GPT | 16 | −1,43 [−2,48, −0,36] | 0,015 | belirsiz | −4,22 |
+| GPT | 32 | −2,01 [−3,38, −0,50] | 0,015 | **sapıyor: gerçek daha düşük** | −4,77 |
+
+### C-H3 — makro aktarım: çöküş payı (gözlenen − kural)
+
+| model | n = 4 | n = 8 | n = 16 | n = 32 |
+|---|---|---|---|---|
+| Mistral | −0,09, belirsiz | −0,40, **sapıyor (gerçek daha düşük)** | −0,06, belirsiz | — |
+| GPT | −0,06, belirsiz | +0,35, sapıyor (gerçek daha yüksek) | +0,35, sapıyor (gerçek daha yüksek) | +0,52, sapıyor (gerçek daha yüksek) |
+
+### C-H4 — eğri (betimsel)
+
+Çöküş payının log₂ n'ye göre eğimi:
+- **Mistral:** gözlenen +0,25 [+0,15, +0,35]; kural (koşullu) +0,23.
+- **GPT:** gözlenen +0,13 [+0,07, +0,18]; kural −0,05.
+
+Ortalama katkı:
+- Mistral 7,05 / 7,12 / 3,42;
+- GPT 7,75 / 4,47 / 6,17 / 5,25 (n = 4 / 8 / 16 / 32).
+
+Mistral'da n = 8 ne 4'ün ne 16'nın çizgisinde: 8 kişilik gruplar 4 kişiliklerden daha az çöktü. Tek nokta, 24 grup; açıklama sınanmadı.
+
+### Mekanizma (betimsel)
+
+Ajan önceki turda ≥ 10 vermiş ve ötekilerin ortalaması ≥ 5 iken, ötekilerden biri 0 verdiyse ajanın 0 verme payı (parantezde kimse 0 vermediyse):
+
+| model | n = 4 | n = 8 | n = 16 | n = 32 | Aşama 1, n = 4 |
+|---|---|---|---|---|---|
+| Mistral | 0,57 (21 karar) | 0,42 | 0,35 | — | 0,69 (0,04) |
+| GPT | 0,17 | 0,17 | 0,14 | 0,19 | 0,14 (0,01) |
+
+Kimse 0 vermediğinde oran bütün n'lerde 0,005–0,026.
+- **Mistral:** tek bir 0'a tepki grup büyüdükçe **zayıflıyor**; (b) seçeneği kısmen gerçekleşti. Yine de 16 kişide çöküş arttı, çünkü kalabalıkta 0 veren hemen her zaman var.
+- **GPT:** tepki büyüklükten bağımsız, ≈ %15–19. Kural bu sabit tetikleyiciyi zaten içeriyor, ama büyük gruplardaki çöküşü öngörmedi. Eksik parçanın ne olduğu sınanmadı. Adaylar keşifsel ayrı bir plana yazılacak; örnekler: ötekilerin ortalaması diliminin [5, 10) 4 kişide 6,67'yi, 32 kişide 9,7'yi aynı durumda toplaması; 0 verenlerin sayısı; büyük grupta geri dönüşün azalması.
+
+### Duyarlılık
+
+- `comp_full` (dışlanan grup 2 / 0 / 2 / 1) ve `no_capped` (0 / 1 / 1 / 2): C-H1 etiketleri değişmedi.
+- Yalnız GPT n = 32 C-H2 etiketi iki duyarlılıkta da "sapıyor" → "belirsiz" oldu.
+
+### Okuma (önceden yazılan kurallara göre)
+
+1. **Ölçek tahmini Mistral'da tuttu.** Grup büyüdükçe çöküş artıyor; 4'ten 16'ya artışın büyüklüğünü kural önceden doğru söyledi. İzole cevap kuralı (R0) bunu öngörmedi.
+2. **GPT'de tutmadı.** Kural "büyüdükçe dayanıklı" demişti; gerçekte GPT grupları da büyüdükçe daha sık çöktü.
+3. Önceden yazılan birleşik iddia ("ters yönlü ölçek") **doğrulanmadı**.
+4. **Ortak ve beklenmedik bulgu:** iki LLM topluluğu da büyüdükçe kırılganlaşıyor. İnsan deneylerindeki bulgunun tersi bu: sabit MPCR'de insan grupları büyüdükçe daha az işbirliği yapmıyordu (Isaac, Walker & Williams, 1994); bu sınanmadı, yalnız bağlam.
+5. 4 kişide ölçülen kural, büyüklüğe yalnız bir modelde taşındı. Küçük grupta ölçülen mikro kuralın büyük topluluğa aktarımı modele bağlı; bu, GABM'ler için bir uyarıdır.
