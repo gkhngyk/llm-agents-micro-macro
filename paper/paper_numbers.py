@@ -169,3 +169,93 @@ for m in M:
         ks = lambda k: "none" if k is None else str(k)
         print(f"| {m} | {c} | {cr[c]['D1a']['Z']['p']:.2f} | {cr[c]['D1a']['C10']['p']:.2f} | {cr[c]['D1b']['C10']['median']:.0f} | "
               f"{ks(cr[c]['D2']['k_star'])} | {st_} | {seg} | {ks(c0[c]['D2']['k_star'])} |")
+
+# ---- Experiment C (prereg_expC F-C.7, F-C.9) and D0 (prereg_expD F-D.2)
+ec = json.load(open(R / "expC_main_20261020_analysis.json"))["main"]
+ex = json.load(open(R / "expC_explore_20261020.json"))["results"]
+ed = json.load(open(R / "expD_select.json"))
+print("\n## Experiment C (Study 4): C-H1 size direction")
+for m in ("mistral", "gpt"):
+    t = ec["C_H1"][m]
+    print(f"- {m}: n{t['n_big']} - n4 = {t['est']:+.3f} [{t['ci'][0]:+.3f},{t['ci'][1]:+.3f}] {t['label']}; observed {t['observed']}; "
+          f"rule conditional {t['rule_conditional']:+.3f} (inside CI {t['rule_inside_ci']}); rule unconditional {t['rule_unconditional']:+.3f}; "
+          f"R0 conditional {t['R0_conditional']:+.3f}; historical control {t['historical_control']['est']:+.3f} "
+          f"[{t['historical_control']['ci'][0]:+.3f},{t['historical_control']['ci'][1]:+.3f}] {t['historical_control']['label']}")
+print(f"- joint: {ec['joint']}")
+print("\n## Experiment C: C-H2 (mean 2-10, observed - rule) and C-H3 (collapse share, observed - rule)")
+for m in ("mistral", "gpt"):
+    c2 = ec["C_H2"][m]
+    print(f"- {m} C-H2: n4 control {c2['control_n4']['est']:+.2f} [{c2['control_n4']['ci'][0]:+.2f},{c2['control_n4']['ci'][1]:+.2f}] {c2['control_n4']['label']}; "
+          + "; ".join(f"n{k} {v['est']:+.2f} [{v['ci'][0]:+.2f},{v['ci'][1]:+.2f}] p_holm {v['p_holm']:.3f} {v['label']} (R0 diff {v['R0_diff']:+.2f})" for k, v in c2["family"].items()))
+    print(f"  {m} C-H3: " + "; ".join(f"n{k} {v['est']:+.3f} [{v['ci'][0]:+.3f},{v['ci'][1]:+.3f}] {v['label']}" for k, v in ec["C_H3"][m].items()))
+    pts = ec["C_H4"][m]["points"]
+    print(f"  {m} C-H4 points: " + "; ".join(f"n{k}: obs col {v['observed_collapse']:.3f} mean {v['observed_mean']:.2f} | rule col {v['rule_collapse']:.3f} mean {v['rule_mean']:.2f} | R0 col {v['R0_collapse']:.3f} mean {v['R0_mean']:.2f} | uncond {v['rule_unconditional_collapse']:.3f}" for k, v in pts.items()))
+    sl = ec["C_H4"][m]["slope_log2n"]
+    print(f"  {m} slope collapse {sl['collapse']['observed']:+.3f} [{sl['collapse']['ci'][0]:+.3f},{sl['collapse']['ci'][1]:+.3f}] rule {sl['collapse']['rule_conditional']:+.3f}; "
+          f"mean {sl['mean']['observed']:+.2f} [{sl['mean']['ci'][0]:+.2f},{sl['mean']['ci'][1]:+.2f}] rule {sl['mean']['rule_conditional']:+.2f}")
+    mech = ec["mechanism"][m]
+    print(f"  {m} mechanism P(0|zero) / P(0|no zero): " + "; ".join(f"{k}: {v['zero']['share_0']:.3f} (n {v['zero']['n']}) / {v['nozero']['share_0']:.3f}" for k, v in mech.items()))
+print(f"- sensitivity changed: comp_full {ec and json.load(open(R / 'expC_main_20261020_analysis.json'))['sensitivity']['comp_full']['changed']}, "
+      f"no_capped {json.load(open(R / 'expC_main_20261020_analysis.json'))['sensitivity']['no_capped']['changed']}")
+print("\n## Experiment C diagnosis (F-C.9): T1 bias; T2 by zero count; T3 return")
+for m, d in ex.items():
+    for n, v in d.items():
+        t2, t3 = v["T2"], v["T3"]
+        print(f"- {m} n{n}: bias {v['T1']['bias_total']:+.3f}; T2 P0 {t2['est']:.3f} (rule {t2['rule_p0']:.3f}) by k "
+              + ", ".join(f"{k} {x['p0']:.3f} (n {x['trials']})" for k, x in t2["by_zero_count"].items())
+              + f"; T3 return {t3['est']:.3f} (rule {t3['rule_p_return']:.3f})")
+print("\n## Experiment D, D0 leave-one-size-out (collapse share abs error; RMSE)")
+for m, d in ed["loso"].items():
+    for h, v in d.items():
+        print(f"- {m} held-out n{h}: observed {v['observed_collapse']:.3f}; " + "; ".join(f"{k} {v[k]['abs_err']:.3f} ({v[k]['rmse']:.2f})" for k in ("R3-donmuş", "R3-tümü", "R4-sayı", "R4-pay")))
+print(f"- gate: {json.dumps(ed['gate'], ensure_ascii=False)}")
+
+# ---- Study 4 extras: costs, group totals, frozen-forecast R0 rows, D0 means, round-1 zeros, back-off
+import os, sys as _sys
+os.environ.setdefault("OPENROUTER_API_KEY", "offline")
+_sys.path.insert(0, str(R.parent))
+import numpy as np
+import pgg_analysis as _pa, pgg_analysis_expB as _pb, pgg_analysis_expC as _pc
+print("\n## Study 4 runs: groups and cost (summaries)")
+tot_g = tot_c = 0
+for n in (4, 8, 16, 32):
+    run = f"expC_n{n}_main_20261020"
+    sm = json.load(open(RUNS / run / f"{run}_summary.json"))
+    g = sum(ec["n_groups"][m].get(str(n), 0) for m in ec["n_groups"])
+    tot_g += g; tot_c += sm["total_cost_usd"]
+    print(f"- n{n}: groups {g}, cost {sm['total_cost_usd']:.2f}")
+print(f"- total: groups {tot_g}, cost {tot_c:.2f}; all studies 504 + 256 + 176 + {tot_g} = {504 + 256 + 176 + tot_g} groups")
+fcC = json.load(open(R.parent / "data" / "expC" / "forecast_v1.json"))["forecast"]
+print("- frozen forecast (mean over cards), collapse at r8: " + "; ".join(
+    f"{m} {k}: R3 {v['rule']['collapse_r8']:.3f} R0 {v['R0']['collapse_r8']:.3f}" for m in fcC for k, v in sorted(fcC[m]["mean_over_cards"].items(), key=lambda kv: int(kv[0]))))
+print("- D0 mean abs error by model: " + "; ".join(
+    f"{m}: " + ", ".join(f"{r} {np.mean([ed['loso'][m][h][r]['abs_err'] for h in ed['loso'][m]]):.3f}" for r in ("R3-donmuş", "R3-tümü", "R4-sayı", "R4-pay"))
+    for m in ed["loso"]))
+_fz = _pb.load_frozen(R.parent / "data/expB/frozen_rules_v1.json", _pc.FROZEN_SHA)
+print("- round-1 zero share and back-off of the frozen rule on observed C2 states (d0 = full state; cell / model):")
+for n in (4, 8, 16, 32):
+    rows, length, _, _ = _pa.load_run(str(R.parent / f"configs/expC_n{n}_main.json"), f"expC_n{n}_main_20261020")
+    u = _pc.UnitsN(rows, length, n)
+    for m in ("mistral", "gpt"):
+        arrs = {c: u.group_array(m, c) for c in _pc.CARDS}
+        if not len(arrs[_pc.CARDS[0]]):
+            continue
+        cnt = collections.Counter()
+        for c, A in arrs.items():
+            rule = _pb.rules_for(_fz, m, c, "R3")
+            for g in A:
+                for t in range(2, 11):
+                    own, mb, zero = (x[0] for x in _pc.bins_n(g[t - 2][None, :]))
+                    rb = _pb.bin_kalan(t, 10)
+                    for i in range(n):
+                        key = (int(own[i]), int(mb[i]), int(zero[i]), rb)
+                        src = "all"
+                        for depth, fs in enumerate(rule.order):
+                            hit = [lvl for lvl, tab in (("cell", rule.cell), ("model", rule.model))
+                                   if (c_ := tab.counts[fs].get(tuple(key[f] for f in fs))) is not None and c_.sum() > 0]
+                            if hit:
+                                src = f"d{depth}-{hit[0]}"; break
+                        cnt[src] += 1
+        tot = sum(cnt.values())
+        z1 = np.mean([(arrs[c][:, 0, :] == 0).mean() for c in _pc.CARDS])
+        print(f"  {m} n{n}: round-1 zero share {z1:.3f}; full state cell {cnt['d0-cell']/tot:.3f}, model {cnt['d0-model']/tot:.3f}, coarser {1 - (cnt['d0-cell'] + cnt['d0-model'])/tot:.3f}")

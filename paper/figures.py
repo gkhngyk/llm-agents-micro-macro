@@ -144,10 +144,77 @@ def fig4_endstates():
     plt.close(fig)
 
 
+def _wilson(p, n, z=1.96):
+    d = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    h = z * np.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return c - h, c + h
+
+
+def fig5_scaling():
+    ec = json.load(open(R / "expC_main_20261020_analysis.json"))["main"]
+    fig, axes = plt.subplots(1, 2, figsize=(8.5, 3), sharey=True)
+    for ax, m in zip(axes, ("mistral", "gpt")):
+        pts = ec["C_H4"][m]["points"]
+        ns = sorted(int(k) for k in pts)
+        x = np.log2(ns)
+        obs = np.array([pts[str(n)]["observed_collapse"] for n in ns])
+        g = np.array([ec["n_groups"][m][str(n)] for n in ns])
+        lo, hi = _wilson(obs, g)
+        ax.plot(x, [pts[str(n)]["rule_unconditional_collapse"] for n in ns], color=C["fc"], ls="--", lw=1.2,
+                label="in-play rule, frozen forecast (before the run)")
+        ax.plot(x, [pts[str(n)]["rule_collapse"] for n in ns], color=C["rule"], lw=1.6, marker="s", ms=4,
+                label="in-play rule, from observed round 1")
+        ax.plot(x, [pts[str(n)]["R0_collapse"] for n in ns], color=C["r0"], lw=1.2, marker="^", ms=4,
+                label="stated response (R0), from observed round 1")
+        ax.errorbar(x, obs, yerr=[obs - lo, hi - obs], fmt="o", color="black", ms=5, capsize=2, lw=0.8,
+                    label="observed (95% Wilson CI)")
+        ax.set_xticks(x)
+        ax.set_xticklabels(ns)
+        ax.set_xlabel("group size")
+        ax.set_title(f"{NAME[m]} ({', '.join(str(int(v)) for v in g)} groups)")
+        ax.set_ylim(-0.03, 1.03)
+    axes[0].set_ylabel("share of groups collapsed at round 8")
+    h, lab = axes[0].get_legend_handles_labels()
+    fig.legend(h, lab, frameon=False, fontsize=8, loc="lower center", ncol=2, bbox_to_anchor=(0.5, -0.2))
+    fig.suptitle("Study 4: LLM groups become more fragile as they grow", y=1.03, fontsize=10)
+    fig.savefig(OUT / "fig5_scaling.png")
+    plt.close(fig)
+
+
+def fig6_count():
+    ex = json.load(open(R / "expC_explore_20261020.json"))["results"]
+    fig, axes = plt.subplots(1, 2, figsize=(8.5, 3), sharey=True)
+    for ax, m in zip(axes, ("mistral", "gpt")):
+        ks = ["1", "2", "3+"]
+        width = 0.8 / len(ex[m])
+        for j, (n, v) in enumerate(sorted(ex[m].items(), key=lambda kv: int(kv[0]))):
+            bz = v["T2"]["by_zero_count"]
+            ys = [bz[k]["p0"] if k in bz and bz[k]["trials"] >= 10 else np.nan for k in ks]
+            xb = np.arange(3) + (j - (len(ex[m]) - 1) / 2) * width
+            ax.bar(xb, ys, width=width * 0.95,
+                   color=plt.cm.Blues(0.35 + 0.65 * j / max(1, len(ex[m]) - 1)), label=f"group of {n}")
+            for xx, yy, k in zip(xb, ys, ks):
+                if not np.isnan(yy):
+                    ax.text(xx, yy + 0.01, str(bz[k]["trials"]), ha="center", va="bottom", fontsize=6)
+        ax.set_xticks(np.arange(3))
+        ax.set_xticklabels(["1", "2", "3 or more"])
+        ax.set_xlabel("others who gave 0 in the previous round")
+        ax.set_title(NAME[m])
+        ax.legend(frameon=False, fontsize=7)
+    axes[0].set_ylabel("share of cooperators who then give 0")
+    fig.suptitle("Cooperators' response to seeing others give 0, by how many did (exploratory; "
+                 "others' mean in [5, 10), mid game; numbers = decisions; bars with < 10 omitted)", y=1.04, fontsize=9)
+    fig.savefig(OUT / "fig6_count.png")
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     OUT.mkdir(parents=True, exist_ok=True)
     fig1_study3()
     fig2_survival()
     fig3_tipping()
     fig4_endstates()
+    fig5_scaling()
+    fig6_count()
     print("yazıldı:", ", ".join(sorted(p.name for p in OUT.glob("*.png"))))

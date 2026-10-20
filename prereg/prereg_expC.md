@@ -590,3 +590,32 @@ Kendi ≥ 10, ötekiler [5, 10), biri 0, orta oyun. Gözlenen P(0), parantez iç
 2. **Mistral'da** kuralın 16 kişide doğru çıkması kısmen hataların birbirini götürmesinden geliyor: işbirlikçiler daha hoşgörülü, ama çökmüş gruplarda 0'dan çıkılmıyor. C-H1'in "doğru yön, doğru büyüklük" sonucu bu yüzden "kısmen doğru nedenlerle" diye raporlanır.
 3. **GPT'de** büyük gruplarda üç ve daha fazla 0 verenin sıradanlaşması ve bedavacıların kalıcılığı, kuralın öngörmediği çöküşü açıklayan adaylar.
 4. **Sınanabilir yeni öngörü:** durum tanımına "ötekiler arasında 0 verenlerin sayısı ya da payı" eklenmiş bir kural büyüklüğe daha iyi taşınmalı. Bu ancak yeni, ileriye dönük bir testle doğrulanabilir; tahmin yeni bir grup büyüklüğü için önceden dondurulur.
+
+## Ek F-C.10 — Yuvarlama düzeltmeleri ve raporlama sözlerinin yerine getirilmesi (2026-10-20)
+
+- **Yuvarlama düzeltmeleri** (F-C.7 tablolarında; kesin değerler `results/expC_main_20261020_analysis.json`'dan). Bir bağımsız kontrolde iki kez yuvarlama bulundu:
+
+  | yer | yazılan | doğrusu | kesin değer |
+  |---|---|---|---|
+  | GPT n = 8 C-H3 | +0,35 | **+0,34** | 0,3448 |
+  | GPT n = 4 C-H2 | +0,42 | **+0,41** | 0,4149 |
+  | GPT n = 16 C-H2 CI üst sınırı | −0,36 | **−0,35** | −0,3547 |
+  | GPT n = 16 ortalama katkı | 6,17 | **6,16** | 6,1649 |
+
+  Hiçbir etiket değişmez.
+- **§9'da söz verilen geri çekilme oranları:** dondurulmuş kuralın C2'de gözlenen durumları tam ayrıntıda bulduğu kararların payı.
+
+  | n | Mistral, aynı kart | Mistral, model havuzu | GPT, aynı kart | GPT, model havuzu |
+  |---|---|---|---|---|
+  | 4 | 0,970 | 0,030 | 0,952 | 0,035 |
+  | 8 | 0,959 | 0,037 | 0,953 | 0,043 |
+  | 16 | 0,969 | 0,030 | 0,874 | 0,101 |
+  | 32 | — | — | 0,811 | 0,072 |
+
+  Daha kaba duruma inen pay en çok 0,116 (GPT n = 32). Büyük gruplarda kural daha sık geri çekiliyor. Bu, aktarım hatasının bir parçası olabilir; sınanmadı.
+- **F-C.3 ve F-C.4'te söz verilen notlar:** büyük gruplarda ara sıra sayım kayması ve `comp_full` duyarlılığının büyüklükle karışması makalenin sınırlılıklarına yazıldı (taslak 5).
+- **Betimsel ek:** 1. turda 0 veren ajan payı:
+  - Mistral 0,031 / 0,031 / 0,062 (n = 4 / 8 / 16);
+  - GPT 0,349 / 0,414 / 0,320 / 0,405 (n = 4 / 8 / 16 / 32).
+
+  R0'ın Mistral'daki koşullu artışı (+0,17) büyük gruplarda daha çok erken 0 olmasıyla tutarlı.

@@ -201,3 +201,55 @@
 | gpt | riyadh_factual | 1.00 | 1.00 | 100 | 3 | none | 10–20 | 4 |
 | gpt | riyadh_minimal | 1.00 | 1.00 | 100 | 2 | none | 0–20 | 3 |
 | gpt | riyadh_value | 1.00 | 1.00 | 100 | 3 | none | 0–20 | 3 |
+
+## Experiment C (Study 4): C-H1 size direction
+- mistral: n16 - n4 = +0.500 [+0.292,+0.708] artış; observed {'n4': 0.2916666666666667, 'n16': 0.7916666666666666}; rule conditional +0.468 (inside CI True); rule unconditional +0.399; R0 conditional +0.167; historical control +0.444 [+0.264,+0.625] artış
+- gpt: n32 - n4 = +0.458 [+0.292,+0.625] artış; observed {'n4': 0.22916666666666666, 'n32': 0.6875}; rule conditional -0.123 (inside CI False); rule unconditional -0.083; R0 conditional -0.083; historical control +0.446 [+0.301,+0.583] artış
+- joint: ters yönlü ölçek doğrulanmadı
+
+## Experiment C: C-H2 (mean 2-10, observed - rule) and C-H3 (collapse share, observed - rule)
+- mistral C-H2: n4 control +0.57 [-0.29,+1.33] tahmin tuttu; n8 +2.31 [+1.71,+2.93] p_holm 0.000 tahmin sapıyor: gerçek daha yüksek (R0 diff -0.47); n16 +1.08 [+0.39,+1.72] p_holm 0.002 tahmin tuttu (R0 diff -2.94)
+  mistral C-H3: n4 -0.089 [-0.231,+0.060] belirsiz; n8 -0.403 [-0.525,-0.266] sapıyor (gerçek daha düşük); n16 -0.057 [-0.190,+0.072] belirsiz
+  mistral C-H4 points: n4: obs col 0.292 mean 7.05 | rule col 0.381 mean 6.47 | R0 col 0.292 mean 7.84 | uncond 0.373; n8: obs col 0.208 mean 7.12 | rule col 0.611 mean 4.81 | R0 col 0.333 mean 7.59 | uncond 0.570; n16: obs col 0.792 mean 3.42 | rule col 0.849 mean 2.34 | R0 col 0.458 mean 6.35 | uncond 0.772
+  mistral slope collapse +0.250 [+0.146,+0.354] rule +0.234; mean -1.81 [-2.47,-1.14] rule -2.07
+  mistral mechanism P(0|zero) / P(0|no zero): 4: 0.571 (n 21) / 0.026; 8: 0.421 (n 114) / 0.018; 16: 0.349 (n 634) / 0.022; stage1_n4: 0.685 (n 54) / 0.039
+- gpt C-H2: n4 control +0.41 [-0.66,+1.42] tahmin tuttu; n8 -2.10 [-3.09,-1.08] p_holm 0.000 tahmin sapıyor: gerçek daha düşük (R0 diff -4.36); n16 -1.43 [-2.48,-0.35] p_holm 0.015 belirsiz (R0 diff -4.22); n32 -2.01 [-3.38,-0.50] p_holm 0.015 tahmin sapıyor: gerçek daha düşük (R0 diff -4.77)
+  gpt C-H3: n4 -0.059 [-0.175,+0.060] belirsiz; n8 +0.345 [+0.216,+0.476] sapıyor (gerçek daha yüksek); n16 +0.349 [+0.213,+0.480] sapıyor (gerçek daha yüksek); n32 +0.522 [+0.402,+0.637] sapıyor (gerçek daha yüksek)
+  gpt C-H4 points: n4: obs col 0.229 mean 7.75 | rule col 0.288 mean 7.33 | R0 col 0.083 mean 8.70 | uncond 0.228; n8: obs col 0.562 mean 4.47 | rule col 0.218 mean 6.57 | R0 col 0.021 mean 8.83 | uncond 0.188; n16: obs col 0.479 mean 6.16 | rule col 0.131 mean 7.60 | R0 col 0.000 mean 10.38 | uncond 0.158; n32: obs col 0.688 mean 5.25 | rule col 0.165 mean 7.26 | R0 col 0.000 mean 10.02 | uncond 0.146
+  gpt slope collapse +0.129 [+0.073,+0.179] rule -0.046; mean -0.58 [-1.21,+0.02] rule +0.08
+  gpt mechanism P(0|zero) / P(0|no zero): 4: 0.167 (n 90) / 0.006; 8: 0.171 (n 455) / 0.005; 16: 0.139 (n 2212) / 0.006; 32: 0.194 (n 3746) / 0.011; stage1_n4: 0.145 (n 159) / 0.006
+- sensitivity changed: comp_full ['gpt:n32'], no_capped ['gpt:n32']
+
+## Experiment C diagnosis (F-C.9): T1 bias; T2 by zero count; T3 return
+- mistral n4: bias +0.081; T2 P0 0.571 (rule 0.659) by k 1 0.571 (n 21); T3 return 0.182 (rule 0.038)
+- mistral n8: bias +0.349; T2 P0 0.348 (rule 0.721) by k 1 0.317 (n 63), 2 0.364 (n 22), 3+ 0.750 (n 4); T3 return 0.214 (rule 0.056)
+- mistral n16: bias +0.478; T2 P0 0.347 (rule 0.621) by k 1 0.198 (n 253), 2 0.218 (n 124), 3+ 0.570 (n 242); T3 return 0.261 (rule 0.046)
+- gpt n4: bias +0.091; T2 P0 0.167 (rule 0.177) by k 1 0.020 (n 49), 2 0.818 (n 11); T3 return 0.574 (rule 0.489)
+- gpt n8: bias -0.306; T2 P0 0.174 (rule 0.134) by k 1 0.008 (n 119), 2 0.119 (n 59), 3+ 0.354 (n 127); T3 return 0.369 (rule 0.457)
+- gpt n16: bias -0.424; T2 P0 0.162 (rule 0.124) by k 1 0.022 (n 368), 2 0.044 (n 248), 3+ 0.281 (n 680); T3 return 0.379 (rule 0.462)
+- gpt n32: bias -0.653; T2 P0 0.397 (rule 0.168) by k 1 0.000 (n 63), 2 0.000 (n 2), 3+ 0.417 (n 1271); T3 return 0.328 (rule 0.395)
+
+## Experiment D, D0 leave-one-size-out (collapse share abs error; RMSE)
+- gpt held-out n16: observed 0.479; R3-donmuş 0.345 (1.56); R3-tümü 0.095 (0.33); R4-sayı 0.216 (1.80); R4-pay 0.137 (1.23)
+- gpt held-out n32: observed 0.688; R3-donmuş 0.524 (2.19); R3-tümü 0.390 (0.96); R4-sayı 0.112 (1.12); R4-pay 0.142 (0.85)
+- gpt held-out n8: observed 0.562; R3-donmuş 0.346 (2.14); R3-tümü 0.179 (1.47); R4-sayı 0.140 (1.26); R4-pay 0.179 (1.26)
+- mistral held-out n16: observed 0.792; R3-donmuş 0.057 (1.68); R3-tümü 0.031 (1.32); R4-sayı 0.039 (1.42); R4-pay 0.023 (0.89)
+- mistral held-out n8: observed 0.208; R3-donmuş 0.401 (2.52); R3-tümü 0.314 (1.96); R4-sayı 0.275 (1.70); R4-pay 0.295 (1.76)
+- gate: {"chosen": "R4-pay", "gpt_wins_vs_R3_all": 2, "margin": 0.05, "mean_abs_err": {"R3-tümü": 0.20206666666666667, "R4-pay": 0.15528333333333336, "R4-sayı": 0.15648333333333336}, "mean_rmse": {"R3-tümü": 1.207119490874036, "R4-pay": 1.1956170070196197, "R4-sayı": 1.4597660357499203}, "passed": false}
+
+## Study 4 runs: groups and cost (summaries)
+- n4: groups 72, cost 7.17
+- n8: groups 72, cost 14.62
+- n16: groups 72, cost 30.17
+- n32: groups 48, cost 4.71
+- total: groups 264, cost 56.67; all studies 504 + 256 + 176 + 264 = 1200 groups
+- frozen forecast (mean over cards), collapse at r8: gpt 4: R3 0.228 R0 0.063; gpt 8: R3 0.188 R0 0.013; gpt 16: R3 0.158 R0 0.000; gpt 32: R3 0.146 R0 0.000; mistral 4: R3 0.373 R0 0.297; mistral 8: R3 0.570 R0 0.298; mistral 16: R3 0.772 R0 0.311
+- D0 mean abs error by model: gpt: R3-donmuş 0.405, R3-tümü 0.222, R4-sayı 0.156, R4-pay 0.153; mistral: R3-donmuş 0.229, R3-tümü 0.173, R4-sayı 0.157, R4-pay 0.159
+- round-1 zero share and back-off of the frozen rule on observed C2 states (d0 = full state; cell / model):
+  mistral n4: round-1 zero share 0.031; full state cell 0.970, model 0.030, coarser 0.000
+  gpt n4: round-1 zero share 0.349; full state cell 0.952, model 0.035, coarser 0.013
+  mistral n8: round-1 zero share 0.031; full state cell 0.959, model 0.037, coarser 0.004
+  gpt n8: round-1 zero share 0.414; full state cell 0.953, model 0.043, coarser 0.004
+  mistral n16: round-1 zero share 0.062; full state cell 0.969, model 0.030, coarser 0.001
+  gpt n16: round-1 zero share 0.320; full state cell 0.874, model 0.101, coarser 0.025
+  gpt n32: round-1 zero share 0.405; full state cell 0.811, model 0.072, coarser 0.116
