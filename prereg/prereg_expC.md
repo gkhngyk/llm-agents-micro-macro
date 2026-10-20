@@ -393,3 +393,37 @@ Başka bir durmada kullanıcıya bildirir. Büyük gruplarda bir turdaki n çağ
 - **Kapılar:** dördü de geçti.
 - **İzleyici:** her koşuya ayrı bir izleyici bağlı. F.8 / 429 / parse / 5xx kurallarıyla otomatik sürdürür; süre sınırı 60 saat, en çok 30 otomatik sürdürme.
 - **Analiz:** dört koşu da tamamlanmadan analiz çalıştırılmaz; betik eksik koşuyu reddeder.
+
+## Ek F-C.6 — C2 tamamlandı: tesisat kaydı (2026-10-20, analizden önce yazıldı)
+
+- **Koşular** (kod `a1f5a87`; hepsi tamam, `stop_reason` yok, durdurulan model yok):
+
+  | koşu | grup | satır | segment | maliyet (USD) | sonuç dosyası sha256 |
+  |---|---|---|---|---|---|
+  | `expC_n4_main_20261020` | 72 / 72 | 3 168 | 1 | 7,17 | `140b62920cdea562452794588ff6a132142812cf81a7461fce957ec201508a0a` |
+  | `expC_n8_main_20261020` | 72 / 72 | 6 336 | 4 | 14,62 | `fc82ebb662c46fcefb84f4a234e15297fb595c876348184f0f80a98c4ebdc29d` |
+  | `expC_n16_main_20261020` | 72 / 72 | 12 672 | 7 | 30,17 | `eb6f1c00c006b6b6cfdf7105388ffc7ae3728603fdc9a55e4ad2288eab18c3b9` |
+  | `expC_n32_main_20261020` | 48 / 48 | 16 896 | 3 | 4,71 | `45769907c4ef431a17f5552e601ac918f1a6bdebe5eb30bd70a0a7453027454f` |
+
+- **Maliyet:** toplam 56,67 USD (özet = ham faturalanan). Dry-run tahmini 59,02, C1'e göre düzeltilmiş tahmin ≈ 58. Hiçbir tavana yaklaşılmadı.
+- **Segmentler ve sürdürmeler** (izleyici, F.8 / 429 kuralları):
+  - `length` sonrası sürdürme: n8'de 1, n16'da 1, n32'de 2;
+  - Mistral 429 nedeniyle durma ve sürdürme: n8'de 2, n16'da 5.
+
+  Yeniden kullanılan kabul edilmiş yanıtlar n8 / n16 / n32: 29 / 148 / 134; discarded 0.
+- **Mac uykusu:** n16 koşusu 2026-10-20 08:11–09:04 arasında durdu (kapak kapandı, pil). Süreç uyandığında kendiliğinden sürdü; zaman aşımına uğrayan çağrılar kuralına göre yeniden istendi. `deadline` maliyet tahmini 0. Etkisi yalnız süre.
+- **Tesisat sayıları:**
+  - geçersiz 0;
+  - parse_fail (yeniden istendi) GPT'de n8 1, n16 1, n32 2;
+  - `reasoning_capped` 0; superseded / truncated 0;
+  - sağlayıcı hata yanıtları ve zaman aşımları yeniden istendi.
+- **Model sürümleri:** önceki deneylerle aynı (GPT `-20260922`, Mistral `-20261006`).
+- **Kural anlama** (iki soru da doğru / toplam):
+
+  | model | n = 4 | n = 8 | n = 16 | n = 32 |
+  |---|---|---|---|---|
+  | Mistral | 96/96 | 192/192 | 384/384 | — |
+  | GPT | 190/192 | 384/384 | 766/768 | 1 535/1 536 |
+
+  GPT'de 4 / 8 / 16 / 32 kişide `comp_full` dışında kalacak grup sayısı en çok 2 / 0 / 2 / 1.
+- **Sıradaki adım:** `pgg_analysis_expC.py analyse`, dondurulmuş tahminle (sha256 `00d88e05…be9df`) ve commit `cf8850c`'deki analiz koduyla. Analiz kodu o tarihten beri değişmedi.
