@@ -261,3 +261,16 @@
 - n32: gpt-6-luna invalid 0 parse_fail 2
 - mistral: n4 total +0.081 (işbirlikçi (önceki 10) +0.094, bedavacı (önceki 0) -0.001, diğer -0.012); n8 total +0.349 (işbirlikçi (önceki 10) +0.329, bedavacı (önceki 0) +0.014, diğer +0.007); n16 total +0.478 (işbirlikçi (önceki 10) +0.593, bedavacı (önceki 0) -0.101, diğer -0.014)
 - gpt: n4 total +0.091 (bedavacı (önceki 0) +0.081, işbirlikçi (önceki 10) +0.074, diğer -0.064); n8 total -0.306 (diğer -0.049, işbirlikçi (önceki 10) -0.040, bedavacı (önceki 0) -0.217); n16 total -0.424 (işbirlikçi (önceki 10) -0.073, bedavacı (önceki 0) -0.233, diğer -0.118); n32 total -0.653 (diğer -0.196, bedavacı (önceki 0) -0.277, işbirlikçi (önceki 10) -0.180)
+
+## Rounding ties: exact value -> half-up
+- humans, 2 round-1 zeros, collapsed at period 8: exact 0.625000 (5/8) -> 0.63
+- Study 1 DeepSeek minimal Copenhagen m10: exact 1.625000 (13/8) -> 1.63
+- Study 1 Mistral value Athens m10: exact 10.415000 (2083/200) -> 10.42
+- Study 1 Mistral factual Boston - Athens: exact 6.225000 (249/40) -> 6.23
+- D0 GPT held-out 8 observed collapse: exact 0.562500 (9/16) -> 0.563
+- D0 GPT held-out 8 abs error R3-tümü: exact 0.179500 (359/2000) -> 0.180
+- D0 GPT held-out 8 abs error R4-pay: exact 0.178583 (2143/12000) -> 0.179
+- D0 GPT held-out 8 abs error R4-sayı: exact 0.140000 (7/50) -> 0.140
+- D0 GPT held-out 8 abs error R3-donmuş: exact 0.346250 (277/800) -> 0.346
+- C-H3 Mistral n8 CI lower (bootstrap percentile; float -0.52499...): exact -0.525000 (-21/40) -> -0.53
+- Study 2 GPT round-1 difference T - B, CI lower: exact -3.125000 (-25/8) -> -3.13

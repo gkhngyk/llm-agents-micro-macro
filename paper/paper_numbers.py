@@ -267,3 +267,38 @@ for n in (4, 8, 16, 32):
     print(f"- n{n}: " + ", ".join(f"{k.split('/')[-1]} invalid {v.get('n_invalid')} parse_fail {v.get('n_parse_fail')}" for k, v in pm.items()))
 for m, d in ex.items():
     print(f"- {m}: " + "; ".join(f"n{n} total {v['T1']['bias_total']:+.3f} (" + ", ".join(f"{k} {x:+.3f}" for k, x in v['T1']['coarse'].items()) + ")" for n, v in d.items()))
+
+# ---- exact values at rounding ties (the paper rounds half up from exact values; Python's float
+# formatting above rounds ties to even or by the binary value, so these are listed explicitly)
+from fractions import Fraction
+from decimal import Decimal, ROUND_HALF_UP
+
+
+def _exact(x, denom):
+    return Fraction(x).limit_denominator(denom)
+
+
+def _half_up(fr, places):
+    q = Decimal(1).scaleb(-places)
+    v = (Decimal(fr.numerator) / Decimal(fr.denominator)).quantize(q, rounding=ROUND_HALF_UP)
+    return f"{v}"
+
+
+print("\n## Rounding ties: exact value -> half-up")
+ties = []
+hum = dy["datasets"]["human"]["H"]["D2_by_k1"]["2"]["observed"]["est"]
+ties.append(("humans, 2 round-1 zeros, collapsed at period 8", _exact(hum, 16), 2))
+ties.append(("Study 1 DeepSeek minimal Copenhagen m10", _exact(s1["cells"]["deepseek"]["copenhagen_minimal"]["m10"], 640), 2))
+ties.append(("Study 1 Mistral value Athens m10", _exact(s1["cells"]["mistral"]["athens_value"]["m10"], 400), 2))
+mb, ma = (_exact(s1["cells"]["mistral"][c]["m10"], 400) for c in ("boston_factual", "athens_factual"))
+ties.append(("Study 1 Mistral factual Boston - Athens", mb - ma, 2))
+g8 = ed["loso"]["gpt"]["8"]
+obs8 = _exact(g8["observed_collapse"], 48)
+ties.append(("D0 GPT held-out 8 observed collapse", obs8, 3))
+for r in ("R3-tümü", "R4-pay", "R4-sayı", "R3-donmuş"):
+    ties.append((f"D0 GPT held-out 8 abs error {r}", abs(obs8 - _exact(g8[r]["collapse"], 24000)), 3))
+ties.append(("C-H3 Mistral n8 CI lower (bootstrap percentile; float -0.52499...)", Fraction(-525, 1000), 2))
+bal = ea["main"]["balance_round1"]["gpt"]["ci"][0]
+ties.append(("Study 2 GPT round-1 difference T - B, CI lower", _exact(bal, 1000), 2))
+for name, fr, pl in ties:
+    print(f"- {name}: exact {float(fr):.6f} ({fr}) -> {_half_up(fr, pl)}")

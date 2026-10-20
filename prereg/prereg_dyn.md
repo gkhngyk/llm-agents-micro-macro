@@ -235,3 +235,7 @@ R0'ın kararlı sabit nokta sayısı (1 / 1 / 0), kuralın yapışkan simetrik d
    - ilk turdaki bedavacıların etkisi kademeli.
 
    İnsan dinamiği tek turluk havuz kuralla yalnız kısmen yakalanıyor. Bir olası açıklama kişiler arası kalıcı farklar (heterojenlik) ama bu sınanmadı. LLM grupları homojen ajanlardan oluşuyor ve tek turluk kural onlar için yetiyor.
+
+## Ek D.3 — Yuvarlama düzeltmesi (2026-10-20)
+
+- İnsan grupları, k1 = 2: gözlenen çöküş payı tam 10/16 = 0,625. Makalede yarımı yukarı yuvarlamayla **0,63** yazılır; D.2'de 0,62 yazılmıştı. Etiket değişmez.

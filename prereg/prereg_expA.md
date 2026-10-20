@@ -227,3 +227,7 @@ Kesin değerler A0 dry-run'ından gelir; tavanlar onlara göre konur.
 - **Denge (1. tur):** DeepSeek −0,63, Mistral +0,12, GPT −1,77 [−3,12, −0,42]; bayrak eşiği (2) aşılmadı, ama GPT'de CI 0'ı dışlıyor: kural maddesinin farklı yazılışı (öngörülen sınırlılık 2) GPT'nin daha geri bildirim görmeden katkısını düşürüyor; GPT'nin ΔA'sının büyük kısmı 1. turdan geliyor. Kontrol kararlarında (0 veren yok) GPT T 0,145 / B 0,015.
 - **Tekrar:** B kolu Aşama 1 minimal hücreleriyle 12 hücrenin 11'inde |fark| ≤ 2; Mistral riyadh_minimal 5,38 / 7,69 (bayrak).
 - **Duyarlılık:** kural anlama (1 grup) ve yeniden kullanım (5 grup) dışlamaları etiket değiştirmedi; reasoning_capped / length dışlaması 64 grubu (DeepSeek) çıkarıyor ve DeepSeek etiketlerini "belirlenemedi" yapıyor (Aşama 1'deki gibi DeepSeek için bilgi vermez).
+
+### F-A.5 Yuvarlama düzeltmesi (2026-10-20)
+
+- F-A.4'teki GPT denge değeri (1. tur): CI'nin alt sınırı tam −3,125. Makalede yarımı yukarı yuvarlamayla **[−3,13, −0,42]** yazılır; F-A.4'te −3,12 yazılmıştı. Etiket değişmez.

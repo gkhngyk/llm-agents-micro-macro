@@ -1079,3 +1079,8 @@ Dosyalar worktree dışında, `workspace/runs/main_s0a_example_20261011/` altın
   - **Değerlendirme 2 (bağımsız veri, Deney A B kolu, 128 grup):** R3 ortalama Δ DeepSeek −0,20, Mistral +0,55, GPT −0,10; 12 hücrenin 12'si "uyumlu"; RMSE R0 → R3: 2,10 → 0,41, 4,34 → 0,76, 2,83 → 0,67.
   - **Geri çekilme (R3, Aşama 1):** kararların ~%50–55'i hücre içi tam durumdan, ~%27–30'u modelin bütün kartlarından tam durumdan; geri kalanı daha kaba durumlardan.
   - **Okuma kuralına göre (önceden yazılmış):** R3 ile "aşağı" hücre sayısı 0'a, ortalama |Δ| R0'ın yarısının çok altına iniyor → **"boşluk büyük ölçüde kuralın ölçüldüğü bağlamdan"**. Tek turluk bellekli, oyun ufkunu bilen bir durum kuralı, grup yörüngelerini hem çapraz doğrulamada hem bağımsız yeni koşuda yeniden üretiyor. Eksik parça modele göre: DeepSeek'te izole cevabın kendisi (bağlam içinde ajan izole cevabından çok daha az katkı veriyor), Mistral ve GPT'de tur / ufuk bilgisi.
+
+### F.15 Düzeltmeler (2026-10-20, makalenin son kontrolünde bulundu)
+
+- **F.14'te yön hatası:** "R1 / R2 … Mistral'da (+1,58 / +1,57; 4 "yukarı") ve GPT'de (+0,61 / +0,71) simülasyonu gerçeğin üstüne taşıyor" cümlesi yanlış. Δ = gözlenen − simüle edilen pozitif olduğu için, tur bilgisi olmayan kurallarda **simülasyon gerçek grupların altında kalıyor**. Sayılar ve etiketler doğru; yalnız sözel yön ters yazılmıştı.
+- **Yuvarlama:** makale kesin değerlerden yarımı yukarı yuvarlar. Bu plandaki sayılar Python biçimlendirmesiyle yuvarlanmıştı; eşit uzaklıktaki değerler iki yönden birine kayabiliyordu. Etkilenen değerler `paper/numbers.md`'nin sonunda kesin değerleriyle listelendi: DeepSeek minimal Kopenhag 1,625 → 1,63; Mistral değer Atina 10,415 → 10,42; Mistral olgusal Boston − Atina 6,225 → 6,23. Hiçbir etiket değişmez.

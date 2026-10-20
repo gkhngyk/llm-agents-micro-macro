@@ -147,3 +147,7 @@ ONAYLANDI — 2026-10-20 (kullanıcı; 64 kişi, Mistral yok)
   2. **"0 veren sayısı / payı" bilgisi** en büyük grubun (32) dışdeğerlemesinde belirgin yardım ediyor (0,390 → 0,112 / 0,142). Ara büyüklüklerde ediyor ya da etmiyor; 16 kişide kötüleştiriyor. F-C.9 açıklaması yalnız kısmen destekleniyor.
   3. **Mistral 8 kişilik gruplar** hiçbir kuralla iyi tahmin edilmiyor (en iyi hata 0,275). F-C.7'deki aykırılık sürüyor.
 - **Sonuç:** Deney D burada biter. Bitiş planına (§8) göre sıradaki adım makale.
+
+## Ek F-D.3 — Yuvarlama düzeltmesi (2026-10-20)
+
+- F-D.2 tablosunda GPT 8: gözlenen tam 27/48 = 0,5625 → **0,563** (0,562 yazılmıştı); R3-tümü'nün hatası tam 0,1795 → **0,180** (0,179 yazılmıştı). Ortalamalar ve karar kapısı etkilenmez.
