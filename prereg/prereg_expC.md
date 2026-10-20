@@ -529,3 +529,64 @@ Kimse 0 vermediğinde oran bütün n'lerde 0,005–0,026.
 - **İstatistik:** betimsel. Paylar için grup bootstrap %95 CI (2 000 tekrar, kart içinde tabakalı), yalnız T2 ve T3'ün ana karşılaştırmalarında. Seed `stable_seed("pgg-expC-explore", …)`.
 - **Uygulama:** `pgg_analysis_expC_explore.py` ve sentetik testleri; sonuç `results/expC_explore_20261020.json`.
 - **Okuma sınırı:** bu analiz hatanın **nerede** oluştuğunu gösterir, nedenini kanıtlamaz. Bulunan bir açıklama ancak yeni bir ileriye dönük testle doğrulanabilir.
+
+## Ek F-C.9 — Keşifsel tanı sonuçları (2026-10-20)
+
+- **Dosya:** `results/expC_explore_20261020.json`, sha256 `dcefcdcb6b200ed6953aacbc2b635388c4f14e3bcc0a502a9032eb72bd8888a3`. Kod `70e15dd`; betik ve testler hesaplamadan önce commit edildi. Commit'ten önce testlerin yakaladığı bir isim çakışması hatası (`run` değişkeni) düzeltildi.
+
+### T1 — tek adım sapma
+
+Ortalama katkı; gözlenen − kural; tur 2–10; bütün kararlar:
+
+| model | n = 4 | n = 8 | n = 16 | n = 32 |
+|---|---|---|---|---|
+| Mistral | +0,08 | **+0,35** | **+0,48** | — |
+| GPT | +0,09 | **−0,31** | **−0,42** | **−0,65** |
+
+- Hata 4 kişide küçük. Büyüdükçe Mistral'da gerçek daha işbirlikçi, GPT'de daha bencil.
+- **Mistral'da hatanın kaynağı** neredeyse tamamen işbirlikçilerin "biri 0 verdi" durumu (kendi 10, ötekiler [5, 10), biri 0):
+  - n = 8'de bu durumun katkısı +0,19, n = 16'da +0,56;
+  - bu durumda gözlenen P(0) 0,35, kuralın 0,72 / 0,62.
+- **GPT'de hatanın kaynağı:**
+  - bedavacılar (kendi önceki katkısı 0): katkısı −0,22 / −0,23 / −0,28. Kuraldan daha sık 0'da kalıyorlar.
+  - n = 32'de iki durum daha:
+    - işbirlikçilerin "biri 0 verdi" durumu: katkısı −0,15; gözlenen P(0) 0,33, kural 0,08;
+    - son tur: kendi 20, ötekiler [15, 20], biri 0; katkısı −0,28; gözlenen P(0) 0,93, kural 0,10. Son tur 8. turdaki çöküş ölçüsünü etkilemez.
+
+### T2 — işbirlikçi bir 0 görünce
+
+Kendi ≥ 10, ötekiler [5, 10), biri 0, orta oyun. Gözlenen P(0), parantez içinde kural:
+
+| model | n = 4 | n = 8 | n = 16 | n = 32 |
+|---|---|---|---|---|
+| Mistral | 0,57 (0,66) | 0,35 (0,72) | 0,35 (0,62) | — |
+| GPT | 0,17 (0,18) | 0,17 (0,13) | 0,16 (0,12) | 0,40 (0,17) |
+
+- **Ötekiler arasında 0 verenlerin sayısına (k) göre gözlenen P(0):**
+  - **Mistral:** k = 1 → 0,57 (n4), 0,32 (n8), 0,20 (n16); k = 2 → 0,36 / 0,22; k ≥ 3 → 0,75 (n8, 4 karar) / 0,57 (n16).
+  - **GPT:** k = 1 → 0,02 / 0,01 / 0,02 / 0,00; k = 2 → 0,82 (n4) / 0,12 / 0,04 / 0,00 (2 karar); k ≥ 3 → 0,35 / 0,28 / 0,42 (n8 / n16 / n32).
+- **Okuma:** iki model de "biri 0 verdi mi"ye değil, **kaç kişinin (ya da ötekilerin ne kadarının) 0 verdiğine** tepki veriyor.
+  - **Mistral:** tek bir 0'a tepki grup büyüdükçe azalıyor (kalabalıkta 1 kişi küçük bir pay).
+  - **GPT:** bir ya da iki 0'u neredeyse hiç umursamıyor, üç ve daha fazlasına tepki veriyor.
+  - 4 kişide "biri 0 verdi" durumu çoğunlukla "3 ötekinden 1'i" demek. Kural bu yüzden sayı ve payı tek bir göstergede topluyor, ve bu gösterge büyüklüğe taşınmıyor.
+  - Büyük grupta k ≥ 3 sıradan: GPT n = 32'de bu durumdaki 1 336 kararın 1 271'i.
+  - Ötekilerin ortalaması dilimi [5, 10) bu farkı yakalamıyor. Bu durumda ortalama 4 kişide 6,6; 32 kişide 7,5 ama 0 veren sayısı çok daha yüksek.
+
+### T3 — bedavacının geri dönüşü
+
+Önceki 0, ötekiler ≥ 5, orta oyun. Gözlenen ≥ 10'a dönme payı, parantez içinde kural:
+
+| model | n = 4 | n = 8 | n = 16 | n = 32 |
+|---|---|---|---|---|
+| Mistral | 0,18 (0,04) | 0,21 (0,06) | 0,26 (0,05) | — |
+| GPT | 0,57 (0,49) | 0,37 (0,46) | 0,38 (0,46) | 0,33 (0,40) |
+
+- GPT'de bedavacılar büyük gruplarda kuraldan daha az geri dönüyor (0,33–0,38'e karşı 0,40–0,46). Çöküşü bu kalıcılık ve çok sayıda 0'a verilen tepki birlikte büyütüyor.
+- Mistral'da bedavacılar kuraldan daha sık geri dönüyor.
+
+### Okuma (keşifsel; neden kanıtlanmadı)
+
+1. **Ortak sorun:** kuralın "biri 0 verdi" göstergesi büyüklükten bağımsız değil. LLM ajanlarının tepkisi 0 veren **sayısına ya da payına** bağlı. 4 kişide bu ikisi ayırt edilemiyordu.
+2. **Mistral'da** kuralın 16 kişide doğru çıkması kısmen hataların birbirini götürmesinden geliyor: işbirlikçiler daha hoşgörülü, ama çökmüş gruplarda 0'dan çıkılmıyor. C-H1'in "doğru yön, doğru büyüklük" sonucu bu yüzden "kısmen doğru nedenlerle" diye raporlanır.
+3. **GPT'de** büyük gruplarda üç ve daha fazla 0 verenin sıradanlaşması ve bedavacıların kalıcılığı, kuralın öngörmediği çöküşü açıklayan adaylar.
+4. **Sınanabilir yeni öngörü:** durum tanımına "ötekiler arasında 0 verenlerin sayısı ya da payı" eklenmiş bir kural büyüklüğe daha iyi taşınmalı. Bu ancak yeni, ileriye dönük bir testle doğrulanabilir; tahmin yeni bir grup büyüklüğü için önceden dondurulur.
