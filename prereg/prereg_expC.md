@@ -504,3 +504,28 @@ Kimse 0 vermediğinde oran bütün n'lerde 0,005–0,026.
 3. Önceden yazılan birleşik iddia ("ters yönlü ölçek") **doğrulanmadı**.
 4. **Ortak ve beklenmedik bulgu:** iki LLM topluluğu da büyüdükçe kırılganlaşıyor. İnsan deneylerindeki bulgunun tersi bu: sabit MPCR'de insan grupları büyüdükçe daha az işbirliği yapmıyordu (Isaac, Walker & Williams, 1994); bu sınanmadı, yalnız bağlam.
 5. 4 kişide ölçülen kural, büyüklüğe yalnız bir modelde taşındı. Küçük grupta ölçülen mikro kuralın büyük topluluğa aktarımı modele bağlı; bu, GABM'ler için bir uyarıdır.
+
+## Ek F-C.8 — Keşifsel tanı planı: kural büyük gruplarda nerede yanılıyor? (2026-10-20, hesaplanmadan önce yazıldı)
+
+- **Durum:** keşifsel; C2 sonuçları (F-C.7) görüldükten sonra yazıldı. Hiçbir C-H etiketini değiştirmez. Ücretli çağrı yok; yalnız C2 verisi ve dondurulmuş kural.
+- **Soru:** GPT'de kural, büyük gruplarda (n ≥ 8) çöküşü fazla iyimser öngördü (C-H2, C-H3). Mistral'da n = 8 grupları beklenenden işbirlikçiydi. Hata hangi durumlardan geliyor?
+- **T1 — Tek adım hata ayrıştırması.** Her (model, n) için tur 2–10'daki bütün ajan kararlarının durumu (kendi önceki dilim, ötekilerin ortalaması dilimi, "biri 0 verdi", kalan tur dilimi) hesaplanır (`pgg_analysis_expC.bins_n`).
+  - Her durum s için ölçülenler:
+    - kararların payı f_s;
+    - gözlenen ortalama katkı ō_s;
+    - dondurulmuş kuralın aynı durumdaki beklenen katkısı r̄_s (hücre kuralı, geri çekilmeyle);
+    - gözlenen ve kuraldaki P(0).
+  - Toplam tek adım sapma B = Σ f_s (ō_s − r̄_s). En büyük |f_s (ō_s − r̄_s)| katkısı olan 5 durum raporlanır.
+  - Ayrıca üç kaba grup için toplam katkı: kendi önceki katkısı 0 (bedavacılar), 10 (işbirlikçiler), diğer.
+- **T2 — Tetikleyici ve ortalama dilimi.**
+  - İşbirlikçi bir ajan (önceki katkı ≥ 10, ötekilerin ortalaması [5, 10), biri 0 verdi, orta oyun) için iki P(0) karşılaştırılır:
+    - n'ye göre gözlenen;
+    - kuralın aynı durumdaki değeri (4 kişilik veriden; orada bu durumda ötekilerin ortalaması tipik olarak 6,67).
+  - Ayrıca bu durumda ötekiler arasında 0 verenlerin sayısına göre (1, 2, 3+) gözlenen P(0).
+- **T3 — Bedavacıların geri dönüşü.**
+  - Önceki turda 0 vermiş bir ajanın (ötekilerin ortalaması ≥ 5, orta oyun) bir sonraki turda ≥ 10'a dönme payı: n'ye göre gözlenen ile kuralın aynı durumlardaki değeri.
+  - Okuma kuralı (yalnız betimsel): büyük gruplarda gözlenen geri dönüş kuraldakinden belirgin düşükse, çöküşü bedavacıların kalıcılığı büyütüyor demektir.
+- **Kapsam:** iki model, bütün n. Odak GPT n ≥ 8 ve Mistral n = 8.
+- **İstatistik:** betimsel. Paylar için grup bootstrap %95 CI (2 000 tekrar, kart içinde tabakalı), yalnız T2 ve T3'ün ana karşılaştırmalarında. Seed `stable_seed("pgg-expC-explore", …)`.
+- **Uygulama:** `pgg_analysis_expC_explore.py` ve sentetik testleri; sonuç `results/expC_explore_20261020.json`.
+- **Okuma sınırı:** bu analiz hatanın **nerede** oluştuğunu gösterir, nedenini kanıtlamaz. Bulunan bir açıklama ancak yeni bir ileriye dönük testle doğrulanabilir.
