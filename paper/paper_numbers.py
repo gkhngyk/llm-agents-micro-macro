@@ -259,3 +259,11 @@ for n in (4, 8, 16, 32):
         tot = sum(cnt.values())
         z1 = np.mean([(arrs[c][:, 0, :] == 0).mean() for c in _pc.CARDS])
         print(f"  {m} n{n}: round-1 zero share {z1:.3f}; full state cell {cnt['d0-cell']/tot:.3f}, model {cnt['d0-model']/tot:.3f}, coarser {1 - (cnt['d0-cell'] + cnt['d0-model'])/tot:.3f}")
+print("\n## Study 4 extras 2: re-requested parse failures (GPT) and T1 one-step bias by coarse group")
+for n in (4, 8, 16, 32):
+    run = f"expC_n{n}_main_20261020"
+    sm = json.load(open(RUNS / run / f"{run}_summary.json"))
+    pm = sm.get("per_model") or {}
+    print(f"- n{n}: " + ", ".join(f"{k.split('/')[-1]} invalid {v.get('n_invalid')} parse_fail {v.get('n_parse_fail')}" for k, v in pm.items()))
+for m, d in ex.items():
+    print(f"- {m}: " + "; ".join(f"n{n} total {v['T1']['bias_total']:+.3f} (" + ", ".join(f"{k} {x:+.3f}" for k, x in v['T1']['coarse'].items()) + ")" for n, v in d.items()))

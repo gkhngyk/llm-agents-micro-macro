@@ -253,3 +253,11 @@
   mistral n16: round-1 zero share 0.062; full state cell 0.969, model 0.030, coarser 0.001
   gpt n16: round-1 zero share 0.320; full state cell 0.874, model 0.101, coarser 0.025
   gpt n32: round-1 zero share 0.405; full state cell 0.811, model 0.072, coarser 0.116
+
+## Study 4 extras 2: re-requested parse failures (GPT) and T1 one-step bias by coarse group
+- n4: mistral-large-4-0 invalid 0 parse_fail 0, gpt-6-luna invalid 0 parse_fail 0
+- n8: mistral-large-4-0 invalid 0 parse_fail 0, gpt-6-luna invalid 0 parse_fail 1
+- n16: mistral-large-4-0 invalid 0 parse_fail 0, gpt-6-luna invalid 0 parse_fail 1
+- n32: gpt-6-luna invalid 0 parse_fail 2
+- mistral: n4 total +0.081 (işbirlikçi (önceki 10) +0.094, bedavacı (önceki 0) -0.001, diğer -0.012); n8 total +0.349 (işbirlikçi (önceki 10) +0.329, bedavacı (önceki 0) +0.014, diğer +0.007); n16 total +0.478 (işbirlikçi (önceki 10) +0.593, bedavacı (önceki 0) -0.101, diğer -0.014)
+- gpt: n4 total +0.091 (bedavacı (önceki 0) +0.081, işbirlikçi (önceki 10) +0.074, diğer -0.064); n8 total -0.306 (diğer -0.049, işbirlikçi (önceki 10) -0.040, bedavacı (önceki 0) -0.217); n16 total -0.424 (işbirlikçi (önceki 10) -0.073, bedavacı (önceki 0) -0.233, diğer -0.118); n32 total -0.653 (diğer -0.196, bedavacı (önceki 0) -0.277, işbirlikçi (önceki 10) -0.180)

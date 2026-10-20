@@ -86,9 +86,9 @@ With the stricter 1/9 thresholds for the end-state shares, every label of Sectio
 | GPT | 16 | −1.43 [−2.48, −0.35] | unclear | +0.35 [+0.21, +0.48] | deviates: real higher |
 | GPT | 32 | −2.01 [−3.38, −0.50] | deviates: real lower | +0.52 [+0.40, +0.64] | deviates: real higher |
 
-**Frozen rule coverage.** Share of observed decisions whose state the frozen rule found at full detail:
+**Frozen rule coverage.** Share of observed decisions whose full state the frozen rule found in the same card's table, and the additional share found only in the model-pooled table (after the card's table had no entry):
 
-| n | Mistral, same card | Mistral, model-pooled | GPT, same card | GPT, model-pooled |
+| n | Mistral, same card | Mistral, only pooled | GPT, same card | GPT, only pooled |
 |---|---|---|---|---|
 | 4 | 0.970 | 0.030 | 0.952 | 0.035 |
 | 8 | 0.959 | 0.037 | 0.953 | 0.043 |

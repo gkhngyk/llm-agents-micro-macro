@@ -619,3 +619,4 @@ Kendi ≥ 10, ötekiler [5, 10), biri 0, orta oyun. Gözlenen P(0), parantez iç
   - GPT 0,349 / 0,414 / 0,320 / 0,405 (n = 4 / 8 / 16 / 32).
 
   R0'ın Mistral'daki koşullu artışı (+0,17) büyük gruplarda daha çok erken 0 olmasıyla tutarlı.
+- **Açıklama (2026-10-20):** F-C.10'daki geri çekilme tablosunda "model havuzu" sütunu, hücre tablosunda bulunamayıp **yalnız** model havuzunda bulunan ek paydır. Tam ayrıntıda bulunan toplam pay iki sütunun toplamıdır: Mistral 0,996–1,000; GPT 0,883–0,996.
