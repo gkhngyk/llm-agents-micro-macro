@@ -1,0 +1,70 @@
+{
+  "_notes": "Stage D2 main run, groups of 64: GPT only, 12 groups per card (user decision 2026-10-20). Experiment D (prereg/prereg_expD.md, approved 2026-10-20, before any data): does a count-aware rule learned from the existing data (frozen in data/expD/) predict groups of 64? Frame abstract_v4_n64 (abstract_v4 except the rule-check example q1); 4 minimal cards (cards/expA_cards_v1.json); 10 rounds; group arm only, condition N; GPT provider and request settings as configs/main.json. Budget caps from the D0 dry run, scaled by the C2 cost per call (prereg_expD).",
+  "prereg_approved": true,
+  "stage": "1",
+  "run": "expD_n64_main_{run_date}",
+  "cards": "cards/expA_cards_v1.json",
+  "cards_sha256": "0ed7a45d370242856ff7ce3eea2a2d34277ca2e39952a23b6ad0ad1c45d95c2a",
+  "cities": [
+    "Boston",
+    "Copenhagen",
+    "Athens",
+    "Riyadh"
+  ],
+  "models": [
+    "openai/gpt-6-luna"
+  ],
+  "conditions": [
+    "N"
+  ],
+  "arms": [
+    "group"
+  ],
+  "groups_per_cell": 12,
+  "groups_per_cell_by_model": {
+    "gpt": 12
+  },
+  "frames": {
+    "abstract_v4_n64": [
+      "gpt"
+    ]
+  },
+  "frame_files": {
+    "abstract_v4_n64": {
+      "path": "frames/abstract_v4_n64.json",
+      "sha256": "95604242ad2032b7c7c4be61354427ed75e0a0365949c1c9a0e00555074f62f9"
+    }
+  },
+  "comprehension": true,
+  "rationale": true,
+  "answer_format": "example_object",
+  "max_tokens": 16000,
+  "request_deadline_s": 900,
+  "stall_timeout_s": 1800,
+  "providers": {
+    "gpt": {
+      "slug": "openai",
+      "name": "OpenAI"
+    }
+  },
+  "runs_dir": "/Users/karbon/Desktop/Veri Bilimi/complexity-prj/orc/data/projects/PublicGoods/workspace/runs",
+  "seed_namespace": "pgg-expD-n64",
+  "max_invalid": 3,
+  "budget_usd": 23,
+  "model_budget_usd": {
+    "gpt": 23
+  },
+  "expected_cost_gate_usd": 10,
+  "cost_calibration": {
+    "path": "configs/cost_calibration_minipilot.json",
+    "sha256": "d26eb4107aa7ae0ec828bffb912dc5e59d23933347cdf3a8f737858b5ec040c8"
+  },
+  "invalid_rate_cap": 0.05,
+  "stop_on_length": true,
+  "check_snapshot": true,
+  "workers": 4,
+  "parallel_units": 3,
+  "params": {
+    "group_size": 64
+  }
+}
