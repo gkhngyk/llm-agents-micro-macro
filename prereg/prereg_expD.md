@@ -1,4 +1,4 @@
-TASLAK — kullanıcı onayı bekliyor (2026-10-20)
+ONAYLANDI — 2026-10-20 (kullanıcı; 64 kişi, Mistral yok)
 
 > Bu belge onaylanmadan hiçbir ücretli çağrı yapılmaz. Ücretli aşama (D2) kullanıcı "BAŞLA D2" deyince başlar. **Bu, çalışmanın son deneyidir;** sonucu ne olursa olsun ardından makale tamamlanır ve yayımlanır.
 
@@ -111,6 +111,14 @@ TASLAK — kullanıcı onayı bekliyor (2026-10-20)
 2. **Mistral'ı D2'ye eklemek:** önerilen hayır. 12 kişide 24 grup ≈ 22 USD; ±0,15 bandına yetmez; çalışmayı uzatır.
 3. **Onay:** onaylanırsa D0'a geçilir (ücretsiz). D2 için ayrıca "BAŞLA D2".
 
+**Kayıt (2026-10-20, kullanıcı):** "onaylıyorum, 64, Mistral yok, D0'a geç". Seçenek (a) 64 kişi; Mistral D2'ye eklenmez.
+
 ## Değişiklik günlüğü
 
 - 2026-10-20: ilk taslak (veriden önce).
+- 2026-10-20: onay (kullanıcı); metin değişmedi, yalnız üst satır ve §9 kaydı.
+
+## Ek F-D.1 — Bir test tanımının düzeltilmesi (2026-10-20, kod yazılmadan önce)
+
+- **Yanlış olan:** §5'teki "R4 durumunun n = 4'te R3'e indirgenmesi" testi yanlış tanımlanmış. 4 kişide de 0 sayısı 0–3 değerini alır; R4-sayı, 2 ya da 3 kişinin 0 verdiği durumları R3'ten ayırır. Yani R4, 4 kişide de R3'e indirgenmez.
+- **Doğru test:** R4'ün yeni öğesi "biri 0 verdi" göstergesiyle tutarlıdır: 0 sayısı (ya da payı) > 0 ⇔ gösterge 1. Geri çekilmede yeni öğe düşünce durum R3 durumunun aynısı olur.
