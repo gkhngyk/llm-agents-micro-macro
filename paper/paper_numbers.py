@@ -56,7 +56,7 @@ for m in M:
 print(f"- cells uyumlu: " + ", ".join(f"{m} {eb['main']['cells'][m]['uyumlu']}/8" for m in M))
 
 # ---- numbers computed from the run files (stage 1) and the run summaries
-RUNS = Path("/Users/karbon/Desktop/Veri Bilimi/complexity-prj/orc/data/projects/PublicGoods/workspace/runs")
+RUNS = Path(json.load(open(R.parent / "configs" / "main.json"))["runs_dir"])   # scripts/set_runs_dir.py points it at a release copy
 rows = [json.loads(l) for l in open(RUNS / "main_s1_20261014" / "main_s1_20261014.jsonl")]
 con = collections.defaultdict(dict); meta = {}
 for r in rows:

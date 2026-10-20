@@ -26,3 +26,6 @@ CODE_VERSION.json
 # Zenodo deposit builds (regenerate with scripts/build_zenodo_expC.py)
 release/zenodo_expC/build/
 release/zenodo_expC/*.zip
+
+# full release builds (regenerate with scripts/build_release.py)
+release/full/
