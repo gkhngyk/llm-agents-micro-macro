@@ -1,6 +1,6 @@
 # Grup dinamiğini, tek başına sorulan sorular değil, oyun içinde ölçülen kurallar üretir: LLM ajan gruplarında mikrodan makroya
 
-*Üç dil modeliyle tekrarlı bir kamu malı oyununda çöküş tuzakları, devrilme noktaları ve zaman ufku ile grup büyüklüğüne dair önceden kaydedilmiş testler*
+*Üç dil modeliyle tekrarlı bir kamu malı oyununda çöküş tuzakları, devrilme noktaları ve zaman ufku ile grup büyüklüğüne dair önceden belirlenmiş testler*
 
 **Türkçe okuma kopyası.** İngilizce ön baskının (sürüm 1, 2026-10-20) çevirisidir; resmî metin İngilizcedir. Şekiller İngilizce sürümdekilerin aynısıdır, şekil içindeki yazılar İngilizcedir. Sayılar Türkçe yazımla verilmiştir (ondalık virgül; güven aralıklarında noktalı virgül).
 
@@ -10,21 +10,21 @@ Gökhan Geyik (Empler AI)
 
 ## Özet
 
-Üretken ajan tabanlı modeller (GABM), büyük dil modellerini (LLM) ajan olarak kullanır ve onları çoğu zaman tek başına sorulan sorularla ayarlar ya da doğrular. Bu bireysel (mikro) cevapların bir nüfusun toplu (makro) dinamiğini üretip üretmediği, ajan tabanlı sosyal bilimin mikro–makro sorusudur. Bu soruyu, üç LLM (DeepSeek-V4.1-Flash, Mistral-Large-4, GPT-6-Luna) ile tekrarlı bir kamu malı oyununda (tur başına 20 puan, MPCR 0,4) dört çalışmada (1.200 grup) inceledik; her çalışma veriden önce yazılmış bir planı izledi. Her ajanın tek başına sorulan bir soruya verdiği cevaptan kurulan simülasyon, üç modelde de grup yörüngelerini yanlış tahmin etti. Dört kişilik gruplardaki oyun içi kararlardan öğrenilen, bir tur geriye bakan bir kural (kendi son katkısı, ötekilerin son ortalaması, birinin 0 verip vermediği, kalan tur sayısı) yörüngeleri örneklem dışında yeniden üretti ve önceden dondurulduğunda, ajanların hiç oynamadığı 15 turluk bir oyunu tahmin etti (ortalama hata 20 puan üzerinden −0,06 ile +0,82). Keşifsel analizlerde kural, dört kişilik grupların makro yapısını da üretiyor: emici bir çöküş durumu, yapışkan bir işbirliği, iki uçta toplanan sonlar ve iki modelde tek bir bedavacıda devrilme noktası. Tek başına verilen cevaplar ise bunun yerine ortalamaya çeken bir dinamik öngörüyor. Tahminin ana koşudan önce herkese açık olarak kaydedildiği, önceden kaydedilmiş bir ölçek testinde iki model de büyük gruplarda daha sık çöktü: Mistral'da grupların 0,29'u 4 ajanda, 0,79'u 16 ajanda; GPT'de 0,23'ü 4 ajanda, 0,69'u 32 ajanda (arada tekdüze değil). Her grubun ilk turundan başlatılan dondurulmuş kural, Mistral'daki artışı tahmin etti (gözlenen +0,50'ye karşı +0,47; kaydedilen tahmin +0,40), ama kısmen birbirini götüren hatalar sayesinde; GPT'dekini ise tahmin edemedi (+0,46'ya karşı −0,12; kaydedilen −0,08). Keşifsel analizler iki katkıya işaret ediyor: ajanlar birinin 0 verip vermediğine değil, ötekilerin kaçının ya da ne kadarının 0 verdiğine tepki verdi (dört kişilik gruplarda sayı ile pay aynı şeydir); büyük GPT gruplarında da bedavacılar daha sık 0'da kaldı. Bu bilgiyi kullanan düzeltilmiş bir kural, önceden kaydedilmiş bir karar kapısında durduruldu (gereken 0,05'e karşı 0,047 iyileşme); asıl kuralı birkaç grup büyüklüğünden öğrenmek daha çok işe yaradı. Aynı oyunu oynayan insan grupları (230 grup) başka bir rejimdedir: çöküşten çıkılabiliyor ve sonlar yayılıyor. Arka plan değişkeni olarak çeşitlendirilen kimlik tanımları, adını verdikleri şehirler üzerinden değil, ifadeleri üzerinden etki etti (değer cümleleri ve bir modelde bir kurumsal olgu). Üretken ajan tabanlı modeller için ders şudur: mikro kurallar bağlam içinde ve simüle edilecek ölçekte ölçülmeli. Bir LLM ajanının tek başına söylediği, grubunun yaptığını kötü üretir; küçük gruplarda ölçülen bir kural da büyük gruplara taşınmayabilir.
+Üretken ajan tabanlı modeller (GABM), büyük dil modellerini (LLM) ajan olarak kullanır ve onları çoğu zaman tek başına sorulan sorularla ayarlar ya da doğrular. Bu bireysel (mikro) cevapların bir nüfusun toplu (makro) dinamiğini üretip üretmediği, ajan tabanlı sosyal bilimin mikro–makro sorusudur. Bu soruyu, üç LLM (DeepSeek-V4.1-Flash, Mistral-Large-4, GPT-6-Luna) ile tekrarlı bir kamu malı oyununda (tur başına 20 puan, MPCR 0,4) dört çalışmada (1.200 grup) inceledik; her çalışma veriden önce yazılmış bir planı izledi. Her ajanın tek başına sorulan bir soruya verdiği cevaptan kurulan simülasyon, üç modelde de grup yörüngelerini yanlış tahmin etti. Dört kişilik gruplardaki oyun içi kararlardan öğrenilen, bir tur geriye bakan bir kural (kendi son katkısı, ötekilerin son ortalaması, birinin 0 verip vermediği, kalan tur sayısı) yörüngeleri örneklem dışında yeniden üretti ve önceden dondurulduğunda, ajanların hiç oynamadığı 15 turluk bir oyunu tahmin etti (ortalama hata 20 puan üzerinden −0,06 ile +0,82). Keşifsel analizlerde kural, dört kişilik grupların makro yapısını da üretiyor: emici bir çöküş durumu, yapışkan bir işbirliği, iki uçta toplanan sonlar ve iki modelde tek bir bedavacıda devrilme noktası. Tek başına verilen cevaplar ise bunun yerine ortalamaya çeken bir dinamik öngörüyor. Tahminin ana koşudan önce herkese açık olarak kaydedildiği, önceden kaydedilmiş bir ölçek testinde iki model de büyük gruplarda daha sık çöktü: Mistral'da grupların 0,29'u 4 ajanda, 0,79'u 16 ajanda; GPT'de 0,23'ü 4 ajanda, 0,69'u 32 ajanda (arada tekdüze değil). Her grubun ilk turundan başlatılan dondurulmuş kural, Mistral'daki artışı tahmin etti (gözlenen +0,50'ye karşı +0,47; kaydedilen tahmin +0,40), ama kısmen birbirini götüren hatalar sayesinde; GPT'dekini ise tahmin edemedi (+0,46'ya karşı −0,12; kaydedilen −0,08). Keşifsel analizler iki katkıya işaret ediyor: ajanlar birinin 0 verip vermediğine değil, ötekilerin kaçının ya da ne kadarının 0 verdiğine tepki verdi (dört kişilik gruplarda sayı ile pay aynı şeydir); büyük GPT gruplarında da bedavacılar daha sık 0'da kaldı. Bu bilgiyi kullanan düzeltilmiş bir kural, önceden belirlenmiş bir karar kapısında durduruldu (gereken 0,05'e karşı 0,047 iyileşme); asıl kuralı birkaç grup büyüklüğünden öğrenmek daha çok işe yaradı (keşifsel). Aynı oyunu oynayan insan grupları (230 grup) başka bir rejimdedir: çöküşten çıkılabiliyor ve sonlar yayılıyor. Arka plan değişkeni olarak çeşitlendirilen kimlik tanımları, adını verdikleri şehirler üzerinden değil, ifadeleri üzerinden etki etti (değer cümleleri ve bir modelde bir kurumsal olgu). Üretken ajan tabanlı modeller için ders şudur: mikro kurallar bağlam içinde ve simüle edilecek ölçekte ölçülmeli. Bir LLM ajanının tek başına söylediği, grubunun yaptığını kötü üretir; küçük gruplarda ölçülen bir kural da büyük gruplara taşınmayabilir.
 
 ---
 
 ## 1. Giriş
 
-Ajan tabanlı sosyal bilim bir makro örüntüyü mikro kurallardan "büyüterek" açıklar: belirli kuralları izleyen bir ajan nüfusu örüntüyü üretiyorsa örüntü açıklanmış sayılır (Epstein, 1999). Üretken ajan tabanlı modeller (GABM), elle yazılmış kuralların yerine bir rol oynamaya yönlendirilmiş dil modellerini koyar. Mikro kurallar artık yazılmaz; ölçülmeleri gerekir. Bunları ölçmenin yaygın yolu, ajana tarif edilen bir durumda ne yapacağını sormaktır. Bu da mikro–makro sorusunu yeni bir biçimde ortaya çıkarır: bir LLM ajanının tek başına söyledikleri, bu tür ajanlardan oluşan bir nüfusun yaptıklarını üretir mi?
+Ajan tabanlı sosyal bilim bir makro örüntüyü mikro kurallardan "büyüterek" açıklar: bir makro örüntü ancak belirli mikro kuralları izleyen bir ajan nüfusu onu üretebiliyorsa açıklanmış sayılır ("büyütemediysen açıklamamışsındır"; Epstein, 1999). Üretken ajan tabanlı modeller (GABM), elle yazılmış kuralların yerine bir rol oynamaya yönlendirilmiş dil modellerini koyar. Mikro kurallar artık yazılmaz; ölçülmeleri gerekir. Bunları ölçmenin yaygın yolu, ajana tarif edilen bir durumda ne yapacağını sormaktır. Bu da mikro–makro sorusunu yeni bir biçimde ortaya çıkarır: bir LLM ajanının tek başına söyledikleri, bu tür ajanlardan oluşan bir nüfusun yaptıklarını üretir mi?
 
-İnsanlar için kamu malı oyunu klasik bir cevap verir. Fischbacher, Gächter ve Fehr (2001) *katkı çizelgelerini* (bir kişinin, ötekilerin her olası ortalama katkısına karşılık ne kadar katkı vereceği) topladı ve çoğu insanın koşullu işbirlikçi olduğunu buldu. Fischbacher ve Gächter (2010), bu çizelgelerin beklentilerle birlikte tekrarlı oyunda işbirliğinin düşüşünü açıkladığını gösterdi. Beyan edilen koşullu kurallar bireyi gruba bağlar.
+İnsanlar için kamu malı oyunu klasik bir cevap verir. Fischbacher, Gächter ve Fehr (2001) *katkı çizelgelerini* (bir kişinin, ötekilerin her olası ortalama katkısına karşılık ne kadar katkı vereceği) topladı ve deneklerinin yaklaşık yarısının koşullu işbirlikçi, yaklaşık üçte birinin bedavacı olduğunu buldu. Fischbacher ve Gächter (2010), bu çizelgelerin beklentilerle birlikte tekrarlı oyunda işbirliğinin düşüşünü açıkladığını gösterdi. Beyan edilen koşullu kurallar bireyi gruba bağlar.
 
 LLM ajanları için kanıtlar karışıktır:
 - toplu sonuçlar insanlara benzeyebilir, ama altta yatan karar kuralları benzemez (Ferraz de Arruda ve ark., 2026);
-- insan verisiyle uyum başlangıç noktalarıyla sınırlıdır (Bin Tareaf, 2026);
-- 32 milyar parametreye kadarki açık modeller, oyun içinde pek güncellenmeyen durağan "level-k" oyuncular gibi davranır (Teo, 2026);
-- personalar açık ödemelerin önüne geçebilir (Manoranjan ve Gaikwad, 2026) ya da büyük ölçüde eylemlere karşılık gelen sözcükler üzerinden etki eder (Wang, Lester ve Srivastava, 2026).
+- açık ağırlıklı modellerde insan kamu malı verisiyle uyum ilk tur katkılarında var, son durumlarda yok (Bin Tareaf, 2026);
+- tek bir aileden açık modeller (0,5–32 milyar parametre), oyun içinde pek güncellenmeyen durağan "level-k" oyuncular gibi davranır (Teo, 2026);
+- personalar açık ödemelerin önüne geçebilir (Manoranjan ve Gaikwad, 2026) ya da görev anlatıları arasında çoğunlukla eylemlere karşılık gelen sözcükler üzerinden taşınır (Wang, Lester ve Srivastava, 2026).
 
 Önceki çalışmamızda, ültimatom oyununda LLM ajanlarının davranışını bir kimlik tanımının adını verdiği kültürün değil, *ifadesinin* belirlediğini bulmuştuk (Geyik, 2026a).
 
@@ -39,11 +39,11 @@ Dört soru soruyoruz:
 
 Katkılarımız:
 - (i) tek seferlik, tek başına verilen cevaplar üç modelde de grup dinamiğini yanlış tahmin ediyor;
-- (ii) Çalışma 1'den sonra tasarlanan basit bir bağlam içi kural boşluğu kapatıyor ve önceden dondurulduğunda görülmemiş uzunlukta bir oyunu tahmin ediyor;
+- (ii) Çalışma 1 ve 2'den sonra tasarlanan basit bir bağlam içi kural boşluğu kapatıyor ve önceden dondurulduğunda görülmemiş uzunlukta bir oyunu tahmin ediyor;
 - (iii) keşifsel analizlerde bağlam içi kural emici bir çöküş durumu olan bir eşik sistemi üretiyor; tek başına verilen cevaplar bunu kaçırıyor ve bu yapı insan rejiminden farklı;
 - (iv) sınanan iki modelde de LLM grupları büyüdükçe daha sık çöktü; dört kişilik gruplardan öğrenilen kural bunu bir model için tahmin etti, ötekisi için edemedi; keşifsel analizler iki katkıya işaret ediyor (ajanlar ötekilerin kaçının ya da ne kadarının 0 verdiğine tepki veriyor; büyük GPT gruplarında bedavacılar 0'da kalıyor);
 - (v) kimlik etkileri şehir adlarından değil, tanımların ifadesinden geliyor (değer cümleleri; Mistral'da ayrıca mahkeme süresi olgusu);
-- (vi) önceden kaydedilmiş testler kendi açıklamalarımızın bir kısmını desteklemedi: "görünen bedavacı" mekanizması üç modelin ikisinde desteklenmedi ve iki modelin ters yönde ölçekleneceği tahmini doğrulanmadı (iki model de aynı yönde ölçeklendi).
+- (vi) önceden belirlenmiş testler kendi açıklamalarımızın bir kısmını desteklemedi: "görünen bedavacı" mekanizması üç modelin ikisinde desteklenmedi ve iki modelin ters yönde ölçekleneceği tahmini doğrulanmadı (iki model de aynı yönde ölçeklendi).
 
 Bütün planlar, ekler, kod, veri ve muhakeme metinleri açıktır.
 
@@ -73,7 +73,7 @@ On iki kart: dört şehir (Boston, Kopenhag, Atina, Riyad) × üç üslup.
 - *Değer:* minimal + bir değer cümlesi (ör. Boston: "Where you grew up, people prize personal liberty and speaking up against authority." — "Büyüdüğün yerde insanlar kişisel özgürlüğe ve otoriteye karşı sesini yükseltmeye değer verir."; Riyad: "…people strongly respect family elders and tribal leaders." — "…insanlar aile büyüklerine ve kabile liderlerine güçlü bir saygı duyar.").
 - *Olgusal:* minimal + "In your country, a lawsuit over an unpaid bill takes about N days" ("Ülkende ödenmemiş bir fatura için açılan dava yaklaşık N gün sürer"; Doing Business 2020'deki sözleşme uygulama süresi, Dünya Bankası, 2019: 444, 485, 1.711, 575).
 
-Sistem mesajı "The following describes you:" ("Aşağıdaki seni tanımlar:") diye başlayıp kartla devam ediyordu. Şehirler, Herrmann ve ark.'ndaki (2008) insan sıralamaları bilinsin diye seçildi (tur 1–10: Kopenhag > Boston > Riyad > Atina).
+Sistem mesajı "The following describes you:" ("Aşağıdaki seni tanımlar:") diye başlayıp kartla devam ediyordu (Mistral'da sağlayıcı görünüşe göre bir JSON biçim talimatı ekledi; bkz. Sınırlılıklar). Şehirler, Herrmann ve ark.'ndaki (2008) insan sıralamaları bilinsin diye seçildi (tur 1–10: Kopenhag > Boston > Riyad > Atina).
 
 ### 2.3 İki mikro kural
 
@@ -85,7 +85,7 @@ Sistem mesajı "The following describes you:" ("Aşağıdaki seni tanımlar:") d
 - ötekilerden birinin 0 verip vermediği;
 - kalan turlar (≥ 2, sondan bir önceki, son).
 
-Her durumda ajan, eğitim gruplarında o durumda gözlenen gerçek kararlardan birini çeker. Bu, gerçek kararlardaki 0/10/20 kesikliliğini korur. Görülmemiş durumlar daha kaba durumlara ve modelin öteki kartlarına geri çekilir. Grup süreci dört katkı üzerinde bir Markov zinciridir. Orta oyunda (iki ya da daha fazla tur kalmışken) zamanla değişmez; bu da uzun dönem özelliklerini iyi tanımlı kılar. R3, Çalışma 1'den sonra tasarlandı (Bölüm 4) ve Çalışma 3'ten önce donduruldu (Bölüm 6).
+Her durumda ajan, eğitim gruplarında o durumda gözlenen gerçek kararlardan birini çeker. Bu, gerçek kararlardaki 0/10/20 kesikliliğini korur. Görülmemiş durumlar daha kaba durumlara ve modelin öteki kartlarına geri çekilir. Grup süreci dört katkı üzerinde bir Markov zinciridir. Orta oyunda (iki ya da daha fazla tur kalmışken) zamanla değişmez; bu da uzun dönem özelliklerini iyi tanımlı kılar. R3, Çalışma 1 ve 2'nin sonuçları bilinirken tasarlandı (Bölüm 4) ve Çalışma 3'ten önce donduruldu (Bölüm 6).
 
 ### 2.4 İnsan karşılaştırma verisi
 
@@ -109,11 +109,11 @@ Gözlenen değerler, her kuralın aynı gruplar için, gözlenen 1. turlarından
 
 ### 2.6 Süreç
 
-Her çalışma için, ücretli ilk çağrıdan önce yazılı bir plan commit edildi. Plan, iki yönü de yazılmış hipotezleri, karar kurallarını ve sentetik veriyle test edilmiş analiz kodunu içeriyordu. Analiz betikleri eksik veride çalışmayı reddeder. Keşifsel analizler de hesaplanmadan önce yazılı olarak planlandı; sapmalar gerekçeleriyle tarihli ekler olarak kaydedildi. Planlar Türkçe yazıldı; bunlar herkese açık bir depodaki iç yazılı planlardır, kamuya açık bir kayıt sistemindeki girdiler değildir.
+Her çalışma için, ücretli ilk çağrıdan önce yazılı bir plan commit edildi. Plan, iki yönü de yazılmış hipotezleri, karar kurallarını ve sentetik veriyle test edilmiş analiz kodunu içeriyordu. Analiz betikleri eksik veride çalışmayı reddeder. Keşifsel analizler de hesaplanmadan önce yazılı olarak planlandı; sapmalar gerekçeleriyle tarihli ekler olarak kaydedildi. Planlar Türkçe yazıldı; bunlar herkese açık bir depodaki iç yazılı planlardır, kamuya açık bir kayıt sistemindeki girdiler değildir; bu yüzden onlara "önceden belirlenmiş" diyoruz. Yalnız Çalışma 4'ün planı ve tahmini ana koşudan önce ayrıca herkese açık olarak kaydedildi; o teste "önceden kaydedilmiş" diyoruz. Planlarda ve arşivde Çalışma 1 ana deneydir, Çalışma 2, 3 ve 4 Deney A, B ve C'dir; durdurulan 64 ajanlık test Deney D'dir.
 
 Bir fark, nokta tahmini 2 puanı aştığında ve grup düzeyindeki bootstrap %95 güven aralığı 0'ı dışladığında "var" sayılır (10.000 yeniden örnekleme). Bir ailede birden çok test varsa model ve hipotez ailesi içinde Holm düzeltmesi uygulanır.
 
-Araştırma, yazarın yönetiminde bir yapay zekâ asistanıyla (Claude) yürütüldü. Her sayı sonuç dosyalarından yeniden üretildi; temel sayılar bağımsız kodla yeniden hesaplandı. Sayılar kesin değerlerden yarımı yukarı yuvarlandı. Kaynaklar Crossref, DataCite ya da arXiv kayıtlarıyla kontrol edildi (arXiv ön baskıları özetleri düzeyinde).
+Araştırma, yazarın yönetiminde bir yapay zekâ asistanıyla (Claude) yürütüldü. Her sayı sonuç dosyalarından alındı; temel sayılar bağımsız kodla yeniden hesaplandı. Sayılar kesin değerlerden yarımı yukarı yuvarlandı. Kaynaklar Crossref, DataCite ya da arXiv kayıtlarıyla kontrol edildi (arXiv ön baskıları özetleri düzeyinde).
 
 ## 3. Çalışma 1: tek başına verilen cevaplardaki boşluk
 
@@ -131,7 +131,7 @@ Tek başına verilen cevaplar "ötekiler ne verdiyse onu ver"e yakındı: GPT'ni
 
 ### 3.2 Kimlik ve etkileşim (özet; ayrıntılar Ek S1–S2'de)
 
-Kimlik tanımları Çalışma 1'in manipüle edilen arka planıydı. Şehir adları tek başına fark edilebilir bir etki yapmadı: minimal kartlarda hiçbir modelde hiçbir şehir çifti farklılaşmadı (en büyük |fark| 1,02; 1,54 ve 2,22 puan). Değer cümleleri katkıları 14,45 puana kadar değiştirdi; bu değişim şehirlerin insan sıralaması yönünde değil, cümlelerin ifadesi yönündeydi (Tablo 1). DeepSeek ve Mistral'da Boston değer kartı ("kişisel özgürlük ve otoriteye karşı ses yükseltme") sıfıra yakın katkılar (0,15 ve 0,20), Riyad değer kartı ("aile büyüklerine ve kabile liderlerine saygı") bütün kartların en yüksek katkılarını (13,06 ve 14,65) üretti; bu, insan sıralamasının tersidir. Mahkeme süresi olgusu yalnız Mistral'da etkili oldu (Atina 1,59; öteki olgusal kartlar 5,51–7,81). DeepSeek ve Mistral kartı sıklıkla deneycinin bir ipucu olarak okudu. Önceden kaydedilmiş 36 etkileşim testinde farkların 4'ü oyun içinde büyüdü, 10'u azaldı, 22'si korundu; GPT'deki büyüme tamamen son turdan geldi.
+Kimlik tanımları Çalışma 1'in manipüle edilen arka planıydı. Şehir adları tek başına fark edilebilir bir etki yapmadı: minimal kartlarda hiçbir modelde hiçbir şehir çifti farklılaşmadı (en büyük |fark| 1,02; 1,54 ve 2,22 puan). Değer cümleleri katkıları 14,45 puana kadar değiştirdi; bu değişim şehirlerin insan sıralaması yönünde değil, cümlelerin ifadesi yönündeydi (Tablo 1). DeepSeek ve Mistral'da Boston değer kartı ("kişisel özgürlük ve otoriteye karşı ses yükseltme") sıfıra yakın katkılar (0,15 ve 0,20), Riyad değer kartı ("aile büyüklerine ve kabile liderlerine saygı") bütün kartların en yüksek katkılarını (13,06 ve 14,65) üretti; bu, insan sıralamasının tersidir. Mahkeme süresi olgusu yalnız Mistral'da etkili oldu (Atina 1,59; öteki olgusal kartlar 5,51–7,81). DeepSeek ve Mistral kartı sıklıkla deneycinin bir ipucu olarak okudu. Önceden belirlenmiş 36 etkileşim testinde farkların 4'ü oyun içinde büyüdü, 10'u azaldı, 22'si korundu; GPT'deki büyüme tamamen son turdan geldi.
 
 **Tablo 1.** On tur boyunca ortalama katkı (20 üzerinden), değer ve minimal kartlar.
 
@@ -147,18 +147,18 @@ Kimlik tanımları Çalışma 1'in manipüle edilen arka planıydı. Şehir adla
 
 ## 4. Mikro kuralı oyun içinde öğrenmek (keşifsel)
 
-Bu analizler Çalışma 1'den sonra tasarlandı ve keşifsel olarak işaretlendi; her biri hesaplanmadan önce yazıya geçirildi.
+Bu analizler keşifseldir; her biri hesaplanmadan önce yazıya geçirildi. Aşağıdaki iki düzenlilik Çalışma 1'den sonra fark edildi ve Çalışma 2'ye yol açtı; R1–R3 kuralları ise Çalışma 2'nin sonuçları da bilinirken tasarlandı.
 
 İki düzenlilik öne çıktı:
-1. **Katkılar odak değerlerde toplandı.** 20.160 grup-tur kararının %96,0'ı tam olarak 0, 10 ya da 20 idi.
-2. **Görünen bir sıfır katkıyı bırakma izledi.** Ajanın önceki turda kendisinin ≥ 10 verdiği ve ötekilerin ortalamasının ≥ 5 olduğu kararlara baktık. Ötekilerden biri 0 verdiğinde ajan vakaların %65'inde (DeepSeek), %61'inde (Mistral) ve %15'inde (GPT) 0 verdi; kimse 0 vermediğinde bu oranlar %2, %3 ve %0 idi.
+1. **Katkılar odak değerlerde toplandı.** 20.160 bireysel kararın %96,0'ı tam olarak 0, 10 ya da 20 idi.
+2. **Görünen bir sıfır katkıyı bırakma izledi.** 2–9. turlarda, ajanın önceki turda kendisinin ≥ 10 verdiği ve ötekilerin ortalamasının ≥ 5 olduğu kararlara baktık. Ötekilerden biri 0 verdiğinde ajan vakaların %65'inde (DeepSeek), %61'inde (Mistral) ve %15'inde (GPT) 0 verdi; kimse 0 vermediğinde bu oranlar %2, %3 ve %0 idi.
 
 İzole soru yalnız bir ortalama gösterdiği için R0 bunu temsil edemez. Bu yüzden grup verisinden giderek zenginleşen kurallar öğrendik:
 - R1: kendi ve ötekilerin önceki katkıları;
 - R2: R1 + ötekilerden birinin 0 verip vermediği;
 - R3: R2 + kalan turlar.
 
-Kuralları Çalışma 1'de birer grubu dışarıda bırakan çapraz doğrulamayla ve yeniden öğrenmeden Çalışma 2'nin bağımsız B kolu gruplarında değerlendirdik (aynı istem, üç gün sonra başlayan yeni bir koşu; Tablo 2).
+Kuralları Çalışma 1'de birer grubu dışarıda bırakan çapraz doğrulamayla ve yeniden öğrenmeden Çalışma 2'nin bağımsız B kolu gruplarında değerlendirdik (aynı istem, üç gün sonra başlayan yeni bir koşu; kurallar bu gruplara uydurulmadı, ama toplu sonuçları kurallar tasarlanırken biliniyordu; Tablo 2).
 
 **Tablo 2.** Yörünge RMSE'si (puan), tek başına verilen cevap (R0) ile oyun içinde öğrenilen kurallar.
 
@@ -179,7 +179,7 @@ R3, Çalışma 1'in 36 hücresinin ve yeni koşunun 12 hücresinin hepsinde ger�
 
 ## 5. Çalışma 2: bedavacıyı görmek çöküşe mi yol açıyor?
 
-Bölüm 4'teki sayım bir mekanizma düşündürdü; bunu önceden kaydedilmiş bir geri bildirim manipülasyonuyla sınadık:
+Bölüm 4'teki sayım bir mekanizma düşündürdü; bunu önceden belirlenmiş bir geri bildirim manipülasyonuyla sınadık:
 - B kolu her oyuncunun katkısını gösterdi (Çalışma 1'in istemi);
 - T kolu yalnız ajanın kendi katkısını ve ötekilerin ortalamasını gösterdi.
 
@@ -203,11 +203,11 @@ Bireysel bilgi olmadan Mistral grupları daha hızlı düştü; bu, ajanların d
 
 Öğrenilen kuralı ileriye dönük sınamak için R3'ü dondurduk (tablolar yalnız Çalışma 1'den öğrenildi; dosyanın özeti planda) ve hiçbir çağrıdan önce 15 turluk bir oyun için tahminini hesapladık. İstem Çalışma 1'den yalnız tur sayısında farklıydı. Rakip bir varyant olan R3-mutlak, turları eğitimdeki gibi mutlak numaralarına göre eşler (9. ve 10. turlar oyun sonu) ve bu yüzden erken bir çöküş öngörür. Sekiz kart (minimal ve değer), hücre başına 8, 6 ve 8 grup (176 grup); faturalanan 23,08 USD.
 
-**Önceden kaydedilmiş sonuçlar.** Her grubu gözlenen 1. turundan başlatan dondurulmuş kural, 2–15. turları üç modelde de eşdeğerlik bandı içinde tahmin etti (Tablo 3, Şekil 1); 24 hücrenin 23'ü uyumluydu. 9–13. turlarda mutlak tur varyantı Mistral'da +4,38, GPT'de +6,87 puan yanıldı: gerçek gruplar erken çökmedi. Yani Mistral ve GPT "açıklanan ufku izliyor". DeepSeek'te aynı hata daha küçüktü (+1,49 [+0,82; +2,18]) ve test ayırt edici olmadı.
+**Önceden belirlenmiş sonuçlar.** Her grubu gözlenen 1. turundan başlatan dondurulmuş kural, 2–15. turları üç modelde de eşdeğerlik bandı içinde tahmin etti (Tablo 3, Şekil 1); 24 hücrenin 23'ü uyumluydu. 9–13. turlarda mutlak tur varyantı Mistral'da +4,38, GPT'de +6,87 puan yanıldı: gerçek gruplar erken çökmedi. Yani Mistral ve GPT "açıklanan ufku izliyor". DeepSeek'te aynı hata daha küçüktü (+1,49 [+0,82; +2,18]) ve test ayırt edici olmadı.
 
 **Tablo 3.** Çalışma 3: gözlenen eksi tahmin (tur 2–15) ve yörünge RMSE'si.
 
-| | B-H1 Δ [%95 GA] | etiket | RMSE R3 | R3-mutlak | R1 | R0 beyan |
+| | gözlenen − tahmin, tur 2–15 [%95 GA] | etiket | RMSE R3 | R3-mutlak | R1 | R0 beyan |
 |---|---|---|---:|---:|---:|---:|
 | DeepSeek | −0,06 [−0,60; +0,48] | tuttu (sıkı) | **0,37** | 1,35 | 0,81 | 1,83 |
 | Mistral | +0,82 [+0,17; +1,52] | tuttu | **0,89** | 3,13 | 2,82 | 2,29 |
@@ -241,7 +241,7 @@ Bölüm 4 ve 6, R3'ün ortalama yörüngeleri yeniden ürettiğini gösteriyor. 
 | Ara bölgede biten gruplar (gözlenen, Çalışma 2 / Çalışma 3) | 0,02 / 0,02 | 0,00 / 0,02 | 0,02 / 0,03 | 0,30 |
 
 Notlar:
-- İnsan sütunu: aynı kural sınıfı insan gruplarından öğrenildi (örneklem içi); gözlenen değerler insan gruplarının 8. döneminden.
+- İnsan sütunu: aynı kural sınıfı insan gruplarından öğrenildi (örneklem içi); gözlenen değerler insan gruplarının 8. döneminden. Kural satırları insan kuralını 10 dönemlik oyunun ötesine, 13. tura kadar çalıştırır; 8. dönemde iki çöküş payı 0,15 ve 0,22'dir.
 - ᵃ Hepsi-10 durumu insan verisinde neredeyse hiç yok (1 geçiş).
 - ᵇ Simüle edilen grupların %99'u 100 turdan sonra hâlâ çökmemişti.
 - ᶜ Sınır durumu: üç bedavacıyla başlangıç (0, 0, 0, 10) ortalaması 2,5'tir ve zaten çökmüş sayılır.
@@ -261,12 +261,7 @@ Kural, orta oyunun sonunda henüz çökmemiş grupların payını Çalışma 2 v
 
 k ajan 0 ve öteki 4 − k ajan 10 ile başlayınca kural, çoğunlukla ayakta kalan bir grubu k = 1'de çökmüş bir gruba çeviriyor: DeepSeek'te 13. turda çöküş bölgesinde olma 0,28'den 0,96'ya, Mistral'da 0,42'den 0,98'e çıkıyor. Burada başlangıç (0, 10, 10, 10) ortalaması 7,5'tir; yani devrilme oyun sırasında oluyor. GPT'de eğri kademeli: bir bedavacıyla 0,04, ikiyle 0,30. GPT'nin k* = 3 değeri bir sınır durumudur, çünkü üç sıfırla başlayan bir grup zaten çökmüş sayılır (0,81'i çökmüş kalıyor). Hücre bazında k*, DeepSeek'in 12 hücresinin 8'inde ve Mistral'ın 12 hücresinin 6'sında 1, GPT'nin 12 hücresinin 11'inde 2–3 idi.
 
-Çalışma 3'ün gerçek grupları (örneklem dışı) bu örüntüyü gösteriyor, ama bedavacı sınıfları küçük (Şekil 3). En az beş gruplu dokuz sınıftan dördü ±0,15 kuralımızla "yeniden üretiyor" (DeepSeek'te 2–4 sıfır, GPT'de sıfırsız), beşi "belirsiz", hiçbiri "sapıyor" değildi:
-
-| Çalışma 3 grupları, k1 = 1. turdaki sıfır sayısı | gözlenen | bağlam içi kural | R0 |
-|---|---:|---:|---:|
-| DeepSeek, k1 = 1 (17 grup), 13. turda çöküş bölgesindeki pay | 0,94 | 0,84 | 0,47 |
-| GPT, k1 = 2 (11 grup) | 0,09 | 0,38 | 0,00 |
+Çalışma 3'ün gerçek grupları (örneklem dışı) bu örüntüyü gösteriyor, ama bedavacı sınıfları küçük (Şekil 3). En az beş gruplu dokuz sınıftan dördü ±0,15 kuralımızla "yeniden üretiyor" (DeepSeek'te 2–4 sıfır, GPT'de sıfırsız), beşi "belirsiz", hiçbiri "sapıyor" değildi. 1. turunda bir sıfır olan DeepSeek gruplarında (17 grup) 13. turda çöküş bölgesindeki pay gözlenen 0,94, bağlam içi kuralda 0,84, R0'da 0,47 idi; 1. turunda iki sıfır olan GPT gruplarında (11 grup) 0,09, 0,38 ve 0,00.
 
 - Mistral'ın Çalışma 3'te k1 = 1 olan yalnız 4 grubu vardı. Çalışma 1 ve 2'de k1 = 1 olan bütün Mistral grupları 8. turda çöküş bölgesindeydi (9 ve 5 grup); R0'ın tahminleri 0,56 ve 0,40 idi.
 - Çalışma 3'te GPT'nin k1 = 2 gruplarında R0 (0,00), gözlenen 0,09'a kuraldan (0,38) daha yakındı. Çalışma 1'de aynı sınıfta gözlenen 0,44, kural 0,29, R0 0,00 idi.
@@ -309,7 +304,7 @@ Aynı oyunda insan grupları her ölçüde farklı davranıyor:
 - son durumlar yayılıyor: grupların %30'u ara bölgede bitti (Şekil 4);
 - 1. turdaki bedavacılar sonucu kademeli olarak düşürdü: 1. turda 0, 1 ve 2 sıfır olan grupların %11'i, %40'ı ve %63'ü 8. dönemde çöküş bölgesindeydi.
 
-İnsan verisine uydurulan aynı tek-tur bellekli kural sınıfı hayatta kalma eğrisini ve son durum paylarını yeniden üretti (örneklem içi), ama bedavacı eğimini üretemedi: bir ve iki sıfır için 0,23 ve 0,25 öngördü, gözlenen 0,40 ve 0,63 idi. Sınamadığımız olası bir neden, kişiler arasındaki kalıcı farklardır, örneğin kalıcı bedavacı tipleri (Fischbacher ve ark., 2001). Kişiler üzerinden havuzlanmış ve bir tur hatırlayan bir kural bu bilgiyi taşıyamaz. LLM grupları özdeş ajanlardan oluşuyor ve onlar için havuzlanmış tek-tur bellekli kural yetti.
+İnsan verisine uydurulan aynı tek-tur bellekli kural sınıfı hayatta kalma eğrisini ve son durum paylarını ±0,15 içinde tuttu (örneklem içi; betimsel, insanlar için önceden etiket belirlenmedi), ama bedavacı eğimini üretemedi: bir ve iki sıfır için 0,23 ve 0,25 öngördü, gözlenen 0,40 ve 0,63 idi. Sınamadığımız olası bir neden, kişiler arasındaki kalıcı farklardır, örneğin bedavacı tipleri (Fischbacher ve ark., 2001'de deneklerin yaklaşık üçte biri). Kişiler üzerinden havuzlanmış ve bir tur hatırlayan bir kural bu bilgiyi taşıyamaz. LLM grupları özdeş ajanlardan oluşuyor ve onlar için havuzlanmış tek-tur bellekli kural yetti.
 
 ## 8. Çalışma 4: gruplar büyüdükçe ne oluyor? (ileriye dönük)
 
@@ -363,11 +358,11 @@ Tek başına verilen cevaplar (R0), dondurulmuş tahminde Mistral için büyükl
 
 Dört kişilik gruplarda "biri 0 verdi" çoğunlukla "üç kişiden biri" demektir: sayı ile pay aynıdır ve kuralın göstergesi ikisini birleştirir. Gruplar büyüdükçe bunlar ayrışıyor ve veri hangisinin belirleyici olduğunu çözmüyor: GPT'nin iki sıfıra tepkisi dört kişilik gruplarda 0,82 (11 karar), 8'de 0,12, 16'da 0,04 idi. Büyük GPT gruplarında üç ya da daha fazla sıfır olağandı (n = 32'de bu durumdaki 1.336 kararın 1.271'i) ve bedavacılar işbirliğine kuralın varsaydığından daha az döndü (0,40–0,46'ya karşı 0,33–0,38); 0'da kalan bedavacılar, kuralın GPT'deki tek adım hatasının en büyük parçasıydı (n = 8, 16 ve 32'de −0,31'in −0,22'si, −0,42'nin −0,23'ü ve −0,65'in −0,28'i). Mistral'da n = 16'daki doğru tahmin kısmen birbirini götüren hatalardan geliyor: işbirlikçiler kuraldan daha hoşgörülüydü, çökmüş gruplar ise 0'da daha sık kaldı.
 
-**Önceden kaydedilmiş bir karar kapısının durdurduğu düzeltici test.** Son bir test planladık (`prereg/prereg_expD.md`): 0 verenlerin sayısını ya da payını ekleyen, mevcut bütün grup büyüklüklerinden öğrenilen ve 64 GPT ajanlık bir oyundan önce dondurulacak bir kural. Önce dışarıda bırakılan grup büyüklükleri üzerinde bir karar kapısı vardı. Düzeltilmiş kural, aynı veriden öğrenilen aynı durumlu kuralı, çöküş payının ortalama mutlak hatasında 0,05 farkla geçmeliydi. 0,047 iyileşti; bu yüzden test yapılmadı.
+**Önceden belirlenmiş bir karar kapısının durdurduğu düzeltici test.** Son bir test planladık (`prereg/prereg_expD.md`): 0 verenlerin sayısını ya da payını ekleyen, mevcut bütün grup büyüklüklerinden öğrenilen ve 64 GPT ajanlık bir oyundan önce dondurulacak bir kural. Önce dışarıda bırakılan grup büyüklükleri üzerinde bir karar kapısı vardı. Düzeltilmiş kural, aynı veriden öğrenilen aynı durumlu kuralı, çöküş payının ortalama mutlak hatasında 0,05 farkla geçmeliydi; ikinci koşul (GPT'nin dışarıda bırakılan üç büyüklüğünün en az ikisinde o kuralı geçmek) sağlandı. 0,047 iyileşti; bu yüzden test yapılmadı.
 
 Dışarıda bırakılan büyüklük analizi yine de bilgi veriyor (keşifsel):
 - asıl kuralı birkaç grup büyüklüğünden öğrenmek, GPT'nin görülmemiş büyüklükteki hatasını kabaca yarıya indirdi (0,41 → 0,22) ve Mistral'ınkini dörtte bir azalttı (0,23 → 0,17);
-- sayı ya da pay bilgisi en büyük büyüklüğe dışdeğerlemede yardım etti (32 ajan: 0,39 → 0,11–0,14), ama 16 ajanlık tahmini kötüleştirdi (0,10 → 0,14–0,22);
+- sayı ya da pay bilgisi en büyük büyüklüğe dışdeğerlemede yardım etti (32 ajan: 0,39 → 0,11–0,14), ama GPT'nin 16 ajanlık tahminini kötüleştirdi (0,10 → 0,14–0,22);
 - hiçbir kural Mistral'ın sekiz kişilik gruplarını iyi tahmin edemedi.
 
 ![Şekil 5](fig/fig5_scaling.png)
@@ -392,24 +387,24 @@ Dışarıda bırakılan büyüklük analizi yine de bilgi veriyor (keşifsel):
 - dondurulduğunda görülmemiş uzunlukta bir oyunu tahmin etti;
 - gruplarda görülen çöküş tuzağını, yapışkan işbirliği durumunu, iki uçlu sonları ve devrilme noktalarını üretti (keşifsel); Mistral'daki istisnalar Bölüm 7.1, 7.3 ve 7.4'te.
 
-Ajan tabanlı sosyal bilimin diliyle, bu makro özellikler mikro kurallar tarafından üretiliyor, ama yalnız işledikleri yerde ölçülen kurallar tarafından. Zayıf biçimde ortaya çıkan özellikler bunlar: onları kuraldan okuyarak değil, kuralı simüle ederek elde ettik (Bedau, 1997). Bu, LLM nüfuslarında makro ile mikronun ayrıştığına dair bulguları tamamlıyor (Ferraz de Arruda ve ark., 2026): toplu uyum doğru mikro kuralları garanti etmez ve bizim düzenimizde doğru mikro kurallar bağlam içinde ölçülmeyi gerektirdi.
+Ajan tabanlı sosyal bilimin diliyle, bu makro özellikler mikro kurallar tarafından üretiliyor, ama yalnız işledikleri yerde ölçülen kurallar tarafından. Ömürleri, devrilme noktalarını ve son durum dağılımlarını kuraldan okuyarak değil, kuralı simüle ederek elde ettik; bu, Bedau'nun (1997) zayıf ortaya çıkış kavramının ruhuna uygundur. Bu, LLM nüfuslarında makro ile mikronun ayrıştığına dair bulguları tamamlıyor (Ferraz de Arruda ve ark., 2026): toplu uyum doğru mikro kuralları garanti etmez ve bizim düzenimizde doğru mikro kurallar bağlam içinde ölçülmeyi gerektirdi.
 
 **LLM grupları büyük gruplarda daha kırılgandı.** Sınanan iki modelde de çökmüş grupların payı en büyük gruplarda dört kişilik gruplardakinden yüksekti (büyüklüğün her ikiye katlanışında pozitif bir eğilim; tekdüze bir artış değil). Keşifsel analizlerimiz iki katkıya işaret ediyor: ajanlar ötekilerin kaçının ya da ne kadarının 0 verdiğine tepki veriyor; GPT'nin en büyük gruplarında (32 ajan) birkaç bedavacı olağandı ve bedavacılar 0'da kaldı. Bu yüzden simüle edilmiş bir LLM ajan toplumunu büyütmek tarafsız bir işlem değil: küçük gruplarda işbirliğini sürdüren aynı ajanlar büyük gruplarda onu kaybedebilir.
 
 **Mikro kurallar simüle edilecek ölçekte ölçülmeli.** Dört kişilik gruplarda ölçülen bir kural daha uzun bir oyunu ve bir modelde daha büyük grupları tahmin etti (kısmen birbirini götüren hatalarla); öteki modelde edemedi. Olası bir neden, dört kişilik grupların "biri bıraktı" ile "ötekilerin üçte biri bıraktı"yı nadiren ayırmasıdır; bu fikre dayanan düzeltici kural yalnız kısmen desteklendi ve karar kapısında durduruldu. Asıl kuralı birkaç grup büyüklüğünden öğrenmek, GPT'nin görülmemiş büyüklükteki hatasını kabaca yarıya indirdi ve Mistral'ınkini dörtte bir azalttı (keşifsel). Üretken ajan tabanlı modeller için bu, ilgilenilen nüfus büyüklüklerinde ya da bunlar boyunca ayarlama yapmak ve aktarımı ileriye dönük sınamak demek.
 
-**LLM grupları eşik sistemleri.** DeepSeek ve Mistral'da tek bir bırakan, dört kişilik bir grubun olası sonunu değiştirdi ve çökmüş bir grup neredeyse hiç toparlanmadı. Bu, toplu davranışın eşik modellerinin yapısıdır (Granovetter, 1978); burada eşik çok düşük ve dipteki durum neredeyse emici. Bu, LLM nüfuslarını başlangıç koşullarına ve seyrek sapmalara duyarlı yapar. Aynı oyundaki insan grupları daha bağışlayıcı ve daha çeşitliydi. LLM ajanlarını insanların yerine kullanan simülasyonlar, insan verisindekinden daha keskin devrilmeler ve daha az ara son gösterebilir.
+**LLM grupları eşik sistemleri gibi davranıyor, DeepSeek ve Mistral'da keskin biçimde.** Bu iki modelde tek bir bırakan, dört kişilik bir grubun olası sonunu değiştirdi ve çökmüş bir grup neredeyse hiç toparlanmadı. Bu, toplu davranışın eşik modellerinin yapısıdır (Granovetter, 1978); burada eşik çok düşük ve dipteki durum neredeyse emici. Bu, LLM nüfuslarını başlangıç koşullarına ve seyrek sapmalara duyarlı yapar. Aynı oyundaki insan grupları daha bağışlayıcı ve daha çeşitliydi. LLM ajanlarını insanların yerine kullanan simülasyonlar, insan verisindekinden daha keskin devrilmeler ve daha az ara son gösterebilir.
 
-**Kimlik tanımları talimat olarak okunuyor gibi görünüyor.** Şehir adları fark edilebilir bir etki yapmadı; değer cümleleri (ve Mistral'da mahkeme süresi olgusu) ifadeleri üzerinden etki etti; DeepSeek ve Mistral kartı sıklıkla deneycinin bir ipucu olarak tarif etti (Ek S1). Bu, davranışsal çapalarla (Wang ve ark., 2026) ve ültimatom oyunundaki sonuçlarımızla tutarlı.
+**Kimlik tanımları talimat olarak okunuyor gibi görünüyor.** Şehir adları fark edilebilir bir etki yapmadı; değer cümleleri (ve Mistral'da mahkeme süresi olgusu) ifadeleri üzerinden etki etti; DeepSeek ve Mistral kartı sıklıkla deneycinin bir ipucu olarak tarif etti (Ek S1). Bu, davranışsal çapalarla (Wang ve ark., 2026) ve ültimatom oyunundaki sonuçlarımızla (Geyik, 2026a) tutarlı.
 
 **Kendi mekanizmamız adil bir testi geçemedi.** Muhakeme metinlerini okuduktan sonra akla yatan "görünen bedavacı" açıklaması yalnız bir modelde tuttu. Daha geniş açıklama (ufuk dahil, bağlam içi kurallar) zaman ufkunun ileriye dönük testini geçti; grup büyüklüğünde iki modelin birinde tuttu (kısmen birbirini götüren hatalarla).
 
 ### Sınırlılıklar
 
 - **Ölçek ve ortam.** Çalışma 1–3 dört kişilik grupları kullandı; Çalışma 4 32 ajana kadar çıkıyor, bu da büyük bir nüfustan hâlâ çok uzak. Gruplar homojendi ve en çok 15 tur oynadı; ağ ve ceza yoktu. Çalışma 4'te istem grup büyüklüğüyle uzuyor; dolayısıyla büyüklük ile istem uzunluğu ayrılamıyor.
-- **Çalışma 4.** Minimal kartlar ve iki model kullanıldı; DeepSeek, minimal kartlı gruplarının neredeyse hepsi dört ajanda bile çöktüğü için alınmadı (Çalışma 2, B kolu: 0,96). Mistral'ın sekiz kişilik grupları açıklanamadı. Sayı/pay açıklaması keşifsel ve yalnız kısmen destekleniyor; düzeltici testi önceden kaydedilmiş bir karar kapısında durduruldu.
+- **Çalışma 4.** Minimal kartlar ve iki model kullanıldı; DeepSeek, minimal kartlı gruplarının neredeyse hepsi dört ajanda bile çöktüğü için alınmadı (Çalışma 2, B kolu: 0,96). Mistral'ın sekiz kişilik grupları açıklanamadı. Sayı/pay açıklaması keşifsel ve yalnız kısmen destekleniyor; düzeltici testi önceden belirlenmiş bir karar kapısında durduruldu.
 - **Büyük gruplar.** Duman testi okumasında ajanlar uzun geçmişlerde ara sıra sıfır verenleri yanlış saydı; bir sayım hatası aynı muhakeme içinde düzeltildi. Ajan başına belirli bir hata oranı için, kural anlama sorusunda herhangi bir yanlış cevabı olan grupları çıkarmak büyüklük arttıkça daha çok grubu dışarıda bırakır; bu duyarlılık analizi büyüklükle karışıktır (pratikte n = 4, 8, 16 ve 32'de 2, 0, 2 ve 1 GPT grubu çıkarıldı, hiç Mistral grubu çıkarılmadı). Dondurulmuş kural, ajanların durumlarını kararların %88–100'ünde tam ayrıntıda buldu (aynı kart içinde %81–97; kalanı daha kaba durumlara geri çekildi; Ek S4).
-- **Makro analizlerin statüsü.** Keşifseldir: ana sonuçlardan sonra seçildi; eşikler önceden sabitlendi ama ayarlanmadı.
+- **Makro analizlerin statüsü.** Keşifseldir: ana sonuçlardan sonra seçildi; eşikler önceden sabitlendi ama doğrulanmadı; yalnız son durumlar için 1/9 duyarlılık kontrolü yapıldı.
 - **Ömürler.** 100 turluk ömürler kuralın özellikleridir, gözlenen ufkun (en çok 12 orta oyun turu) çok ötesindedir.
 - **İnsan karşılaştırması.** Betimseldir; insan kuralı örneklem içinde uydurulmuştur.
 - **Modeller ve sağlayıcılar.** Üç tescilli ya da sağlayıcı üzerinden sunulan model kullanıldı; sağlayıcılar yalnız belgeleyebildiğimiz biçimlerde müdahale etti:
@@ -417,7 +412,7 @@ Ajan tabanlı sosyal bilimin diliyle, bu makro özellikler mikro kurallar taraf�
   - DeepSeek'in sağlayıcısı hız sınırları uyguladı;
   - Çalışma 3'ü bir Mistral kesintisi böldü.
 - **DeepSeek.** Minimal kartlarla tabana yakın katkı verdi; bu, testlerinin birkaçını sınırlıyor.
-- **Tanıma.** Modeller oyunu ve literatürünü tanıyor; "insana benzer" davranış yeniden üretilen bilgi olabilir.
+- **Tanıma.** DeepSeek ve Mistral oyunu ve literatürünü tanıyor (Ek S1); "insana benzer" davranış yeniden üretilen bilgi olabilir.
 
 ## 10. Veri ve kodun erişilebilirliği
 
@@ -431,12 +426,12 @@ Kaynakça İngilizce sürümdekiyle aynıdır.
 - Bin Tareaf, R. (2026). Benchmarking large language model agent societies against human behavioural distributions. arXiv:2608.28182
 - Epstein, J. M. (1999). Agent-based computational models and generative social science. *Complexity*, 4(5), 41–60. https://doi.org/10.1002/(SICI)1099-0526(199905/06)4:5<41::AID-CPLX9>3.0.CO;2-F
 - Ferraz de Arruda, H., Gracia Lázaro, C., Aleta, A., & Moreno, Y. (2026). Collective cooperation without individual fidelity in LLM agents. arXiv:2606.30454
-- Fischbacher, U., & Gächter, S. (2010). Social preferences, beliefs, and the dynamics of free riding in public goods experiments. *American Economic Review*, 100, 541–556. https://doi.org/10.1257/aer.100.1.541
-- Fischbacher, U., Gächter, S., & Fehr, E. (2001). Are people conditionally cooperative? Evidence from a public goods experiment. *Economics Letters*, 71, 397–404. https://doi.org/10.1016/S0165-1765(01)00394-9
+- Fischbacher, U., & Gächter, S. (2010). Social preferences, beliefs, and the dynamics of free riding in public goods experiments. *American Economic Review*, 100(1), 541–556. https://doi.org/10.1257/aer.100.1.541
+- Fischbacher, U., Gächter, S., & Fehr, E. (2001). Are people conditionally cooperative? Evidence from a public goods experiment. *Economics Letters*, 71(3), 397–404. https://doi.org/10.1016/S0165-1765(01)00394-9
 - Geyik, G. (2026a). LLMs simulate the description of a culture, not the culture: An attempt to reproduce Henrich's cross-cultural ultimatum game finding with LLM agents. Zenodo. https://doi.org/10.5281/zenodo.23119302
 - Geyik, G. (2026b). Pre-registered forecast: how cooperation among LLM agents changes with group size (Experiment C). Zenodo. https://doi.org/10.5281/zenodo.23483296
 - Granovetter, M. (1978). Threshold models of collective behavior. *American Journal of Sociology*, 83(6), 1420–1443. https://doi.org/10.1086/226707
-- Herrmann, B., Thöni, C., & Gächter, S. (2008). Antisocial punishment across societies. *Science*, 319, 1362–1367. https://doi.org/10.1126/science.1153808
+- Herrmann, B., Thöni, C., & Gächter, S. (2008). Antisocial punishment across societies. *Science*, 319(5868), 1362–1367. https://doi.org/10.1126/science.1153808
 - Herrmann, B., Thöni, C., & Gächter, S. (2017). Data from: Antisocial punishment across societies. Dryad. https://doi.org/10.5061/dryad.87301
 - Manoranjan, V., & Gaikwad, S. N. S. (2026). When identity overrides incentives: Representational choices as governance decisions in multi-agent LLM systems. arXiv:2601.10102
 - Teo, P. H. (2026). LLM agents as static level-k players in behavioural games. arXiv:2606.27845

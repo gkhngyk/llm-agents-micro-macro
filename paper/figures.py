@@ -64,7 +64,7 @@ def fig2_survival():
         ax.step(t, d["rule"], where="post", color=C["rule"] if m != "human" else C["human"], lw=1.6,
                 label="in-context rule" if m != "human" else "same rule class, learned from humans")
         ax.step(t, d["observed"], where="post", color=C["obs"], lw=1.6, ls=":", label="observed")
-        ax.set_title(NAME[m] + (", Study 3" if m != "human" else ", HTG 2008"))
+        ax.set_title(NAME[m] + ("\nStudy 3" if m != "human" else "\nHerrmann et al. 2008"))
         ax.set_xlabel("round")
         ax.set_ylim(0, 1.02)
     axes[0].set_ylabel("share of groups not yet collapsed\n(group mean > 2.5)")
@@ -74,7 +74,7 @@ def fig2_survival():
             h.setdefault(ll, hh)
     fig.legend(list(h.values()), list(h.keys()), frameon=False, fontsize=8, loc="lower center", ncol=4,
                bbox_to_anchor=(0.5, -0.16))
-    fig.suptitle("Survival of cooperation during the mid game (end-game rounds excluded)", y=1.03, fontsize=10)
+    fig.suptitle("Survival of cooperation during the mid game (end-game rounds excluded)", y=1.12, fontsize=10)
     fig.savefig(OUT / "fig2_survival.png")
     plt.close(fig)
 
@@ -104,7 +104,7 @@ def fig3_tipping():
                         for x in o]).T
         ax.errorbar(xs, [x["observed"]["est"] for x in o], yerr=err, fmt="o", ms=4, color="black", capsize=2, lw=0.8,
                     label="observed groups (by round-1 zeros)")
-        ax.set_title(NAME[m] + (", HTG 2008, round 8" if hum else ", Study 3, round 13"))
+        ax.set_title(NAME[m] + ("\nHerrmann et al. 2008, period 8" if hum else "\nStudy 3, round 13"))
         ax.set_xlabel("free riders in round 1")
         ax.set_xticks(k)
         ax.set_ylim(-0.03, 1.03)
@@ -115,7 +115,7 @@ def fig3_tipping():
             h.setdefault(ll, hh)
     fig.legend(list(h.values()), list(h.keys()), frameon=False, fontsize=8, loc="lower center", ncol=2,
                bbox_to_anchor=(0.5, -0.27))
-    fig.suptitle("Tipping point: how many free riders it takes to collapse a group", y=1.03, fontsize=10)
+    fig.suptitle("Tipping point: how many free riders it takes to collapse a group", y=1.12, fontsize=10)
     fig.savefig(OUT / "fig3_tipping.png")
     plt.close(fig)
 
@@ -133,13 +133,13 @@ def fig4_endstates():
         ax.axvspan(7.5, 20.5, color="#e6f0f7", lw=0)
         ax.hist(x, bins=bins, weights=np.full(len(x), 1 / len(x)), color=C["human"] if m == "human" else C["rule"])
         mid = np.mean((x > 2.5) & (x < 7.5))
-        ax.set_title(f"{NAME[m]}{', HTG 2008' if m == 'human' else ', Study 1'} (n = {len(x)})")
+        ax.set_title(f"{NAME[m]} (n = {len(x)})\n{'Herrmann et al. 2008' if m == 'human' else 'Study 1'}")
         ax.text(5, 0.55, f"between\n{mid:.0%}", ha="center", fontsize=8)
         ax.set_xlabel("group mean contribution, round 8")
         ax.set_xlim(-0.5, 20.5)
     axes[0].set_ylabel("share of groups")
     fig.suptitle("End of the mid game (round 8): LLM groups end at one of two extremes, human groups do not",
-                 y=1.03, fontsize=10)
+                 y=1.12, fontsize=10)
     fig.savefig(OUT / "fig4_endstates.png")
     plt.close(fig)
 
