@@ -1,6 +1,6 @@
 # Release: "Rules measured in play, not stated in isolation, generate the macro dynamics of LLM agent groups"
 
-Gökhan Geyik (Empler AI). Open preprint with all plans, code, data and reasoning texts. License: CC BY 4.0.
+Gökhan Geyik (Empler AI). Open preprint with all plans, code, data and reasoning texts. License: CC BY 4.0. Zenodo record: https://doi.org/10.5281/zenodo.23539451.
 
 ## What is in the release
 

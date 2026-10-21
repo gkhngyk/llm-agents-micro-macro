@@ -2,7 +2,7 @@
 
 *Collapse traps, tipping points and pre-specified tests of time horizon and group size in a repeated public goods game with three language models*
 
-**Preprint, version 1 (2026-10-20).** https://doi.org/10.5281/zenodo.XXXXXXXX. Plans, code, data and all decisions with reasoning texts are archived in the same record. Every number is taken from the result files; most are printed by `paper/paper_numbers.py` (output `paper/numbers.md`), the rest are recorded in the dated plan amendments. Figures are drawn by `paper/figures.py`.
+**Preprint, version 1 (2026-10-21).** https://doi.org/10.5281/zenodo.23539451. Plans, code, data and all decisions with reasoning texts are archived in the same record. Every number is taken from the result files; most are printed by `paper/paper_numbers.py` (output `paper/numbers.md`), the rest are recorded in the dated plan amendments. Figures are drawn by `paper/figures.py`.
 
 Gökhan Geyik (Empler AI)
 
@@ -416,7 +416,7 @@ In the terms of agent-based social science, these macro properties are generated
 
 ## 10. Data and code availability
 
-This preprint, its supplement, all plans and amendments, the code, configurations, prompt frames and identity cards, the frozen rule tables and forecasts, the analysis outputs and figure scripts, and all decisions with their reasoning texts are archived together at https://doi.org/10.5281/zenodo.XXXXXXXX (contents and reproduction steps in `RELEASE.md`). The plan and forecast of Study 4 were deposited separately before its main run (Geyik, 2026b). Raw API logs are released with the account identifier removed. The supplement (`paper/preprint_v1_supplement.md`) contains identity and interaction details (S1–S2), cell-level macro structure (S3) and Study 4 details (S4).
+This preprint, its supplement, all plans and amendments, the code, configurations, prompt frames and identity cards, the frozen rule tables and forecasts, the analysis outputs and figure scripts, and all decisions with their reasoning texts are archived together at https://doi.org/10.5281/zenodo.23539451 (contents and reproduction steps in `RELEASE.md`). The plan and forecast of Study 4 were deposited separately before its main run (Geyik, 2026b). Raw API logs are released with the account identifier removed. The supplement (`paper/preprint_v1_supplement.md`) contains identity and interaction details (S1–S2), cell-level macro structure (S3) and Study 4 details (S4).
 
 ## References
 

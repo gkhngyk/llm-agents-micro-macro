@@ -2,7 +2,7 @@
 
 *Üç dil modeliyle tekrarlı bir kamu malı oyununda çöküş tuzakları, devrilme noktaları ve zaman ufku ile grup büyüklüğüne dair önceden belirlenmiş testler*
 
-**Türkçe okuma kopyası.** İngilizce ön baskının (sürüm 1, 2026-10-20) çevirisidir; resmî metin İngilizcedir. Şekiller İngilizce sürümdekilerin aynısıdır, şekil içindeki yazılar İngilizcedir. Sayılar Türkçe yazımla verilmiştir (ondalık virgül; güven aralıklarında noktalı virgül).
+**Türkçe okuma kopyası.** İngilizce ön baskının (sürüm 1, 2026-10-21; https://doi.org/10.5281/zenodo.23539451) çevirisidir; resmî metin İngilizcedir. Şekiller İngilizce sürümdekilerin aynısıdır, şekil içindeki yazılar İngilizcedir. Sayılar Türkçe yazımla verilmiştir (ondalık virgül; güven aralıklarında noktalı virgül).
 
 Gökhan Geyik (Empler AI)
 
@@ -416,7 +416,7 @@ Ajan tabanlı sosyal bilimin diliyle, bu makro özellikler mikro kurallar taraf�
 
 ## 10. Veri ve kodun erişilebilirliği
 
-Bu ön baskı, eki, bütün planlar ve ekleri, kod, ayarlar, istem çerçeveleri ve kimlik kartları, dondurulmuş kural tabloları ve tahminler, analiz çıktıları ve şekil betikleri ile bütün kararlar ve muhakeme metinleri https://doi.org/10.5281/zenodo.XXXXXXXX adresinde birlikte arşivlenmiştir (içerik ve yeniden üretme adımları `RELEASE.md`'de). Çalışma 4'ün planı ve tahmini, ana koşusundan önce ayrıca kaydedildi (Geyik, 2026b). Ham API kayıtları hesap kimliği çıkarılarak yayımlanmıştır. Ek (`paper/preprint_v1_supplement.md`) kimlik ve etkileşim ayrıntılarını (S1–S2), hücre düzeyindeki makro yapıyı (S3) ve Çalışma 4 ayrıntılarını (S4) içerir.
+Bu ön baskı, eki, bütün planlar ve ekleri, kod, ayarlar, istem çerçeveleri ve kimlik kartları, dondurulmuş kural tabloları ve tahminler, analiz çıktıları ve şekil betikleri ile bütün kararlar ve muhakeme metinleri https://doi.org/10.5281/zenodo.23539451 adresinde birlikte arşivlenmiştir (içerik ve yeniden üretme adımları `RELEASE.md`'de). Çalışma 4'ün planı ve tahmini, ana koşusundan önce ayrıca kaydedildi (Geyik, 2026b). Ham API kayıtları hesap kimliği çıkarılarak yayımlanmıştır. Ek (`paper/preprint_v1_supplement.md`) kimlik ve etkileşim ayrıntılarını (S1–S2), hücre düzeyindeki makro yapıyı (S3) ve Çalışma 4 ayrıntılarını (S4) içerir.
 
 ## Kaynaklar
 

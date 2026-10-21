@@ -1,6 +1,6 @@
 # Supplement to "Rules measured in play, not stated in isolation, generate the macro dynamics of LLM agent groups"
 
-**Supplement to preprint version 1 (2026-10-20).** Numbers are taken from the result files; most are printed by `paper/paper_numbers.py` (`paper/numbers.md`). Table 1 is in the main text.
+**Supplement to preprint version 1 (2026-10-21), https://doi.org/10.5281/zenodo.23539451.** Numbers are taken from the result files; most are printed by `paper/paper_numbers.py` (`paper/numbers.md`). Table 1 is in the main text.
 
 ## S1. Identity: city names make no detectable difference; value sentences act through their wording
 
