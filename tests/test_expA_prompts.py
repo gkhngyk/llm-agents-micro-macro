@@ -19,8 +19,9 @@ T = pgg_frames.load_frame(ROOT / "frames" / "abstract_v4_agg.json")
 P = pgg_game.GameParams()
 CARD = pgg_game.Card("boston_minimal", "minimal",
                      "You are a 21-year-old university student living in Boston.")
-RUN_S1 = Path("/Users/karbon/Desktop/Veri Bilimi/complexity-prj/orc/data/projects/PublicGoods/"
-              "workspace/runs/main_s1_20261014")
+# Runs directory as recorded in the config (scripts/set_runs_dir.py points it at a release copy).
+RUN_S1 = Path(json.loads((ROOT / "configs" / "main.json").read_text(encoding="utf-8"))["runs_dir"]) \
+    / "main_s1_20261014"
 
 
 def history(*rounds):

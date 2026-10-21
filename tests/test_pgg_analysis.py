@@ -5,6 +5,7 @@ only checks that the loader and the analysis run on a real run directory; it
 asserts nothing about its numbers and is skipped when the run is absent.
 """
 
+import json
 import os
 import unittest
 from pathlib import Path
@@ -282,8 +283,9 @@ class MissingCells(unittest.TestCase):
         self.assertEqual(res["main"]["H4"]["gpt"]["athens_value"]["label"], "belirlenemedi")
 
 
-RUN_0B = Path("/Users/karbon/Desktop/Veri Bilimi/complexity-prj/orc/data/projects/PublicGoods/"
-              "workspace/runs/main_s0b_20261012")
+# Runs directory as recorded in the config (scripts/set_runs_dir.py points it at a release copy).
+RUN_0B = Path(json.loads((Path(__file__).resolve().parent.parent / "configs" / "main_s0b.json")
+                         .read_text(encoding="utf-8"))["runs_dir"]) / "main_s0b_20261012"
 
 
 @unittest.skipUnless(RUN_0B.exists(), "0b run directory not on this machine")

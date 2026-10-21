@@ -39,18 +39,19 @@ Smoke-test runs are excluded from all analyses by plan.
 ## Reproducing the analyses (no API calls)
 
 ```bash
-pip install -r requirements.lock.txt
 unzip publicgoods_repo_<commit>.zip && unzip publicgoods_runs_<commit>.zip
 cd repo
+pip install -r requirements.lock.txt                             # Python 3.12
 python scripts/set_runs_dir.py "$(cd ../runs && pwd)"           # point the configs at the run files
 unzip data/herrmann2008/HerrmannThoeniGaechter.zip -d data/herrmann2008/raw
+git init -q && git add -A && git -c user.name=release -c user.email=release@example.invalid commit -qm release
 export OPENROUTER_API_KEY=unused                                 # only satisfies an import
-python -m unittest discover -s tests                             # 628 tests
+python -m unittest discover -s tests                             # expected: OK (skipped=6)
 python pgg_analysis.py ...                                       # see each script's docstring
 python paper/paper_numbers.py > /tmp/numbers.md && cmp /tmp/numbers.md paper/numbers.md
 ```
 
-The last command must reproduce `paper/numbers.md` byte for byte; this was checked on the release archives. Each analysis script states its command line in its docstring and writes to `results/`. Simulations use fixed seeds (`llm_client.stable_seed`), so the outputs are reproduced exactly; the result files' sha256 are recorded in the plans.
+The `git init` line is needed for the tests only: the game engine resumes an interrupted run only when it can read the git commit of its code, and its resume tests check this. Six tests are skipped in the release because they need pilot runs that are not in it, or a commit of the author's git history. The last command must reproduce `paper/numbers.md` byte for byte; this was checked on the release archives. Each analysis script states its command line in its docstring and writes to `results/`. Simulations use fixed seeds (`llm_client.stable_seed`), so the outputs are reproduced exactly; the result files' sha256 are recorded in the plans.
 
 ## Re-running the experiments
 
