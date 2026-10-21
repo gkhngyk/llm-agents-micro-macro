@@ -7,7 +7,7 @@ Gökhan Geyik (Empler AI). Open preprint with all plans, code, data and reasonin
 Two archives:
 
 - **`publicgoods_repo_<commit>.zip`**: the repository at the release commit, plus `results/`.
-  - `paper/`: the preprint (`preprint_v1.md`, `preprint_v1.pdf`), the supplement (`preprint_v1_supplement.md`, `.pdf`), figures, `paper_numbers.py` and its output `numbers.md`. Every number in the paper is in `numbers.md`; values at rounding ties are listed at its end with their exact values. A Turkish reading copy (`preprint_v1_tr.md`, `.pdf`) is included; the English text is authoritative. Earlier drafts (`draft_v*.md`) are kept for the record.
+  - `paper/`: the preprint (`preprint_v1.md`, `preprint_v1.pdf`), the supplement (`preprint_v1_supplement.md`, `.pdf`), figures, `paper_numbers.py` and its output `numbers.md`. Every number in the paper is in `numbers.md`; values at rounding ties are listed at its end with their exact values. A Turkish reading copy (`preprint_v1_tr.md`, `.pdf`) is included; the English text is authoritative. Earlier drafts are not included; they remain in the git history.
   - `prereg/`: the written plans, one per study, with dated amendments. They were written before the data. They are internal written plans, in Turkish, not entries in a public registry. The plan and forecast of Study 4 were also deposited on Zenodo before its main run: https://doi.org/10.5281/zenodo.23483296.
   - `pgg_game.py`, `pgg_frames.py`, `llm_client.py`, `scripts/runctl.py`: the game engine and the API layer (OpenRouter).
   - `pgg_analysis*.py`: one analysis script per study and exploratory analysis; `tests/`: the test suite (628 tests, no API calls).
@@ -61,3 +61,4 @@ Re-running needs an OpenRouter key in `../.env` (never in the repository) and co
 
 - Earlier study: Geyik (2026), https://doi.org/10.5281/zenodo.23119302.
 - Study 4 pre-registration deposit: https://doi.org/10.5281/zenodo.23483296.
+- Code and full git history (commit dates of the plans, the frozen rule and the forecast; the code version recorded by every run): https://github.com/gkhngyk/llm-agents-micro-macro.
