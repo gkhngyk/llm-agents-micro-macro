@@ -127,8 +127,10 @@ class PilotConfig(GuardTestBase):
         self.assertEqual((raw["budget_usd"], raw["invalid_rate_cap"]), (1.0, 0.05))
         self.assertNotIn("reasoning_effort", raw)
         self.assertNotIn("temperature", raw)
-        self.assertEqual(raw["runs_dir"], "/Users/karbon/Desktop/Veri Bilimi/complexity-prj/orc/"
-                                          "data/projects/PublicGoods/workspace/runs")
+        # The project's one runs directory (the author's path, or a release copy set by
+        # scripts/set_runs_dir.py for every config alike).
+        main_runs = json.loads((ROOT / "configs" / "main.json").read_text(encoding="utf-8"))["runs_dir"]
+        self.assertEqual(raw["runs_dir"], main_runs)
         for key, (slug, name, quant) in PILOT_V2_PROVIDERS.items():
             spec = raw["providers"][key]
             self.assertEqual((spec["slug"], spec["name"], spec.get("quantizations")),
