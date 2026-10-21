@@ -1,10 +1,20 @@
 # Grup dinamiğini, tek başına sorulan sorular değil, oyun içinde ölçülen kurallar üretir: LLM ajan gruplarında mikrodan makroya
 
-*Üç dil modeliyle tekrarlı bir kamu malı oyununda çöküş tuzakları, devrilme noktaları ve zaman ufku ile grup büyüklüğüne dair önceden belirlenmiş testler*
+<p class="subtitle">Üç dil modeliyle tekrarlı bir kamu malı oyununda çöküş tuzakları, devrilme noktaları ve zaman ufku ile grup büyüklüğüne dair önceden belirlenmiş testler</p>
 
-**Türkçe okuma kopyası.** İngilizce ön baskının (sürüm 1, 2026-10-21; https://doi.org/10.5281/zenodo.23539451) çevirisidir; resmî metin İngilizcedir. Şekiller İngilizce sürümdekilerin aynısıdır, şekil içindeki yazılar İngilizcedir. Sayılar Türkçe yazımla verilmiştir (ondalık virgül; güven aralıklarında noktalı virgül).
+<div class="titleblock">
+Gökhan Geyik<br>
+<em>Empler AI</em><br>
+<code>gokhan@empler.ai</code><br>
+ORCID: <a href="https://orcid.org/0009-0000-9028-1827">0009-0000-9028-1827</a>
+</div>
 
-Gökhan Geyik (Empler AI)
+<div class="titleblock">
+Ön baskı, sürüm 1 (2026-10-21)<br>
+<a href="https://doi.org/10.5281/zenodo.23539451">https://doi.org/10.5281/zenodo.23539451</a>
+</div>
+
+<p class="note"><strong>Türkçe okuma kopyası.</strong> İngilizce ön baskının çevirisidir; resmî metin İngilizcedir. Şekiller İngilizce sürümdekilerin aynısıdır, şekil içindeki yazılar İngilizcedir. Sayılar Türkçe yazımla verilmiştir (ondalık virgül; güven aralıklarında noktalı virgül).</p>
 
 ---
 

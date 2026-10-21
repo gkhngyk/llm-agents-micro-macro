@@ -15,7 +15,11 @@ CSS = """
 @page { size: A4; margin: 22mm 20mm 22mm 20mm;
         @bottom-center { content: counter(page); font-size: 9pt; color: #555; } }
 body { font-family: "Charter", "Georgia", "Times New Roman", serif; font-size: 10.5pt; line-height: 1.42; color: #111; }
-h1 { font-size: 17pt; line-height: 1.25; margin: 0 0 6pt 0; }
+h1 { font-size: 17pt; line-height: 1.25; margin: 0 0 6pt 0; text-align: center; }
+p.subtitle { text-align: center; font-style: italic; font-size: 11pt; margin: 0 0 16pt 0; }
+div.titleblock { text-align: center; line-height: 1.45; margin: 0 0 12pt 0; }
+h1 + div.titleblock { margin-top: 14pt; }
+p.note { font-size: 9pt; color: #333; margin: 6pt 0 8pt 0; }
 h2 { font-size: 13pt; margin: 16pt 0 6pt 0; border-bottom: 0.5pt solid #999; padding-bottom: 2pt; }
 h3 { font-size: 11pt; margin: 12pt 0 4pt 0; }
 p { margin: 0 0 7pt 0; text-align: justify; hyphens: auto; }

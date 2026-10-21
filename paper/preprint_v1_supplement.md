@@ -1,6 +1,18 @@
 # Supplement to "Rules measured in play, not stated in isolation, generate the macro dynamics of LLM agent groups"
 
-**Supplement to preprint version 1 (2026-10-21), https://doi.org/10.5281/zenodo.23539451.** Numbers are taken from the result files; most are printed by `paper/paper_numbers.py` (`paper/numbers.md`). Table 1 is in the main text.
+<div class="titleblock">
+Gökhan Geyik<br>
+<em>Empler AI</em><br>
+<code>gokhan@empler.ai</code><br>
+ORCID: <a href="https://orcid.org/0009-0000-9028-1827">0009-0000-9028-1827</a>
+</div>
+
+<div class="titleblock">
+Supplement to preprint version 1 (2026-10-21)<br>
+<a href="https://doi.org/10.5281/zenodo.23539451">https://doi.org/10.5281/zenodo.23539451</a>
+</div>
+
+<p class="note">Numbers are taken from the result files; most are printed by <code>paper/paper_numbers.py</code> (<code>paper/numbers.md</code>). Table 1 is in the main text.</p>
 
 ## S1. Identity: city names make no detectable difference; value sentences act through their wording
 

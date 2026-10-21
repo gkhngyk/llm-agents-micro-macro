@@ -1,10 +1,20 @@
 # Rules measured in play, not stated in isolation, generate the macro dynamics of LLM agent groups
 
-*Collapse traps, tipping points and pre-specified tests of time horizon and group size in a repeated public goods game with three language models*
+<p class="subtitle">Collapse traps, tipping points and pre-specified tests of time horizon and group size in a repeated public goods game with three language models</p>
 
-**Preprint, version 1 (2026-10-21).** https://doi.org/10.5281/zenodo.23539451. Plans, code, data and all decisions with reasoning texts are archived in the same record. Every number is taken from the result files; most are printed by `paper/paper_numbers.py` (output `paper/numbers.md`), the rest are recorded in the dated plan amendments. Figures are drawn by `paper/figures.py`.
+<div class="titleblock">
+Gökhan Geyik<br>
+<em>Empler AI</em><br>
+<code>gokhan@empler.ai</code><br>
+ORCID: <a href="https://orcid.org/0009-0000-9028-1827">0009-0000-9028-1827</a>
+</div>
 
-Gökhan Geyik (Empler AI)
+<div class="titleblock">
+Preprint, version 1 (2026-10-21)<br>
+<a href="https://doi.org/10.5281/zenodo.23539451">https://doi.org/10.5281/zenodo.23539451</a>
+</div>
+
+<p class="note">Plans, code, data and all decisions with reasoning texts are archived with this preprint under the DOI above. Every number is taken from the result files; most are printed by <code>paper/paper_numbers.py</code> (output <code>paper/numbers.md</code>), the rest are recorded in the dated plan amendments. Figures are drawn by <code>paper/figures.py</code>.</p>
 
 ---
 
