@@ -1,11 +1,17 @@
 # project-publicgoods
 
 Second study after *LLMs Simulate the Description of a Culture, Not the
-Culture* (https://doi.org/10.5281/zenodo.23119302). Working question: does
+Culture* (https://doi.org/10.5281/zenodo.23119302). Starting question: does
 group interaction amplify, damp or preserve the effect of an identity
 description on LLM agents, in the repeated public goods game?
 
-Status: design not fixed; no experiment run. See `notes/BACKGROUND.md`.
+Status (2026-10-21): complete. Four studies were run and reported in the
+preprint `paper/preprint_v1.md` (PDF alongside; Zenodo record
+https://doi.org/10.5281/zenodo.23539451). Start with `RELEASE.md` (contents,
+runs, reproduction steps) and the written plans in `prereg/`. The rest of this
+README is the engineering notes kept during the work, from the pilot design
+onwards; `notes/BACKGROUND.md` is the design background from before the first
+run.
 
 ```bash
 python3.12 -m venv .venv && .venv/bin/pip install -r requirements.lock.txt

@@ -22,7 +22,7 @@ Two archives:
 
   **Redaction:** in the raw logs, the OpenRouter account identifier contained in rate-limit error messages is replaced by `[REDACTED_ACCOUNT_ID]`, and the author's local paths by `<PROJECT_ROOT>`. Nothing else was changed.
 
-`SHA256SUMS.txt` (in the repository archive as `SHA256SUMS_release.txt`) lists the hash of every file. `SOURCE_COMMIT.txt` gives the git commit.
+`SHA256SUMS.txt` (in the repository archive as `SHA256SUMS_release.txt`) lists the hash of every file. `SOURCE_COMMIT.txt` (in the repository archive) gives the git commit.
 
 ## Runs
 

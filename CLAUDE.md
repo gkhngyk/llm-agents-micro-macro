@@ -1,12 +1,14 @@
 # project-publicgoods
 
 Second study with Gökhan Geyik (Empler AI), following the published
-Ultimatum Game paper. Status as of 2026-10-03: **design not fixed, no
-experiment run yet.** Only the shared calling layer and notes exist.
+Ultimatum Game paper. Status as of 2026-10-21: **four studies run, preprint
+v1 written** (`paper/preprint_v1.md`, Zenodo
+https://doi.org/10.5281/zenodo.23539451); release contents and reproduction
+steps in `RELEASE.md`.
 
-Read `notes/BACKGROUND.md` first (what the first study found, what is
-already published by others, the candidate design, open to-dos), then
-`notes/literature_scan.md`.
+For the design background from before the first run, read
+`notes/BACKGROUND.md` (what the first study found, what is already published
+by others, the candidate design) and `notes/literature_scan.md`.
 
 ## Working rules carried over from the first study
 

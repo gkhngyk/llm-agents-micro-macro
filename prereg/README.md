@@ -26,3 +26,18 @@ Rules from here on:
   Earlier text is not rewritten; `git diff` must show additions only.
 - Source tags inside the files (e.g. `[T99]`, `[S0A]`) point to reports in the
   orc workspace.
+
+## Which plan belongs to which study (added 2026-10-21)
+
+| file | in the preprint (`paper/preprint_v1.md`) |
+|---|---|
+| `prereg_pilot.md`, `prereg_pilot_ek_yama.md`, `prereg_minipilot.md` | pilots before Study 1 |
+| `prereg_main.md` | Study 1 (the "main experiment") |
+| `prereg_expA.md` | Study 2 (Experiment A) |
+| `prereg_expB.md` | Study 3 (Experiment B) |
+| `prereg_expC.md` | Study 4 (Experiment C); plan and forecast also deposited on Zenodo before the main run: https://doi.org/10.5281/zenodo.23483296 |
+| `prereg_expD.md` | the 64-agent test (Experiment D), stopped at its gate; no paid call was made |
+| `prereg_dyn.md` | Section 7, macro structure (exploratory; existing data only) |
+
+Exploratory analyses that extend a study are written as dated amendments in
+that study's plan, before they were computed.

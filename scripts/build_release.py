@@ -102,7 +102,8 @@ def main() -> int:
         print(f"DUR: kırpma sonrası {hits} eşleşme kaldı; paket kurulmadı.", file=sys.stderr)
         return 2
     (out / "SOURCE_COMMIT.txt").write_text(commit + "\n")
-    lines = [f"{sha(p)}  {p.relative_to(out)}" for p in sorted(x for x in out.rglob("*") if x.is_file())]
+    shutil.copy(out / "SOURCE_COMMIT.txt", repo / "SOURCE_COMMIT.txt")
+    lines =[f"{sha(p)}  {p.relative_to(out)}" for p in sorted(x for x in out.rglob("*") if x.is_file())]
     (out / "SHA256SUMS.txt").write_text("\n".join(lines) + "\n")
     shutil.copy(out / "SHA256SUMS.txt", repo / "SHA256SUMS_release.txt")
     zr = out.parent / f"publicgoods_repo_{commit[:7]}.zip"
