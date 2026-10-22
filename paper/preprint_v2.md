@@ -10,11 +10,11 @@ ORCID: <a href="https://orcid.org/0009-0000-9028-1827">0009-0000-9028-1827</a>
 </div>
 
 <div class="titleblock">
-Preprint, version 1 (2026-10-21)<br>
-<a href="https://doi.org/10.5281/zenodo.23539451">https://doi.org/10.5281/zenodo.23539451</a>
+Preprint, version 2 (2026-10-22)<br>
+<a href="https://doi.org/10.5281/zenodo.23574103">https://doi.org/10.5281/zenodo.23574103</a>
 </div>
 
-<p class="note">Plans, code, data and all decisions with reasoning texts are archived with this preprint under the DOI above. Every number is taken from the result files; most are printed by <code>paper/paper_numbers.py</code> (output <code>paper/numbers.md</code>), the rest are recorded in the dated plan amendments. Figures are drawn by <code>paper/figures.py</code>.</p>
+<p class="note">Plans, code, data and all decisions with reasoning texts are archived with this preprint under the DOI above. Every number is taken from the result files; most are printed by <code>paper/paper_numbers.py</code> (output <code>paper/numbers.md</code>), the rest are recorded in the dated plan amendments. Figures are drawn by <code>paper/figures.py</code>. Version 2 adds sources for the statement in Section 1 that LLM agents are commonly measured with questions asked in isolation; nothing else changed. Version 1: https://doi.org/10.5281/zenodo.23539451; all versions: https://doi.org/10.5281/zenodo.23539450.</p>
 
 ---
 
@@ -26,7 +26,7 @@ Generative agent-based models use large language models (LLMs) as agents and oft
 
 ## 1. Introduction
 
-Agent-based social science explains a macro pattern by growing it from micro rules: a macro pattern counts as explained only if a population of agents following specified micro rules can generate it ("if you didn't grow it, you didn't explain it"; Epstein, 1999). Generative agent-based models (GABMs) replace hand-coded rules with language models prompted to play a role. The micro rules are then no longer written down; they have to be measured. A common way to measure them is to ask the agent what it would do in a described situation. This raises the micro–macro question in a new form: does what an LLM agent says in isolation generate what a population of such agents does?
+Agent-based social science explains a macro pattern by growing it from micro rules: a macro pattern counts as explained only if a population of agents following specified micro rules can generate it ("if you didn't grow it, you didn't explain it"; Epstein, 1999). Generative agent-based models (GABMs) replace hand-coded rules with language models prompted to play a role. The micro rules are then no longer written down; they have to be measured. A common way to measure them is to ask the agent what it would do in a described situation; studies that compare LLM agents with humans do this with survey items (Argyle et al., 2023; Park et al., 2024) and with one-shot decisions in economic games and classic experiments (Aher et al., 2023; Horton et al., 2023). This raises the micro–macro question in a new form: does what an LLM agent says in isolation generate what a population of such agents does?
 
 For humans the public goods game gives a classic answer. Fischbacher, Gächter and Fehr (2001) elicited *contribution schedules* (what a person contributes for each possible average contribution of the others) and found about half of their subjects to be conditional cooperators and about a third free riders. Fischbacher and Gächter (2010) showed that such schedules, together with beliefs, account for the decline of cooperation in repeated play. Stated conditional rules connect the individual to the group.
 
@@ -426,10 +426,12 @@ In the terms of agent-based social science, these macro properties are generated
 
 ## 10. Data and code availability
 
-This preprint, its supplement, all plans and amendments, the code, configurations, prompt frames and identity cards, the frozen rule tables and forecasts, the analysis outputs and figure scripts, and all decisions with their reasoning texts are archived together at https://doi.org/10.5281/zenodo.23539451 (contents and reproduction steps in `RELEASE.md`). The git history is public at https://github.com/gkhngyk/llm-agents-micro-macro; it shows when the plans, the frozen rule of Study 3 and the forecast of Study 4 were committed, and it contains the code version recorded by every run. The plan and forecast of Study 4 were deposited separately before its main run (Geyik, 2026b). Raw API logs are released with the account identifier removed. The supplement (`paper/preprint_v1_supplement.md`) contains identity and interaction details (S1–S2), cell-level macro structure (S3) and Study 4 details (S4).
+This preprint, its supplement, all plans and amendments, the code, configurations, prompt frames and identity cards, the frozen rule tables and forecasts, the analysis outputs and figure scripts, and all decisions with their reasoning texts are archived together at https://doi.org/10.5281/zenodo.23574103 (all versions: https://doi.org/10.5281/zenodo.23539450; contents and reproduction steps in `RELEASE.md`). The git history is public at https://github.com/gkhngyk/llm-agents-micro-macro; it shows when the plans, the frozen rule of Study 3 and the forecast of Study 4 were committed, and it contains the code version recorded by every run. The plan and forecast of Study 4 were deposited separately before its main run (Geyik, 2026b). Raw API logs are released with the account identifier removed. The supplement (`paper/preprint_v2_supplement.md`) contains identity and interaction details (S1–S2), cell-level macro structure (S3) and Study 4 details (S4).
 
 ## References
 
+- Aher, G. V., Arriaga, R. I., & Kalai, A. T. (2023). Using large language models to simulate multiple humans and replicate human subject studies. In *Proceedings of the 40th International Conference on Machine Learning* (PMLR, Vol. 202, pp. 337–371). https://proceedings.mlr.press/v202/aher23a.html
+- Argyle, L. P., Busby, E. C., Fulda, N., Gubler, J. R., Rytting, C., & Wingate, D. (2023). Out of one, many: Using language models to simulate human samples. *Political Analysis*, 31(3), 337–351. https://doi.org/10.1017/pan.2023.2
 - Bedau, M. A. (1997). Weak emergence. *Noûs*, 31(s11), 375–399. https://doi.org/10.1111/0029-4624.31.s11.17
 - Bin Tareaf, R. (2026). Benchmarking large language model agent societies against human behavioural distributions. arXiv:2608.28182
 - Epstein, J. M. (1999). Agent-based computational models and generative social science. *Complexity*, 4(5), 41–60. https://doi.org/10.1002/(SICI)1099-0526(199905/06)4:5<41::AID-CPLX9>3.0.CO;2-F
@@ -441,7 +443,9 @@ This preprint, its supplement, all plans and amendments, the code, configuration
 - Granovetter, M. (1978). Threshold models of collective behavior. *American Journal of Sociology*, 83(6), 1420–1443. https://doi.org/10.1086/226707
 - Herrmann, B., Thöni, C., & Gächter, S. (2008). Antisocial punishment across societies. *Science*, 319(5868), 1362–1367. https://doi.org/10.1126/science.1153808
 - Herrmann, B., Thöni, C., & Gächter, S. (2017). Data from: Antisocial punishment across societies. Dryad. https://doi.org/10.5061/dryad.87301
+- Horton, J., Filippas, A., & Manning, B. (2023). Large language models as simulated economic agents: What can we learn from Homo silicus? NBER Working Paper No. 31122. National Bureau of Economic Research. https://doi.org/10.3386/w31122
 - Manoranjan, V., & Gaikwad, S. N. S. (2026). When identity overrides incentives: Representational choices as governance decisions in multi-agent LLM systems. arXiv:2601.10102
+- Park, J. S., Zou, C. Q., Kamphorst, J., Egan, N., Shaw, A., Hill, B. M., Cai, C., Morris, M. R., Liang, P., Willer, R., & Bernstein, M. S. (2024). LLM agents grounded in self-reports enable general-purpose simulation of individuals. arXiv:2411.10109 (version 3; first posted as "Generative agent simulations of 1,000 people")
 - Teo, P. H. (2026). LLM agents as static level-k players in behavioural games. arXiv:2606.27845
 - Wang, Y., Lester, J., & Srivastava, S. (2026). The story shapes the agent: Narrative priors in LLM behavior. arXiv:2607.18566
 - World Bank (2019). *Doing Business 2020: Comparing business regulation in 190 economies*. Washington, DC: World Bank. https://doi.org/10.1596/978-1-4648-1440-2

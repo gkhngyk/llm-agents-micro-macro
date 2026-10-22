@@ -5,10 +5,10 @@ Culture* (https://doi.org/10.5281/zenodo.23119302). Starting question: does
 group interaction amplify, damp or preserve the effect of an identity
 description on LLM agents, in the repeated public goods game?
 
-Status (2026-10-21): complete. Four studies were run and reported in the
-preprint `paper/preprint_v1.md` (PDF alongside; Zenodo record
-https://doi.org/10.5281/zenodo.23539451). Start with `RELEASE.md` (contents,
-runs, reproduction steps) and the written plans in `prereg/`. The rest of this
+Status (2026-10-22): complete. Four studies were run and reported in the
+preprint `paper/preprint_v2.md` (PDF alongside; Zenodo, all versions:
+https://doi.org/10.5281/zenodo.23539450). Start with `RELEASE.md` (contents,
+versions, runs, reproduction steps) and the written plans in `prereg/`. The rest of this
 README is the engineering notes kept during the work, from the pilot design
 onwards; `notes/BACKGROUND.md` is the design background from before the first
 run.

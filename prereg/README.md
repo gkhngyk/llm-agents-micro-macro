@@ -29,7 +29,7 @@ Rules from here on:
 
 ## Which plan belongs to which study (added 2026-10-21)
 
-| file | in the preprint (`paper/preprint_v1.md`) |
+| file | in the preprint (`paper/preprint_v2.md`) |
 |---|---|
 | `prereg_pilot.md`, `prereg_pilot_ek_yama.md`, `prereg_minipilot.md` | pilots before Study 1 |
 | `prereg_main.md` | Study 1 (the "main experiment") |

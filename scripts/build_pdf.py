@@ -1,7 +1,7 @@
 """Render a paper markdown file to PDF (markdown -> HTML -> WeasyPrint).
 
 Run with a Python that has `markdown` and `weasyprint` (here: /opt/miniconda3/bin/python):
-  python scripts/build_pdf.py paper/preprint_v1.md paper/preprint_v1.pdf
+  python scripts/build_pdf.py paper/preprint_v2.md paper/preprint_v2.pdf
 Images are resolved relative to the markdown file. Strikethrough (~~x~~) is rendered as <del>.
 """
 import re

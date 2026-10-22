@@ -1,13 +1,13 @@
 # Release: "Rules measured in play, not stated in isolation, generate the macro dynamics of LLM agent groups"
 
-Gökhan Geyik (Empler AI). Open preprint with all plans, code, data and reasoning texts. License: CC BY 4.0. Zenodo record: https://doi.org/10.5281/zenodo.23539451.
+Gökhan Geyik (Empler AI). Open preprint with all plans, code, data and reasoning texts. License: CC BY 4.0. Zenodo: version 2, https://doi.org/10.5281/zenodo.23574103 (all versions: https://doi.org/10.5281/zenodo.23539450).
 
 ## What is in the release
 
 Two archives:
 
 - **`publicgoods_repo_<commit>.zip`**: the repository at the release commit, plus `results/`.
-  - `paper/`: the preprint (`preprint_v1.md`, `preprint_v1.pdf`), the supplement (`preprint_v1_supplement.md`, `.pdf`), figures, `paper_numbers.py` and its output `numbers.md`. Every number in the paper is in `numbers.md`; values at rounding ties are listed at its end with their exact values. A Turkish reading copy (`preprint_v1_tr.md`, `.pdf`) is included; the English text is authoritative. Earlier drafts are not included; they remain in the git history.
+  - `paper/`: the preprint (`preprint_v2.md`, `preprint_v2.pdf`), the supplement (`preprint_v2_supplement.md`, `.pdf`), figures, `paper_numbers.py` and its output `numbers.md`. Every number in the paper is in `numbers.md`; values at rounding ties are listed at its end with their exact values. A Turkish reading copy (`preprint_v2_tr.md`, `.pdf`) is included; the English text is authoritative. Earlier drafts are not included; they remain in the git history.
   - `prereg/`: the written plans, one per study, with dated amendments. They were written before the data. They are internal written plans, in Turkish, not entries in a public registry. The plan and forecast of Study 4 were also deposited on Zenodo before its main run: https://doi.org/10.5281/zenodo.23483296.
   - `pgg_game.py`, `pgg_frames.py`, `llm_client.py`, `scripts/runctl.py`: the game engine and the API layer (OpenRouter).
   - `pgg_analysis*.py`: one analysis script per study and exploratory analysis; `tests/`: the test suite (628 tests, no API calls).
@@ -23,6 +23,15 @@ Two archives:
   **Redaction:** in the raw logs, the OpenRouter account identifier contained in rate-limit error messages is replaced by `[REDACTED_ACCOUNT_ID]`, and the author's local paths by `<PROJECT_ROOT>`. Nothing else was changed.
 
 `SHA256SUMS.txt` (in the repository archive as `SHA256SUMS_release.txt`) lists the hash of every file. `SOURCE_COMMIT.txt` (in the repository archive) gives the git commit.
+
+## Versions
+
+| version | date | DOI | git tag | change |
+|---|---|---|---|---|
+| 1 | 2026-10-21 | https://doi.org/10.5281/zenodo.23539451 | `v1` (commit d71798f) | first release |
+| 2 | 2026-10-22 | https://doi.org/10.5281/zenodo.23574103 | `v2` | adds sources for the statement in Section 1 that LLM agents are commonly measured with questions asked in isolation (Aher et al., 2023; Argyle et al., 2023; Horton et al., 2023; Park et al., 2024); paper files renamed `preprint_v2*`; nothing else changed |
+
+The run archive of version 2 is the one of version 1, `publicgoods_runs_d71798f.zip`: the run files did not change, and their hashes are listed in `SHA256SUMS_release.txt` of the version 2 repository archive.
 
 ## Runs
 

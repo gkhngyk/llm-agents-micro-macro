@@ -10,11 +10,11 @@ ORCID: <a href="https://orcid.org/0009-0000-9028-1827">0009-0000-9028-1827</a>
 </div>
 
 <div class="titleblock">
-Ön baskı, sürüm 1 (2026-10-21)<br>
-<a href="https://doi.org/10.5281/zenodo.23539451">https://doi.org/10.5281/zenodo.23539451</a>
+Ön baskı, sürüm 2 (2026-10-22)<br>
+<a href="https://doi.org/10.5281/zenodo.23574103">https://doi.org/10.5281/zenodo.23574103</a>
 </div>
 
-<p class="note"><strong>Türkçe okuma kopyası.</strong> İngilizce ön baskının çevirisidir; resmî metin İngilizcedir. Şekiller İngilizce sürümdekilerin aynısıdır, şekil içindeki yazılar İngilizcedir. Sayılar Türkçe yazımla verilmiştir (ondalık virgül; güven aralıklarında noktalı virgül).</p>
+<p class="note"><strong>Türkçe okuma kopyası.</strong> İngilizce ön baskının çevirisidir; resmî metin İngilizcedir. Şekiller İngilizce sürümdekilerin aynısıdır, şekil içindeki yazılar İngilizcedir. Sayılar Türkçe yazımla verilmiştir (ondalık virgül; güven aralıklarında noktalı virgül). Sürüm 2, Bölüm 1'deki "LLM ajanları çoğu zaman tek başına sorulan sorularla ölçülür" ifadesine kaynak ekler; başka bir şey değişmedi. Sürüm 1: https://doi.org/10.5281/zenodo.23539451; bütün sürümler: https://doi.org/10.5281/zenodo.23539450.</p>
 
 ---
 
@@ -26,7 +26,7 @@ ORCID: <a href="https://orcid.org/0009-0000-9028-1827">0009-0000-9028-1827</a>
 
 ## 1. Giriş
 
-Ajan tabanlı sosyal bilim bir makro örüntüyü mikro kurallardan "büyüterek" açıklar: bir makro örüntü ancak belirli mikro kuralları izleyen bir ajan nüfusu onu üretebiliyorsa açıklanmış sayılır ("büyütemediysen açıklamamışsındır"; Epstein, 1999). Üretken ajan tabanlı modeller (GABM), elle yazılmış kuralların yerine bir rol oynamaya yönlendirilmiş dil modellerini koyar. Mikro kurallar artık yazılmaz; ölçülmeleri gerekir. Bunları ölçmenin yaygın yolu, ajana tarif edilen bir durumda ne yapacağını sormaktır. Bu da mikro–makro sorusunu yeni bir biçimde ortaya çıkarır: bir LLM ajanının tek başına söyledikleri, bu tür ajanlardan oluşan bir nüfusun yaptıklarını üretir mi?
+Ajan tabanlı sosyal bilim bir makro örüntüyü mikro kurallardan "büyüterek" açıklar: bir makro örüntü ancak belirli mikro kuralları izleyen bir ajan nüfusu onu üretebiliyorsa açıklanmış sayılır ("büyütemediysen açıklamamışsındır"; Epstein, 1999). Üretken ajan tabanlı modeller (GABM), elle yazılmış kuralların yerine bir rol oynamaya yönlendirilmiş dil modellerini koyar. Mikro kurallar artık yazılmaz; ölçülmeleri gerekir. Bunları ölçmenin yaygın yolu, ajana tarif edilen bir durumda ne yapacağını sormaktır; LLM ajanlarını insanlarla karşılaştıran çalışmalar bunu anket sorularıyla (Argyle ve ark., 2023; Park ve ark., 2024) ve ekonomik oyunlarda ve klasik deneylerde tek seferlik kararlarla (Aher ve ark., 2023; Horton ve ark., 2023) yapar. Bu da mikro–makro sorusunu yeni bir biçimde ortaya çıkarır: bir LLM ajanının tek başına söyledikleri, bu tür ajanlardan oluşan bir nüfusun yaptıklarını üretir mi?
 
 İnsanlar için kamu malı oyunu klasik bir cevap verir. Fischbacher, Gächter ve Fehr (2001) *katkı çizelgelerini* (bir kişinin, ötekilerin her olası ortalama katkısına karşılık ne kadar katkı vereceği) topladı ve deneklerinin yaklaşık yarısının koşullu işbirlikçi, yaklaşık üçte birinin bedavacı olduğunu buldu. Fischbacher ve Gächter (2010), bu çizelgelerin beklentilerle birlikte tekrarlı oyunda işbirliğinin düşüşünü açıkladığını gösterdi. Beyan edilen koşullu kurallar bireyi gruba bağlar.
 
@@ -426,12 +426,14 @@ Ajan tabanlı sosyal bilimin diliyle, bu makro özellikler mikro kurallar taraf�
 
 ## 10. Veri ve kodun erişilebilirliği
 
-Bu ön baskı, eki, bütün planlar ve ekleri, kod, ayarlar, istem çerçeveleri ve kimlik kartları, dondurulmuş kural tabloları ve tahminler, analiz çıktıları ve şekil betikleri ile bütün kararlar ve muhakeme metinleri https://doi.org/10.5281/zenodo.23539451 adresinde birlikte arşivlenmiştir (içerik ve yeniden üretme adımları `RELEASE.md`'de). Git geçmişi https://github.com/gkhngyk/llm-agents-micro-macro adresinde açıktır; planların, Çalışma 3'ün dondurulmuş kuralının ve Çalışma 4'ün tahmininin ne zaman commit edildiğini gösterir ve her koşunun kaydettiği kod sürümünü içerir. Çalışma 4'ün planı ve tahmini, ana koşusundan önce ayrıca kaydedildi (Geyik, 2026b). Ham API kayıtları hesap kimliği çıkarılarak yayımlanmıştır. Ek (`paper/preprint_v1_supplement.md`) kimlik ve etkileşim ayrıntılarını (S1–S2), hücre düzeyindeki makro yapıyı (S3) ve Çalışma 4 ayrıntılarını (S4) içerir.
+Bu ön baskı, eki, bütün planlar ve ekleri, kod, ayarlar, istem çerçeveleri ve kimlik kartları, dondurulmuş kural tabloları ve tahminler, analiz çıktıları ve şekil betikleri ile bütün kararlar ve muhakeme metinleri https://doi.org/10.5281/zenodo.23574103 adresinde (bütün sürümler: https://doi.org/10.5281/zenodo.23539450) birlikte arşivlenmiştir (içerik ve yeniden üretme adımları `RELEASE.md`'de). Git geçmişi https://github.com/gkhngyk/llm-agents-micro-macro adresinde açıktır; planların, Çalışma 3'ün dondurulmuş kuralının ve Çalışma 4'ün tahmininin ne zaman commit edildiğini gösterir ve her koşunun kaydettiği kod sürümünü içerir. Çalışma 4'ün planı ve tahmini, ana koşusundan önce ayrıca kaydedildi (Geyik, 2026b). Ham API kayıtları hesap kimliği çıkarılarak yayımlanmıştır. Ek (`paper/preprint_v2_supplement.md`) kimlik ve etkileşim ayrıntılarını (S1–S2), hücre düzeyindeki makro yapıyı (S3) ve Çalışma 4 ayrıntılarını (S4) içerir.
 
 ## Kaynaklar
 
 Kaynakça İngilizce sürümdekiyle aynıdır.
 
+- Aher, G. V., Arriaga, R. I., & Kalai, A. T. (2023). Using large language models to simulate multiple humans and replicate human subject studies. In *Proceedings of the 40th International Conference on Machine Learning* (PMLR, Vol. 202, pp. 337–371). https://proceedings.mlr.press/v202/aher23a.html
+- Argyle, L. P., Busby, E. C., Fulda, N., Gubler, J. R., Rytting, C., & Wingate, D. (2023). Out of one, many: Using language models to simulate human samples. *Political Analysis*, 31(3), 337–351. https://doi.org/10.1017/pan.2023.2
 - Bedau, M. A. (1997). Weak emergence. *Noûs*, 31(s11), 375–399. https://doi.org/10.1111/0029-4624.31.s11.17
 - Bin Tareaf, R. (2026). Benchmarking large language model agent societies against human behavioural distributions. arXiv:2608.28182
 - Epstein, J. M. (1999). Agent-based computational models and generative social science. *Complexity*, 4(5), 41–60. https://doi.org/10.1002/(SICI)1099-0526(199905/06)4:5<41::AID-CPLX9>3.0.CO;2-F
@@ -443,7 +445,9 @@ Kaynakça İngilizce sürümdekiyle aynıdır.
 - Granovetter, M. (1978). Threshold models of collective behavior. *American Journal of Sociology*, 83(6), 1420–1443. https://doi.org/10.1086/226707
 - Herrmann, B., Thöni, C., & Gächter, S. (2008). Antisocial punishment across societies. *Science*, 319(5868), 1362–1367. https://doi.org/10.1126/science.1153808
 - Herrmann, B., Thöni, C., & Gächter, S. (2017). Data from: Antisocial punishment across societies. Dryad. https://doi.org/10.5061/dryad.87301
+- Horton, J., Filippas, A., & Manning, B. (2023). Large language models as simulated economic agents: What can we learn from Homo silicus? NBER Working Paper No. 31122. National Bureau of Economic Research. https://doi.org/10.3386/w31122
 - Manoranjan, V., & Gaikwad, S. N. S. (2026). When identity overrides incentives: Representational choices as governance decisions in multi-agent LLM systems. arXiv:2601.10102
+- Park, J. S., Zou, C. Q., Kamphorst, J., Egan, N., Shaw, A., Hill, B. M., Cai, C., Morris, M. R., Liang, P., Willer, R., & Bernstein, M. S. (2024). LLM agents grounded in self-reports enable general-purpose simulation of individuals. arXiv:2411.10109 (version 3; first posted as "Generative agent simulations of 1,000 people")
 - Teo, P. H. (2026). LLM agents as static level-k players in behavioural games. arXiv:2606.27845
 - Wang, Y., Lester, J., & Srivastava, S. (2026). The story shapes the agent: Narrative priors in LLM behavior. arXiv:2607.18566
 - World Bank (2019). *Doing Business 2020: Comparing business regulation in 190 economies*. Washington, DC: World Bank. https://doi.org/10.1596/978-1-4648-1440-2

@@ -8,11 +8,11 @@ ORCID: <a href="https://orcid.org/0009-0000-9028-1827">0009-0000-9028-1827</a>
 </div>
 
 <div class="titleblock">
-Supplement to preprint version 1 (2026-10-21)<br>
-<a href="https://doi.org/10.5281/zenodo.23539451">https://doi.org/10.5281/zenodo.23539451</a>
+Supplement to preprint version 2 (2026-10-22)<br>
+<a href="https://doi.org/10.5281/zenodo.23574103">https://doi.org/10.5281/zenodo.23574103</a>
 </div>
 
-<p class="note">Numbers are taken from the result files; most are printed by <code>paper/paper_numbers.py</code> (<code>paper/numbers.md</code>). Table 1 is in the main text.</p>
+<p class="note">Numbers are taken from the result files; most are printed by <code>paper/paper_numbers.py</code> (<code>paper/numbers.md</code>). Table 1 is in the main text. The supplement is unchanged since version 1 except for this title page.</p>
 
 ## S1. Identity: city names make no detectable difference; value sentences act through their wording
 

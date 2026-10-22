@@ -1,9 +1,9 @@
 # project-publicgoods
 
 Second study with Gökhan Geyik (Empler AI), following the published
-Ultimatum Game paper. Status as of 2026-10-21: **four studies run, preprint
-v1 written** (`paper/preprint_v1.md`, Zenodo
-https://doi.org/10.5281/zenodo.23539451); release contents and reproduction
+Ultimatum Game paper. Status as of 2026-10-22: **four studies run, preprint
+published, version 2** (`paper/preprint_v2.md`; Zenodo, all versions:
+https://doi.org/10.5281/zenodo.23539450); release contents, versions and reproduction
 steps in `RELEASE.md`.
 
 For the design background from before the first run, read
